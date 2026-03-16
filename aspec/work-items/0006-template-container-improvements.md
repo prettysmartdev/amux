@@ -21,6 +21,7 @@ have an efficient and secure development environment
 ## Implementation Details:
 - update all templates for Dockerfile.dev to use the `debian-slim` base image
 - wherever possible, use apt-get or direct install for code agents rather than npm or any other method
+- there is a bug when the `ready` command: if an existing Dockerfile.dev exists, it is overwritten with the template. Fix that bug.
 
 
 ## Edge Case Considerations:

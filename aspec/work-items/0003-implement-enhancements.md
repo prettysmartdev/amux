@@ -33,6 +33,7 @@ work safely with my code agents within a containerized environment
 - If the user's input is being captured by the running process, ensure that the process input takes precedence over window navigation.
 - Enable mouse scrolling within the TUI to ensure the user can always navigate the window, even if the running process is capturing keyboard input.
 - Ensure that typing, arrow keys and keyboard shortcuts such as ctrl+o will work within the TUI and are passed properly to the running process.
+- Ensure that any host-machine agent settings files/folders are mounted as read-only and cannot be modified or deleted by the agent running within the container.
 
 ## Test Considerations:
 - Ensure parity between the CLI and TUI versions of the subcommand. The only difference should be Claude being

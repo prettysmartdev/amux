@@ -1,10 +1,10 @@
 pub mod input;
 mod pty;
-mod render;
+pub mod render;
 pub mod state;
 
 use crate::cli::Agent;
-use crate::commands::auth::{agent_keychain_vars, apply_auth_decision};
+use crate::commands::auth::{agent_keychain_credentials, apply_auth_decision};
 use crate::commands::implement::{
     agent_entrypoint, agent_entrypoint_non_interactive, find_work_item, parse_work_item,
 };
@@ -16,7 +16,8 @@ use crate::config::load_repo_config;
 use crate::docker;
 use crate::tui::input::Action;
 use crate::tui::pty::{spawn_text_command, PtySession};
-use crate::tui::state::{App, Dialog, PendingCommand, ReadyPhase};
+use crate::tui::render::calculate_container_inner_size;
+use crate::tui::state::{App, ContainerWindowState, Dialog, PendingCommand, ReadyPhase};
 use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind},
@@ -68,25 +69,45 @@ where
                 Event::Mouse(mouse) => {
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
-                            let max = app.output_lines.len();
-                            if app.scroll_offset < max {
-                                app.scroll_offset = app.scroll_offset.saturating_add(3);
+                            // When the container is maximized, scrolling is handled by the
+                            // application inside the container (via the vt100 emulator).
+                            if app.container_window != ContainerWindowState::Maximized {
+                                let max = app.output_lines.len();
+                                if app.scroll_offset < max {
+                                    app.scroll_offset = app.scroll_offset.saturating_add(3);
+                                }
                             }
                         }
                         MouseEventKind::ScrollDown => {
-                            app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                            if app.container_window != ContainerWindowState::Maximized {
+                                app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                            }
                         }
                         _ => {}
                     }
                 }
                 Event::Resize(cols, rows) => {
                     if let Some(ref pty) = app.pty {
-                        pty.resize(PtySize {
-                            rows,
-                            cols,
-                            pixel_width: 0,
-                            pixel_height: 0,
-                        });
+                        if app.container_window != ContainerWindowState::Hidden {
+                            // Resize the PTY and vt100 parser to match the container inner area.
+                            let (inner_cols, inner_rows) = calculate_container_inner_size(cols, rows);
+                            pty.resize(PtySize {
+                                rows: inner_rows,
+                                cols: inner_cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                            if let Some(ref mut parser) = app.vt100_parser {
+                                parser.set_size(inner_rows, inner_cols);
+                            }
+                        } else {
+                            pty.resize(PtySize {
+                                rows,
+                                cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -252,18 +273,8 @@ async fn show_pre_command_dialogs(app: &mut App) {
     }
     app.pending_mount_path = Some(git_root.clone());
 
-    // Check agent auth.
-    let config = load_repo_config(&git_root).unwrap_or_default();
-    let agent = config.agent.unwrap_or_else(|| "claude".into());
-    if config.auto_agent_auth_accepted.is_none() {
-        app.dialog = Dialog::AgentAuth {
-            agent,
-            git_root,
-        };
-        return; // Wait for user choice.
-    }
-
-    // No dialogs needed; launch directly.
+    // Auto-passthrough: no agent auth dialog needed. Credentials are always
+    // read from the keychain automatically.
     launch_pending_command(app).await;
 }
 
@@ -296,11 +307,12 @@ async fn launch_ready(app: &mut App) {
     let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
     let mount_path = app.pending_mount_path.take().unwrap_or_else(|| git_root.clone());
 
-    let env_vars = if config.auto_agent_auth_accepted == Some(true) {
-        agent_keychain_vars(&agent_name)
-    } else {
-        vec![]
-    };
+    // Auto-passthrough: always pass credentials from keychain if available.
+    let credentials = agent_keychain_credentials(&agent_name);
+    let env_vars = credentials.env_vars;
+
+    // Prepare host settings (sanitized config files in a temp dir).
+    app.host_settings = docker::HostSettings::prepare(&agent_name);
 
     let opts = app.ready_opts.clone();
 
@@ -316,7 +328,7 @@ async fn launch_ready(app: &mut App) {
     if !opts.refresh {
         app.ready_phase = ReadyPhase::Inactive; // No multi-phase needed.
         spawn_text_command(tx, exit_tx, move |sink| async move {
-            let _ = ready::run_with_sink(&sink, mount_path, env_vars, &opts).await?;
+            let _ = ready::run_with_sink(&sink, mount_path, env_vars, &opts, None).await?;
             Ok(())
         });
     } else {
@@ -338,6 +350,7 @@ async fn check_ready_continuation(app: &mut App) {
                 app.ready_phase = ReadyPhase::Inactive;
                 app.ready_ctx = None;
                 app.ready_ctx_rx = None;
+                app.host_settings = None;
                 return;
             }
             // The context should have arrived via the channel by now.
@@ -374,9 +387,11 @@ async fn check_ready_continuation(app: &mut App) {
             if matches!(app.phase, state::ExecutionPhase::Error { .. }) {
                 app.ready_phase = ReadyPhase::Inactive;
                 app.ready_ctx = None;
+                app.host_settings = None;
                 return;
             }
-            // Launch post-audit.
+            // Launch post-audit (image rebuild — no container, no settings needed).
+            app.host_settings = None;
             launch_ready_post_audit(app);
         }
         ReadyPhase::PostAudit => {
@@ -399,23 +414,26 @@ fn launch_ready_audit(app: &mut App) {
         }
     };
 
+    let container_name = docker::generate_container_name();
     let entrypoint = ready::audit_entrypoint(&ctx.agent_name);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    let config_dir = docker::claude_config_dir();
     let docker_args = docker::build_run_args_pty(
         &ctx.image_tag,
         &ctx.mount_path,
         &entrypoint_refs,
         &ctx.env_vars,
-        config_dir.as_deref(),
+        Some(&container_name),
+        app.host_settings.as_ref(),
     );
     let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
 
-    let terminal_area = (80u16, 40u16);
+    // Use actual terminal dimensions for the PTY.
+    let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
     let size = PtySize {
-        rows: terminal_area.1,
-        cols: terminal_area.0,
+        rows: inner_rows,
+        cols: inner_cols,
         pixel_width: 0,
         pixel_height: 0,
     };
@@ -423,10 +441,15 @@ fn launch_ready_audit(app: &mut App) {
     app.ready_phase = ReadyPhase::Audit;
     app.continue_command("ready (audit)".to_string());
 
+    // Activate the container window.
+    let display_name = state::agent_display_name(&ctx.agent_name).to_string();
+    app.start_container(container_name.clone(), display_name, inner_cols, inner_rows);
+
     match PtySession::spawn("docker", &docker_str_refs, size) {
         Ok((session, pty_rx)) => {
             app.pty = Some(session);
             app.pty_rx = Some(pty_rx);
+            app.stats_rx = Some(spawn_stats_poller(container_name));
         }
         Err(e) => {
             app.push_output(format!("Failed to launch audit container: {}", e));
@@ -446,6 +469,9 @@ fn launch_ready_audit_captured(app: &mut App) {
         }
     };
 
+    // Move host_settings into the task so the temp dir lives until the container exits.
+    let host_settings = app.host_settings.take();
+
     app.ready_phase = ReadyPhase::Audit;
     app.continue_command("ready (audit - non-interactive)".to_string());
 
@@ -456,13 +482,12 @@ fn launch_ready_audit_captured(app: &mut App) {
     spawn_text_command(tx, exit_tx, move |sink| async move {
         let entrypoint = ready::audit_entrypoint_non_interactive(&ctx.agent_name);
         let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
-        let config_dir = docker::claude_config_dir();
         let (_cmd, output) = docker::run_container_captured(
             &ctx.image_tag,
             &ctx.mount_path,
             &entrypoint_refs,
             &ctx.env_vars,
-            config_dir.as_deref(),
+            host_settings.as_ref(),
         )?;
         for line in output.lines() {
             sink.println(line);
@@ -522,12 +547,12 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool) 
     let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
     let mount_path = app.pending_mount_path.take().unwrap_or_else(|| git_root.clone());
 
-    // Resolve credential env vars based on saved preference.
-    let env_vars = if config.auto_agent_auth_accepted == Some(true) {
-        agent_keychain_vars(&agent_name)
-    } else {
-        vec![]
-    };
+    // Auto-passthrough: always pass credentials from keychain if available.
+    let credentials = agent_keychain_credentials(&agent_name);
+    let env_vars = credentials.env_vars;
+
+    // Prepare host settings (sanitized config files in a temp dir).
+    app.host_settings = docker::HostSettings::prepare(&agent_name);
 
     let entrypoint = if non_interactive {
         agent_entrypoint_non_interactive(&agent_name, work_item)
@@ -537,13 +562,15 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool) 
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
     let image_tag = docker::project_image_tag(&git_root);
-    let config_dir = docker::claude_config_dir();
+
+    // Generate a container name for stats polling.
+    let container_name = docker::generate_container_name();
 
     // Show the full Docker CLI command in the execution window (with masked env values).
     let display_args = if non_interactive {
-        docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, config_dir.as_deref())
+        docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.host_settings.as_ref())
     } else {
-        docker::build_run_args_pty_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, config_dir.as_deref())
+        docker::build_run_args_pty_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, Some(&container_name), app.host_settings.as_ref())
     };
     let cmd_display = docker::format_run_cmd(&display_args);
 
@@ -553,6 +580,8 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool) 
 
     if non_interactive {
         app.push_output("Tip: remove --non-interactive to interact with the agent directly.");
+        // Move host_settings into the task so the temp dir lives until the container exits.
+        let host_settings = app.host_settings.take();
         // Run captured in a text command.
         let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
         app.exit_rx = Some(exit_rx);
@@ -561,13 +590,12 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool) 
         spawn_text_command(tx, exit_tx, move |sink| async move {
             let entrypoint = agent_entrypoint_non_interactive(&agent_name, work_item);
             let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
-            let config_dir = docker::claude_config_dir();
             let (_cmd, output) = docker::run_container_captured(
                 &image_tag,
                 &mount_str,
                 &entrypoint_refs,
                 &env_vars,
-                config_dir.as_deref(),
+                host_settings.as_ref(),
             )?;
             for line in output.lines() {
                 sink.println(line);
@@ -575,26 +603,34 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool) 
             Ok(())
         });
     } else {
-        // Print interactive notice.
+        // Print interactive notice to the outer window.
         let sink = crate::commands::output::OutputSink::Channel(app.output_tx.clone());
         print_interactive_notice(&sink, &agent_name);
 
         let docker_args =
-            docker::build_run_args_pty(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, config_dir.as_deref());
+            docker::build_run_args_pty(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, Some(&container_name), app.host_settings.as_ref());
         let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
 
-        let terminal_area = (80u16, 40u16); // fallback; real size set on first resize event
+        // Use actual terminal dimensions for the PTY.
+        let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
         let size = PtySize {
-            rows: terminal_area.1,
-            cols: terminal_area.0,
+            rows: inner_rows,
+            cols: inner_cols,
             pixel_width: 0,
             pixel_height: 0,
         };
+
+        // Activate the container window.
+        let display_name = state::agent_display_name(&agent_name).to_string();
+        app.start_container(container_name.clone(), display_name, inner_cols, inner_rows);
 
         match PtySession::spawn("docker", &docker_str_refs, size) {
             Ok((session, pty_rx)) => {
                 app.pty = Some(session);
                 app.pty_rx = Some(pty_rx);
+                // Start Docker stats polling.
+                app.stats_rx = Some(spawn_stats_poller(container_name));
             }
             Err(e) => {
                 app.push_output(format!("Failed to launch container: {}", e));
@@ -602,6 +638,34 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool) 
             }
         }
     }
+}
+
+/// Spawn a background task that polls Docker stats every 5 seconds.
+fn spawn_stats_poller(
+    container_name: String,
+) -> tokio::sync::mpsc::UnboundedReceiver<docker::ContainerStats> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let name = container_name.clone();
+            let stats = tokio::task::spawn_blocking(move || docker::query_container_stats(&name))
+                .await;
+            match stats {
+                Ok(Some(s)) => {
+                    if tx.send(s).is_err() {
+                        break;
+                    }
+                }
+                _ => {
+                    // Container may not be running yet or has exited.
+                    // If the receiver is dropped, the send will fail and we'll break.
+                }
+            }
+        }
+    });
+    rx
 }
 
 /// Launch the `new` command after collecting kind and title from the dialog.

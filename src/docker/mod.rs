@@ -2,6 +2,222 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Docker container stats returned by `docker stats`.
+#[derive(Debug, Clone)]
+pub struct ContainerStats {
+    pub name: String,
+    pub cpu_percent: String,
+    pub memory: String,
+}
+
+/// Host-machine agent settings prepared for injection into a Docker container.
+///
+/// Stores sanitized config files in a temporary directory. The directory is
+/// bind-mounted into the container as `/root/.claude.json` and `/root/.claude`.
+/// The temp directory is automatically cleaned up when this struct is dropped
+/// (RAII via `tempfile::TempDir`).
+pub struct HostSettings {
+    /// Kept alive so the temp dir survives as long as the container runs.
+    _temp_dir: tempfile::TempDir,
+    /// Path to the sanitized `.claude.json` inside the temp dir.
+    pub config_path: PathBuf,
+    /// Path to the copied `.claude/` directory inside the temp dir.
+    pub claude_dir_path: PathBuf,
+}
+
+/// Top-level entries in `~/.claude/` that are large, host-specific, or
+/// irrelevant inside a container. Everything else is copied.
+const CLAUDE_DIR_DENYLIST: &[&str] = &[
+    "projects",
+    "sessions",
+    "session-env",
+    "debug",
+    "file-history",
+    "history.jsonl",
+    "telemetry",
+    "downloads",
+    "ide",
+    "shell-snapshots",
+    "paste-cache",
+];
+
+impl HostSettings {
+    /// Reads and sanitizes host agent settings for container injection.
+    ///
+    /// - Reads `~/.claude.json`, strips `oauthAccount`, adds `/workspace` project trust
+    /// - Copies `~/.claude/` (filtered) into a temp directory
+    ///
+    /// Returns `None` if the agent is not `claude` or the host has no config.
+    pub fn prepare(agent: &str) -> Option<Self> {
+        if agent != "claude" {
+            return None;
+        }
+
+        let home = dirs::home_dir()?;
+        let host_config_file = home.join(".claude.json");
+        if !host_config_file.exists() {
+            return None;
+        }
+
+        let temp_dir = tempfile::TempDir::new().ok()?;
+
+        // Sanitize .claude.json — strip oauthAccount to prevent broken
+        // OAuth state (tokens are in macOS keychain, inaccessible from container).
+        let raw = std::fs::read_to_string(&host_config_file).ok()?;
+        let mut parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        if let Some(obj) = parsed.as_object_mut() {
+            obj.remove("oauthAccount");
+
+            // Ensure /workspace project trust for the container environment.
+            // Without this, Claude Code shows the trust dialog inside the container.
+            let projects = obj
+                .entry("projects")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(projects_obj) = projects.as_object_mut() {
+                projects_obj.insert(
+                    "/workspace".to_string(),
+                    serde_json::json!({"hasTrustDialogAccepted": true}),
+                );
+            }
+        }
+        let config_json = serde_json::to_string(&parsed).ok()?;
+        let config_path = temp_dir.path().join("claude.json");
+        std::fs::write(&config_path, &config_json).ok()?;
+
+        // Copy ~/.claude/ directory with denylist filter.
+        let claude_dir_path = temp_dir.path().join("dot-claude");
+        let host_claude_dir = home.join(".claude");
+        if host_claude_dir.is_dir() {
+            copy_dir_filtered(&host_claude_dir, &claude_dir_path, CLAUDE_DIR_DENYLIST).ok()?;
+        } else {
+            // Create an empty directory so the mount target exists.
+            std::fs::create_dir_all(&claude_dir_path).ok()?;
+        }
+
+        Some(HostSettings {
+            _temp_dir: temp_dir,
+            config_path,
+            claude_dir_path,
+        })
+    }
+}
+
+/// Recursively copy `src` to `dst`, skipping top-level entries in `denylist`.
+fn copy_dir_filtered(src: &Path, dst: &Path, denylist: &[&str]) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if denylist.iter().any(|d| *d == name_str.as_ref()) {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+        if src_path.is_dir() {
+            // No denylist for nested directories — only filter at the top level.
+            copy_dir_filtered(&src_path, &dst_path, &[])?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Appends `-v` bind-mount args for host settings into the container.
+fn append_settings_mounts(args: &mut Vec<String>, settings: &HostSettings) {
+    args.push("-v".into());
+    args.push(format!(
+        "{}:/root/.claude.json",
+        settings.config_path.display()
+    ));
+    args.push("-v".into());
+    args.push(format!(
+        "{}:/root/.claude",
+        settings.claude_dir_path.display()
+    ));
+}
+
+/// Appends display-safe bind-mount args for host settings (paths shortened).
+fn append_settings_mounts_display(args: &mut Vec<String>) {
+    args.push("-v".into());
+    args.push("<settings>:/root/.claude.json".into());
+    args.push("-v".into());
+    args.push("<settings>:/root/.claude".into());
+}
+
+/// Appends the container image and entrypoint to the args list.
+fn append_entrypoint(args: &mut Vec<String>, image: &str, entrypoint: &[&str]) {
+    args.push(image.into());
+    args.extend(entrypoint.iter().map(|s| s.to_string()));
+}
+
+/// Generate a unique container name for aspec-managed containers.
+pub fn generate_container_name() -> String {
+    use std::time::SystemTime;
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let pid = std::process::id();
+    format!("aspec-{}-{}", pid, ts.subsec_nanos())
+}
+
+/// Query Docker stats for a named container. Returns None if the container
+/// is not running or the stats command fails.
+pub fn query_container_stats(name: &str) -> Option<ContainerStats> {
+    let output = Command::new("docker")
+        .args([
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}",
+            name,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let parts: Vec<&str> = line.split('|').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some(ContainerStats {
+        name: parts[0].to_string(),
+        cpu_percent: parts[1].trim().to_string(),
+        memory: parts[2]
+            .split('/')
+            .next()
+            .unwrap_or("?")
+            .trim()
+            .to_string(),
+    })
+}
+
+/// Parse a CPU percentage string like "5.23%" into a f64 (5.23).
+pub fn parse_cpu_percent(s: &str) -> f64 {
+    s.trim_end_matches('%').trim().parse::<f64>().unwrap_or(0.0)
+}
+
+/// Parse a memory string like "200MiB" or "1.5GiB" into megabytes as f64.
+pub fn parse_memory_mb(s: &str) -> f64 {
+    let s = s.trim();
+    if let Some(val) = s.strip_suffix("GiB") {
+        val.trim().parse::<f64>().unwrap_or(0.0) * 1024.0
+    } else if let Some(val) = s.strip_suffix("MiB") {
+        val.trim().parse::<f64>().unwrap_or(0.0)
+    } else if let Some(val) = s.strip_suffix("KiB") {
+        val.trim().parse::<f64>().unwrap_or(0.0) / 1024.0
+    } else if let Some(val) = s.strip_suffix("B") {
+        val.trim().parse::<f64>().unwrap_or(0.0) / (1024.0 * 1024.0)
+    } else {
+        0.0
+    }
+}
+
 /// Appends `-e KEY=VALUE` args for each environment variable.
 fn append_env_args(args: &mut Vec<String>, env_vars: &[(String, String)]) {
     for (key, value) in env_vars {
@@ -18,42 +234,6 @@ fn append_env_args_display(args: &mut Vec<String>, env_vars: &[(String, String)]
     }
 }
 
-/// Appends `-v host:container` volume mounts for the agent's config directory
-/// and config file.
-///
-/// Claude Code uses two locations:
-/// - `~/.claude/`     — settings directory (preferences, plugins, session state)
-/// - `~/.claude.json` — primary config file (onboarding state, model prefs, etc.)
-///
-/// Both are mounted so the containerized agent inherits the host's settings
-/// and skips first-run setup.
-fn append_config_mount(args: &mut Vec<String>, agent_config_dir: Option<&Path>) {
-    if let Some(dir) = agent_config_dir {
-        args.push("-v".into());
-        args.push(format!("{}:/root/.claude", dir.display()));
-
-        // Also mount ~/.claude.json if it exists alongside the config directory.
-        if let Some(parent) = dir.parent() {
-            let config_file = parent.join(".claude.json");
-            if config_file.exists() {
-                args.push("-v".into());
-                args.push(format!("{}:/root/.claude.json", config_file.display()));
-            }
-        }
-    }
-}
-
-/// Returns the host path to the Claude Code config directory (`~/.claude`),
-/// if it exists. Used to mount settings into the container.
-pub fn claude_config_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let dir = home.join(".claude");
-    if dir.exists() {
-        Some(dir)
-    } else {
-        None
-    }
-}
 
 /// Formats a `docker build` invocation as a single-line CLI string for display.
 pub fn format_build_cmd(tag: &str, dockerfile: &str, context: &str) -> String {
@@ -211,7 +391,7 @@ pub fn run_container_captured(
     host_path: &str,
     entrypoint: &[&str],
     env_vars: &[(String, String)],
-    agent_config_dir: Option<&Path>,
+    host_settings: Option<&HostSettings>,
 ) -> Result<(String, String)> {
     let mut args: Vec<String> = vec![
         "run".into(),
@@ -222,14 +402,14 @@ pub fn run_container_captured(
         "/workspace".into(),
     ];
 
-    append_config_mount(&mut args, agent_config_dir);
+    if let Some(settings) = host_settings {
+        append_settings_mounts(&mut args, settings);
+    }
     append_env_args(&mut args, env_vars);
-
-    args.push(image.into());
-    args.extend(entrypoint.iter().map(|s| s.to_string()));
+    append_entrypoint(&mut args, image, entrypoint);
 
     let cmd_line = format_run_cmd(&build_run_args_display(
-        image, host_path, entrypoint, env_vars, agent_config_dir,
+        image, host_path, entrypoint, env_vars, host_settings,
     ));
 
     let output = Command::new("docker")
@@ -273,11 +453,11 @@ pub fn run_container(
     host_path: &str,
     entrypoint: &[&str],
     env_vars: &[(String, String)],
-    agent_config_dir: Option<&Path>,
+    host_settings: Option<&HostSettings>,
 ) -> Result<String> {
-    let args = build_run_args(image, host_path, entrypoint, env_vars, agent_config_dir);
+    let args = build_run_args(image, host_path, entrypoint, env_vars, host_settings);
     let cmd_line = format_run_cmd(&build_run_args_display(
-        image, host_path, entrypoint, env_vars, agent_config_dir,
+        image, host_path, entrypoint, env_vars, host_settings,
     ));
 
     let status = Command::new("docker")
@@ -303,7 +483,7 @@ pub fn build_run_args(
     host_path: &str,
     entrypoint: &[&str],
     env_vars: &[(String, String)],
-    agent_config_dir: Option<&Path>,
+    host_settings: Option<&HostSettings>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "run".into(),
@@ -315,11 +495,11 @@ pub fn build_run_args(
         "/workspace".into(),
     ];
 
-    append_config_mount(&mut args, agent_config_dir);
+    if let Some(settings) = host_settings {
+        append_settings_mounts(&mut args, settings);
+    }
     append_env_args(&mut args, env_vars);
-
-    args.push(image.into());
-    args.extend(entrypoint.iter().map(|s| s.to_string()));
+    append_entrypoint(&mut args, image, entrypoint);
     args
 }
 
@@ -329,7 +509,7 @@ pub fn build_run_args_display(
     host_path: &str,
     entrypoint: &[&str],
     env_vars: &[(String, String)],
-    agent_config_dir: Option<&Path>,
+    host_settings: Option<&HostSettings>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "run".into(),
@@ -341,11 +521,11 @@ pub fn build_run_args_display(
         "/workspace".into(),
     ];
 
-    append_config_mount(&mut args, agent_config_dir);
+    if host_settings.is_some() {
+        append_settings_mounts_display(&mut args);
+    }
     append_env_args_display(&mut args, env_vars);
-
-    args.push(image.into());
-    args.extend(entrypoint.iter().map(|s| s.to_string()));
+    append_entrypoint(&mut args, image, entrypoint);
     args
 }
 
@@ -356,28 +536,40 @@ pub fn build_run_args_display(
 /// a container-side TTY, they fall back to non-interactive output mode. The `-t`
 /// here creates a TTY *inside* the container, which is independent of the host-side
 /// PTY that `portable-pty` provides.
+///
+/// When `container_name` is Some, `--name <name>` is added so the container can be
+/// queried for stats while running.
 pub fn build_run_args_pty(
     image: &str,
     host_path: &str,
     entrypoint: &[&str],
     env_vars: &[(String, String)],
-    agent_config_dir: Option<&Path>,
+    container_name: Option<&str>,
+    host_settings: Option<&HostSettings>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "run".into(),
         "--rm".into(),
         "-it".into(),
+    ];
+
+    if let Some(name) = container_name {
+        args.push("--name".into());
+        args.push(name.into());
+    }
+
+    args.extend_from_slice(&[
         "-v".into(),
         format!("{}:/workspace", host_path),
         "-w".into(),
         "/workspace".into(),
-    ];
+    ]);
 
-    append_config_mount(&mut args, agent_config_dir);
+    if let Some(settings) = host_settings {
+        append_settings_mounts(&mut args, settings);
+    }
     append_env_args(&mut args, env_vars);
-
-    args.push(image.into());
-    args.extend(entrypoint.iter().map(|s| s.to_string()));
+    append_entrypoint(&mut args, image, entrypoint);
     args
 }
 
@@ -387,23 +579,32 @@ pub fn build_run_args_pty_display(
     host_path: &str,
     entrypoint: &[&str],
     env_vars: &[(String, String)],
-    agent_config_dir: Option<&Path>,
+    container_name: Option<&str>,
+    host_settings: Option<&HostSettings>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "run".into(),
         "--rm".into(),
         "-it".into(),
+    ];
+
+    if let Some(name) = container_name {
+        args.push("--name".into());
+        args.push(name.into());
+    }
+
+    args.extend_from_slice(&[
         "-v".into(),
         format!("{}:/workspace", host_path),
         "-w".into(),
         "/workspace".into(),
-    ];
+    ]);
 
-    append_config_mount(&mut args, agent_config_dir);
+    if host_settings.is_some() {
+        append_settings_mounts_display(&mut args);
+    }
     append_env_args_display(&mut args, env_vars);
-
-    args.push(image.into());
-    args.extend(entrypoint.iter().map(|s| s.to_string()));
+    append_entrypoint(&mut args, image, entrypoint);
     args
 }
 
@@ -449,9 +650,22 @@ mod tests {
 
     #[test]
     fn pty_args_include_interactive_flag() {
-        let args = build_run_args_pty("img", "/repo", &[], &[], None);
+        let args = build_run_args_pty("img", "/repo", &[], &[], None, None);
         assert!(args.contains(&"-it".to_string()));
         assert!(args.contains(&"--rm".to_string()));
+    }
+
+    #[test]
+    fn pty_args_include_container_name_when_provided() {
+        let args = build_run_args_pty("img", "/repo", &[], &[], Some("aspec-test-123"), None);
+        assert!(args.contains(&"--name".to_string()));
+        assert!(args.contains(&"aspec-test-123".to_string()));
+    }
+
+    #[test]
+    fn pty_args_omit_name_when_none() {
+        let args = build_run_args_pty("img", "/repo", &[], &[], None, None);
+        assert!(!args.contains(&"--name".to_string()));
     }
 
     #[test]
@@ -484,7 +698,7 @@ mod tests {
             ("ANTHROPIC_API_KEY".into(), "sk-ant".into()),
             ("OPENAI_API_KEY".into(), "sk-oai".into()),
         ];
-        let args = build_run_args_pty("img", "/repo", &[], &env, None);
+        let args = build_run_args_pty("img", "/repo", &[], &env, None, None);
         let env_args: Vec<&String> = args
             .iter()
             .filter(|a| a.contains("_API_KEY="))
@@ -503,42 +717,166 @@ mod tests {
     #[test]
     fn pty_display_args_mask_env_values() {
         let env = vec![("OPENAI_API_KEY".into(), "sk-secret".into())];
-        let args = build_run_args_pty_display("img", "/repo", &[], &env, None);
+        let args = build_run_args_pty_display("img", "/repo", &[], &env, None, None);
         assert!(args.contains(&"OPENAI_API_KEY=***".to_string()));
         assert!(!args.iter().any(|a| a.contains("sk-secret")));
     }
 
     #[test]
-    fn config_dir_mounted_when_provided() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Create a .claude.json sibling file to test both mounts.
-        let parent = tmp.path().parent().unwrap();
-        let config_file = parent.join(".claude.json");
-        let created_file = !config_file.exists();
-        if created_file {
-            std::fs::write(&config_file, "{}").unwrap();
-        }
-
-        let config_path = tmp.path();
-        let args = build_run_args("img", "/repo", &[], &[], Some(config_path));
-
-        // Directory mount
-        let dir_mount = args.iter().find(|a| a.ends_with(":/root/.claude"));
-        assert!(dir_mount.is_some(), "Expected ~/.claude dir mount in args: {:?}", args);
-
-        // File mount (only if .claude.json existed or we created it)
-        let file_mount = args.iter().find(|a| a.ends_with(":/root/.claude.json"));
-        assert!(file_mount.is_some(), "Expected ~/.claude.json file mount in args: {:?}", args);
-
-        if created_file {
-            let _ = std::fs::remove_file(&config_file);
-        }
+    fn generate_container_name_is_unique() {
+        let name1 = generate_container_name();
+        // Small sleep to ensure different nanos
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let name2 = generate_container_name();
+        assert!(name1.starts_with("aspec-"));
+        assert!(name2.starts_with("aspec-"));
+        assert_ne!(name1, name2);
     }
 
     #[test]
-    fn config_dir_omitted_when_none() {
-        let args = build_run_args("img", "/repo", &[], &[], None);
-        assert!(!args.iter().any(|a| a.contains("/root/.claude")));
+    fn parse_cpu_percent_valid() {
+        assert!((parse_cpu_percent("5.23%") - 5.23).abs() < 0.001);
+        assert!((parse_cpu_percent("0.00%") - 0.0).abs() < 0.001);
+        assert!((parse_cpu_percent("100%") - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_cpu_percent_invalid() {
+        assert!((parse_cpu_percent("not-a-number") - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_memory_mb_various_units() {
+        assert!((parse_memory_mb("200MiB") - 200.0).abs() < 0.1);
+        assert!((parse_memory_mb("1.5GiB") - 1536.0).abs() < 0.1);
+        assert!((parse_memory_mb("512KiB") - 0.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn no_settings_mounts_when_none() {
+        let env = vec![("ANTHROPIC_API_KEY".into(), "sk-ant-oat01-test".into())];
+        let args = build_run_args("img", "/repo", &[], &env, None);
+        // Without host_settings, only the workspace mount should be present.
+        let volume_mounts: Vec<&String> = args.iter()
+            .zip(args.iter().skip(1))
+            .filter(|(flag, _)| *flag == "-v")
+            .map(|(_, val)| val)
+            .collect();
+        assert_eq!(volume_mounts.len(), 1, "Expected exactly one volume mount (workspace). Got: {:?}", volume_mounts);
+        assert!(volume_mounts[0].contains(":/workspace"), "Expected workspace mount");
+    }
+
+    #[test]
+    fn host_settings_adds_bind_mounts() {
+        // Create a temporary HostSettings manually for testing.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("claude.json");
+        std::fs::write(&config_path, r#"{"hasCompletedOnboarding":true}"#).unwrap();
+        let claude_dir_path = temp_dir.path().join("dot-claude");
+        std::fs::create_dir_all(&claude_dir_path).unwrap();
+
+        let hs = HostSettings {
+            _temp_dir: temp_dir,
+            config_path: config_path.clone(),
+            claude_dir_path: claude_dir_path.clone(),
+        };
+
+        let args = build_run_args("img", "/repo", &["claude", "--print", "hi"], &[], Some(&hs));
+
+        // Should have bind mounts for .claude.json and .claude/
+        let volume_mounts: Vec<&String> = args.windows(2)
+            .filter(|w| w[0] == "-v")
+            .map(|w| &w[1])
+            .collect();
+        assert_eq!(volume_mounts.len(), 3, "Expected 3 mounts (workspace + config + claude dir). Got: {:?}", volume_mounts);
+        assert!(volume_mounts[0].contains(":/workspace"), "First mount should be workspace");
+        assert!(volume_mounts[1].contains(":/root/.claude.json"), "Second mount should be .claude.json");
+        assert!(volume_mounts[2].contains(":/root/.claude"), "Third mount should be .claude/");
+
+        // No shell wrapper — entrypoint is just image + command directly.
+        let img_pos = args.iter().position(|a| a == "img").unwrap();
+        assert_eq!(args[img_pos + 1], "claude");
+        assert_eq!(args[img_pos + 2], "--print");
+        assert_eq!(args[img_pos + 3], "hi");
+        // Should NOT have "sh" "-c" wrapper
+        assert!(!args[img_pos..].contains(&"sh".to_string()));
+    }
+
+    #[test]
+    fn host_settings_display_shows_mount_placeholders() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("claude.json");
+        std::fs::write(&config_path, r#"{"secret":"data"}"#).unwrap();
+        let claude_dir_path = temp_dir.path().join("dot-claude");
+        std::fs::create_dir_all(&claude_dir_path).unwrap();
+
+        let hs = HostSettings {
+            _temp_dir: temp_dir,
+            config_path,
+            claude_dir_path,
+        };
+
+        let args = build_run_args_display("img", "/repo", &["claude"], &[], Some(&hs));
+        assert!(args.iter().any(|a| a == "<settings>:/root/.claude.json"));
+        assert!(args.iter().any(|a| a == "<settings>:/root/.claude"));
+        assert!(!args.iter().any(|a| a.contains("secret")));
+        // No shell wrapper in display
+        assert!(!args.iter().any(|a| a == "<write-settings-then-exec>"));
+    }
+
+    #[test]
+    fn host_settings_prepare_sanitizes_oauth() {
+        // This test only works on a dev machine with ~/.claude.json present.
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => return,
+        };
+        if !home.join(".claude.json").exists() {
+            return;
+        }
+
+        let hs = HostSettings::prepare("claude");
+        let hs = match hs {
+            Some(h) => h,
+            None => return,
+        };
+
+        // Read the sanitized config from the temp file.
+        let config_json = std::fs::read_to_string(&hs.config_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&config_json).unwrap();
+        assert!(parsed.get("oauthAccount").is_none(), "oauthAccount should be stripped from sanitized config");
+        assert!(parsed.as_object().unwrap().len() > 0, "Sanitized config should not be empty");
+        // Verify /workspace trust is added.
+        assert!(parsed["projects"]["/workspace"]["hasTrustDialogAccepted"].as_bool() == Some(true));
+
+        // Verify the .claude/ directory was copied.
+        assert!(hs.claude_dir_path.is_dir(), "claude dir should exist in temp");
+
+        // Verify denylist entries are not copied.
+        assert!(!hs.claude_dir_path.join("projects").exists(), "projects/ should be denied");
+        assert!(!hs.claude_dir_path.join("sessions").exists(), "sessions/ should be denied");
+    }
+
+    #[test]
+    fn copy_dir_filtered_respects_denylist() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dst = tempfile::TempDir::new().unwrap();
+
+        // Create source structure.
+        std::fs::write(src.path().join("settings.json"), "{}").unwrap();
+        std::fs::create_dir(src.path().join("plugins")).unwrap();
+        std::fs::write(src.path().join("plugins/test.json"), "{}").unwrap();
+        std::fs::create_dir(src.path().join("sessions")).unwrap();
+        std::fs::write(src.path().join("sessions/data.json"), "{}").unwrap();
+        std::fs::write(src.path().join("history.jsonl"), "line1").unwrap();
+
+        let dst_path = dst.path().join("output");
+        copy_dir_filtered(src.path(), &dst_path, &["sessions", "history.jsonl"]).unwrap();
+
+        assert!(dst_path.join("settings.json").exists());
+        assert!(dst_path.join("plugins/test.json").exists());
+        assert!(!dst_path.join("sessions").exists(), "sessions should be filtered");
+        assert!(!dst_path.join("history.jsonl").exists(), "history.jsonl should be filtered");
     }
 
     #[test]

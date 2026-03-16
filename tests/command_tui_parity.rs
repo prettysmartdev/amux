@@ -2,7 +2,10 @@
 ///
 /// These tests call the shared `run_with_sink` / helper functions directly,
 /// confirming that the same code paths are exercised regardless of execution mode.
-use aspec::commands::auth::apply_auth_decision;
+use aspec::commands::auth::{
+    apply_auth_decision, agent_keychain_credentials, read_keychain_raw,
+    AgentCredentials,
+};
 use aspec::commands::implement::{
     agent_entrypoint, agent_entrypoint_non_interactive, find_work_item, implement_prompt,
     parse_work_item,
@@ -53,7 +56,7 @@ async fn ready_via_sink_emits_checking_message() {
 
     let mount_path = PathBuf::from("/tmp");
     let opts = ReadyOptions::default();
-    let _ = ready::run_with_sink(&sink, mount_path, vec![], &opts).await;
+    let _ = ready::run_with_sink(&sink, mount_path, vec![], &opts, None).await;
 
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let has_checking = messages.iter().any(|m| m.contains("Checking"));
@@ -80,7 +83,7 @@ async fn ready_sink_routes_all_output() {
 
     let mount_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"));
     let opts = ReadyOptions::default();
-    let result = ready::run_with_sink(&sink, mount_path, vec![], &opts).await;
+    let result = ready::run_with_sink(&sink, mount_path, vec![], &opts, None).await;
     let _ = result;
 
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -202,7 +205,7 @@ async fn ready_no_refresh_skips_audit_with_message() {
     let (tx, mut rx) = unbounded_channel::<String>();
     let sink = OutputSink::Channel(tx);
     let opts = ReadyOptions { refresh: false, non_interactive: false };
-    let _ = ready::run_with_sink(&sink, git_root.clone(), vec![], &opts).await;
+    let _ = ready::run_with_sink(&sink, git_root.clone(), vec![], &opts, None).await;
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let has_skip = messages.iter().any(|m| m.contains("Skipping"));
     let has_tip = messages.iter().any(|m| m.contains("--refresh"));
@@ -605,4 +608,260 @@ fn autocomplete_new_shows_hint() {
         "Expected hint for 'new' command, got: {:?}",
         sug
     );
+}
+
+// ---------------------------------------------------------------------------
+// 17. Container window state management
+// ---------------------------------------------------------------------------
+
+#[test]
+fn container_window_lifecycle() {
+    use aspec::tui::state::{App, ContainerWindowState, ExecutionPhase};
+
+    let mut app = App::new();
+    assert_eq!(app.container_window, ContainerWindowState::Hidden);
+
+    // Start a container.
+    app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+    app.start_container("aspec-test-123".into(), "Claude Code".into(), 78, 18);
+    assert_eq!(app.container_window, ContainerWindowState::Maximized);
+
+    // Minimize.
+    app.container_window = ContainerWindowState::Minimized;
+    assert_eq!(app.container_window, ContainerWindowState::Minimized);
+
+    // Restore.
+    app.container_window = ContainerWindowState::Maximized;
+    assert_eq!(app.container_window, ContainerWindowState::Maximized);
+
+    // Container exits → summary created, window hidden.
+    app.finish_command(0);
+    assert_eq!(app.container_window, ContainerWindowState::Hidden);
+    assert!(app.last_container_summary.is_some());
+    let summary = app.last_container_summary.as_ref().unwrap();
+    assert_eq!(summary.exit_code, 0);
+    assert_eq!(summary.agent_display_name, "Claude Code");
+    assert_eq!(summary.container_name, "aspec-test-123");
+}
+
+// ---------------------------------------------------------------------------
+// 18. Container window PTY output routing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn container_pty_output_routing() {
+    use aspec::tui::state::{App, ContainerWindowState, ExecutionPhase};
+
+    let mut app = App::new();
+    app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+
+    // Without container window: PTY data goes to output_lines.
+    app.process_pty_data(b"outer line\n");
+    assert!(app.output_lines.iter().any(|l| l == "outer line"));
+    assert!(app.vt100_parser.is_none());
+
+    // Activate container window: PTY data goes to vt100 parser.
+    app.start_container("aspec-test".into(), "Claude Code".into(), 80, 24);
+    assert!(app.vt100_parser.is_some());
+    // Feed data through the vt100 parser (simulating what tick() does).
+    if let Some(ref mut parser) = app.vt100_parser {
+        parser.process(b"container line\r\n");
+    }
+    let screen_text = app.vt100_parser.as_ref().unwrap().screen().contents();
+    assert!(screen_text.contains("container line"), "vt100 screen should contain container output");
+    // The outer window should still have "outer line" from before.
+    assert!(app.output_lines.iter().any(|l| l == "outer line"));
+}
+
+// ---------------------------------------------------------------------------
+// 19. Docker stats parsing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn docker_stats_parsing() {
+    assert!((aspec::docker::parse_cpu_percent("5.23%") - 5.23).abs() < 0.001);
+    assert!((aspec::docker::parse_memory_mb("200MiB") - 200.0).abs() < 0.1);
+    assert!((aspec::docker::parse_memory_mb("1.5GiB") - 1536.0).abs() < 0.1);
+}
+
+// ---------------------------------------------------------------------------
+// 20. Container name generation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn container_name_generation() {
+    let name = aspec::docker::generate_container_name();
+    assert!(name.starts_with("aspec-"));
+}
+
+// ---------------------------------------------------------------------------
+// 21. Duration formatting
+// ---------------------------------------------------------------------------
+
+#[test]
+fn duration_formatting() {
+    use aspec::tui::state::format_duration;
+    assert_eq!(format_duration(0), "0s");
+    assert_eq!(format_duration(45), "45s");
+    assert_eq!(format_duration(60), "1m");
+    assert_eq!(format_duration(3600), "1h");
+    assert_eq!(format_duration(5400), "1h 30m");
+}
+
+// ---------------------------------------------------------------------------
+// 22. Agent display name
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agent_display_names() {
+    use aspec::tui::state::agent_display_name;
+    assert_eq!(agent_display_name("claude"), "Claude Code");
+    assert_eq!(agent_display_name("codex"), "Codex");
+    assert_eq!(agent_display_name("opencode"), "Opencode");
+    assert_eq!(agent_display_name("unknown"), "unknown");
+}
+
+// ---------------------------------------------------------------------------
+// 23. PTY args include container name
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pty_args_container_name() {
+    let args = aspec::docker::build_run_args_pty(
+        "img", "/repo", &[], &[], Some("aspec-test-42"), None,
+    );
+    assert!(args.contains(&"--name".to_string()));
+    assert!(args.contains(&"aspec-test-42".to_string()));
+
+    let args_no_name = aspec::docker::build_run_args_pty(
+        "img", "/repo", &[], &[], None, None,
+    );
+    assert!(!args_no_name.contains(&"--name".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// 24. Container summary with stats history averages
+// ---------------------------------------------------------------------------
+
+#[test]
+fn container_summary_averages_stats() {
+    use aspec::tui::state::{App, ContainerWindowState, ExecutionPhase};
+
+    let mut app = App::new();
+    app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+    app.start_container("aspec-test".into(), "Claude Code".into(), 78, 18);
+
+    // Simulate stats history.
+    if let Some(ref mut info) = app.container_info {
+        info.stats_history.push((10.0, 100.0));
+        info.stats_history.push((20.0, 200.0));
+        info.stats_history.push((30.0, 300.0));
+    }
+
+    app.finish_command(0);
+
+    let summary = app.last_container_summary.as_ref().unwrap();
+    assert_eq!(summary.avg_cpu, "20.0%");
+    assert_eq!(summary.avg_memory, "200MiB");
+}
+
+// ---------------------------------------------------------------------------
+// 25. Auth auto-authorization reads project-local config
+// ---------------------------------------------------------------------------
+
+#[test]
+fn auth_reads_project_local_config() {
+    let tmp = TempDir::new().unwrap();
+
+    // Initially None → prompt should be shown.
+    let config = aspec::config::load_repo_config(tmp.path()).unwrap();
+    assert_eq!(config.auto_agent_auth_accepted, None);
+
+    // Accept → saved to project-local config.
+    apply_auth_decision(tmp.path(), "claude", true).unwrap();
+    let config = aspec::config::load_repo_config(tmp.path()).unwrap();
+    assert_eq!(config.auto_agent_auth_accepted, Some(true));
+
+    // Check that the config file is at the correct path.
+    let config_path = aspec::config::repo_config_path(tmp.path());
+    assert!(config_path.exists());
+    assert!(config_path.to_str().unwrap().contains("aspec/.aspec-cli.json"));
+
+    // Decline → saved as false.
+    apply_auth_decision(tmp.path(), "claude", false).unwrap();
+    let config = aspec::config::load_repo_config(tmp.path()).unwrap();
+    assert_eq!(config.auto_agent_auth_accepted, Some(false));
+}
+
+// ---------------------------------------------------------------------------
+// 26. Keychain credentials returns single CLAUDE_CODE_OAUTH_TOKEN — no files
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keychain_credentials_uses_single_env_var() {
+    let creds = agent_keychain_credentials("claude");
+    // On a dev machine with keychain, exactly one env var should be set.
+    // On CI without keychain, it returns empty.
+    if !creds.env_vars.is_empty() {
+        assert_eq!(creds.env_vars.len(), 1, "Should set exactly one env var");
+        assert_eq!(creds.env_vars[0].0, "CLAUDE_CODE_OAUTH_TOKEN");
+        // Value should be the raw access token string, not JSON.
+        let val = &creds.env_vars[0].1;
+        assert!(val.starts_with("sk-ant-oat"), "Token should be a raw OAuth token, got: {}", val);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 27. Keychain raw JSON includes both access and refresh tokens
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keychain_raw_json_has_required_fields() {
+    if let Some(raw) = read_keychain_raw("claude") {
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let oauth = parsed.get("claudeAiOauth").expect("claudeAiOauth key should exist");
+        assert!(oauth.get("accessToken").is_some(), "accessToken should exist");
+        assert!(oauth.get("refreshToken").is_some(), "refreshToken should exist");
+        assert!(oauth.get("expiresAt").is_some(), "expiresAt should exist");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 28. AgentCredentials default is empty
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agent_credentials_default_is_empty() {
+    let creds = AgentCredentials::default();
+    assert!(creds.env_vars.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// 29. Docker args only mount workspace — no config dirs or credential files
+// ---------------------------------------------------------------------------
+
+#[test]
+fn docker_args_without_settings_has_workspace_mount_only() {
+    let env = vec![("ANTHROPIC_API_KEY".into(), "sk-ant-oat01-test".into())];
+    let args = aspec::docker::build_run_args("img", "/repo", &[], &env, None);
+    // Without host_settings, only the workspace mount should be present.
+    let volume_mounts: Vec<&String> = args.windows(2)
+        .filter(|w| w[0] == "-v")
+        .map(|w| &w[1])
+        .collect();
+    assert_eq!(volume_mounts.len(), 1, "Expected exactly one volume mount (workspace only). Got: {:?}", volume_mounts);
+    assert!(volume_mounts[0].contains(":/workspace"), "The only mount should be the workspace");
+    assert!(!args.iter().any(|a| a.contains("credentials")), "Must not mount any credential files");
+}
+
+// ---------------------------------------------------------------------------
+// 30. Docker display args mask env var values
+// ---------------------------------------------------------------------------
+
+#[test]
+fn docker_display_args_mask_secrets() {
+    let env = vec![("ANTHROPIC_API_KEY".into(), "sk-ant-oat01-secret".into())];
+    let args = aspec::docker::build_run_args_display("img", "/repo", &[], &env, None);
+    assert!(args.contains(&"ANTHROPIC_API_KEY=***".to_string()), "API key should be masked");
+    assert!(!args.iter().any(|a| a.contains("sk-ant-oat01-secret")), "Secret must not appear");
 }

@@ -1,8 +1,10 @@
 use crate::commands::ready::{ReadyContext, ReadyOptions, ReadySummary};
+use crate::docker;
 use crate::tui::pty::PtySession;
 use ratatui::style::Color;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 /// Which widget currently receives keyboard input.
@@ -56,6 +58,66 @@ pub enum PendingCommand {
         work_item: u32,
         non_interactive: bool,
     },
+}
+
+/// State of the container overlay window.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContainerWindowState {
+    /// No container window is visible.
+    Hidden,
+    /// Container window is open and capturing all keyboard input.
+    Maximized,
+    /// Container window is collapsed to a 1-line bar below the outer window.
+    Minimized,
+}
+
+/// Metadata about the currently running (or most recently run) container.
+#[derive(Debug, Clone)]
+pub struct ContainerInfo {
+    pub container_name: String,
+    pub agent_display_name: String,
+    pub start_time: Instant,
+    pub latest_stats: Option<docker::ContainerStats>,
+    /// History of (cpu%, memory_mb) samples for averaging.
+    pub stats_history: Vec<(f64, f64)>,
+}
+
+/// Summary of a completed container session, displayed after the container exits.
+#[derive(Debug, Clone)]
+pub struct LastContainerSummary {
+    pub agent_display_name: String,
+    pub container_name: String,
+    pub avg_cpu: String,
+    pub avg_memory: String,
+    pub total_time: String,
+    pub exit_code: i32,
+}
+
+/// Human-readable display name for an agent.
+pub fn agent_display_name(agent: &str) -> &str {
+    match agent {
+        "claude" => "Claude Code",
+        "codex" => "Codex",
+        "opencode" => "Opencode",
+        _ => agent,
+    }
+}
+
+/// Format a duration in seconds into a human-readable string (e.g. "5s", "12m", "1h 23m").
+pub fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{}h", h)
+        } else {
+            format!("{}h {}m", h, m)
+        }
+    }
 }
 
 /// Which phase of the multi-step `ready` workflow is active.
@@ -130,6 +192,23 @@ pub struct App {
     /// Options for the current ready workflow.
     pub ready_opts: ReadyOptions,
 
+    // --- Container window state ---
+    /// Whether the container overlay window is visible (and in what state).
+    pub container_window: ContainerWindowState,
+    /// Metadata about the currently running container.
+    pub container_info: Option<ContainerInfo>,
+    /// VT100 terminal emulator for rendering container output with full ANSI support
+    /// (colors, bold, cursor positioning, tabs, etc.). Replaces plain-text line buffer.
+    pub vt100_parser: Option<vt100::Parser>,
+    /// Summary of the last container session (shown after container exits).
+    pub last_container_summary: Option<LastContainerSummary>,
+    /// Receives Docker stats from the background polling task.
+    pub stats_rx: Option<UnboundedReceiver<docker::ContainerStats>>,
+
+    /// Host settings mounted into the container (sanitized config files in a temp dir).
+    /// Held here so the temp dir lives as long as the container runs; dropped on finish.
+    pub host_settings: Option<docker::HostSettings>,
+
     /// Set to true to break out of the event loop.
     pub should_quit: bool,
 }
@@ -161,6 +240,12 @@ impl App {
             ready_ctx_rx: None,
             ready_phase: ReadyPhase::Inactive,
             ready_opts: ReadyOptions::default(),
+            container_window: ContainerWindowState::Hidden,
+            container_info: None,
+            vt100_parser: None,
+            last_container_summary: None,
+            stats_rx: None,
+            host_settings: None,
             should_quit: false,
         }
     }
@@ -184,6 +269,29 @@ impl App {
         self.phase = ExecutionPhase::Running { command };
         self.focus = Focus::ExecutionWindow;
         self.input_error = None;
+    }
+
+    /// Activate the container window for a new PTY container session.
+    ///
+    /// `cols` and `rows` specify the inner dimensions of the container window
+    /// (used to initialise the VT100 terminal emulator).
+    pub fn start_container(
+        &mut self,
+        container_name: String,
+        agent_display_name: String,
+        cols: u16,
+        rows: u16,
+    ) {
+        self.container_window = ContainerWindowState::Maximized;
+        self.vt100_parser = Some(vt100::Parser::new(rows, cols, 1000));
+        self.last_container_summary = None;
+        self.container_info = Some(ContainerInfo {
+            container_name,
+            agent_display_name,
+            start_time: Instant::now(),
+            latest_stats: None,
+            stats_history: Vec::new(),
+        });
     }
 
     /// Transition to the next phase of a multi-step workflow (e.g. ready).
@@ -216,18 +324,59 @@ impl App {
         self.pty_live_line = false;
         self.pty_pending_cr = false;
         self.exit_rx = None;
+
+        // Drop host settings only if no multi-phase ready workflow is in progress.
+        // During ready --refresh, the pre-audit phase completes (triggering finish_command)
+        // before the audit container launches — host_settings must survive across phases.
+        if self.ready_phase == ReadyPhase::Inactive {
+            self.host_settings = None;
+        }
+
+        // Close the container window and generate a summary if applicable.
+        if self.container_window != ContainerWindowState::Hidden {
+            if let Some(info) = self.container_info.take() {
+                let elapsed = info.start_time.elapsed().as_secs();
+                let (avg_cpu, avg_memory) = if info.stats_history.is_empty() {
+                    ("n/a".to_string(), "n/a".to_string())
+                } else {
+                    let count = info.stats_history.len() as f64;
+                    let cpu_avg: f64 = info.stats_history.iter().map(|(c, _)| c).sum::<f64>() / count;
+                    let mem_avg: f64 = info.stats_history.iter().map(|(_, m)| m).sum::<f64>() / count;
+                    (format!("{:.1}%", cpu_avg), format!("{:.0}MiB", mem_avg))
+                };
+                self.last_container_summary = Some(LastContainerSummary {
+                    agent_display_name: info.agent_display_name,
+                    container_name: info.container_name,
+                    avg_cpu,
+                    avg_memory,
+                    total_time: format_duration(elapsed),
+                    exit_code,
+                });
+            }
+            self.container_window = ContainerWindowState::Hidden;
+            self.vt100_parser = None;
+            self.stats_rx = None;
+        }
+    }
+
+    /// Whether PTY output should be routed to the vt100 terminal emulator.
+    pub fn pty_uses_container(&self) -> bool {
+        self.container_window != ContainerWindowState::Hidden
     }
 
     /// Process raw PTY output bytes, handling carriage returns (`\r`) correctly.
+    ///
+    /// This method is used for the *outer* execution window (non-container output).
+    /// Container output is routed through the vt100 parser instead.
     ///
     /// Terminal applications use `\r` (without `\n`) to move the cursor back to
     /// column 0 so the next output overwrites the current line — this is how
     /// spinners and progress indicators work. `\r\n` is treated as a newline.
     ///
     /// The method maintains `pty_line_buffer` (the current incomplete line) and
-    /// a "live line" at the end of `output_lines` that is updated in-place
-    /// until a `\n` finalises it.
-    fn process_pty_data(&mut self, bytes: &[u8]) {
+    /// a "live line" at the end of `output_lines` that is updated in-place until
+    /// a `\n` finalises it.
+    pub fn process_pty_data(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
@@ -244,9 +393,9 @@ impl App {
                 self.finalise_pty_line();
                 i = 1;
             } else {
-                // Previous \r was a bare carriage return → finalise (not clear)
-                // so content from full-screen apps (cursor movement after \r) is preserved.
-                self.finalise_pty_line();
+                // Previous \r was a bare carriage return → move cursor to column 0.
+                // Clear the buffer so subsequent content overwrites the current line.
+                self.pty_line_buffer.clear();
             }
         }
 
@@ -259,9 +408,10 @@ impl App {
                             self.finalise_pty_line();
                             i += 2;
                         } else {
-                            // Bare \r → finalise current line (not clear) so content
-                            // from full-screen apps using cursor movement is preserved.
-                            self.finalise_pty_line();
+                            // Bare \r → move cursor to column 0. Clear the buffer
+                            // so subsequent content overwrites the current line
+                            // (this is how terminal spinners/progress bars work).
+                            self.pty_line_buffer.clear();
                             i += 1;
                         }
                     } else {
@@ -314,7 +464,7 @@ impl App {
         }
     }
 
-    /// Finalise the current PTY line buffer: push it to output_lines
+    /// Finalise the current PTY line buffer: push it to `output_lines`
     /// (or update the existing live line) and reset the buffer.
     fn finalise_pty_line(&mut self) {
         let line = std::mem::take(&mut self.pty_line_buffer);
@@ -369,7 +519,16 @@ impl App {
         for event in pty_events {
             match event {
                 crate::tui::pty::PtyEvent::Data(bytes) => {
-                    self.process_pty_data(&bytes);
+                    // Route container PTY data through the vt100 terminal emulator
+                    // for full ANSI rendering. Non-container data goes through the
+                    // plain-text line processor for the outer window.
+                    if self.pty_uses_container() {
+                        if let Some(ref mut parser) = self.vt100_parser {
+                            parser.process(&bytes);
+                        }
+                    } else {
+                        self.process_pty_data(&bytes);
+                    }
                 }
                 crate::tui::pty::PtyEvent::Exit(code) => {
                     self.finish_command(code);
@@ -389,6 +548,18 @@ impl App {
         if let Some(ref mut rx) = self.ready_ctx_rx {
             if let Ok((ctx, _summary)) = rx.try_recv() {
                 self.ready_ctx = Some(ctx);
+            }
+        }
+
+        // Drain Docker stats from the polling task.
+        if let Some(ref mut rx) = self.stats_rx {
+            while let Ok(stats) = rx.try_recv() {
+                if let Some(ref mut info) = self.container_info {
+                    let cpu = docker::parse_cpu_percent(&stats.cpu_percent);
+                    let mem = docker::parse_memory_mb(&stats.memory);
+                    info.stats_history.push((cpu, mem));
+                    info.latest_stats = Some(stats);
+                }
             }
         }
     }
@@ -504,14 +675,14 @@ mod tests {
         assert_eq!(app.output_lines, vec!["Thinking..."]);
         assert!(app.pty_live_line);
 
-        // Second chunk: \r finalises "Thinking..." then "Done!" becomes live line
+        // Second chunk: \r clears the buffer, "Done!" overwrites the live line
         app.process_pty_data(b"\rDone!      ");
-        assert_eq!(app.output_lines, vec!["Thinking...", "Done!      "]);
+        assert_eq!(app.output_lines, vec!["Done!      "]);
         assert!(app.pty_live_line);
 
         // Newline finalises the line
         app.process_pty_data(b"\n");
-        assert_eq!(app.output_lines, vec!["Thinking...", "Done!      "]);
+        assert_eq!(app.output_lines, vec!["Done!      "]);
         assert!(!app.pty_live_line);
     }
 
@@ -528,9 +699,10 @@ mod tests {
     fn pty_data_multiple_cr_in_one_chunk() {
         let mut app = App::new();
         app.phase = ExecutionPhase::Running { command: "test".into() };
-        // Multiple carriage returns in one chunk — each \r finalises the line
+        // Multiple carriage returns in one chunk — each \r clears the buffer
+        // so only the final frame survives (overwrite behavior).
         app.process_pty_data(b"frame1\rframe2\rframe3\n");
-        assert_eq!(app.output_lines, vec!["frame1", "frame2", "frame3"]);
+        assert_eq!(app.output_lines, vec!["frame3"]);
     }
 
     #[test]
@@ -560,8 +732,8 @@ mod tests {
 
         app.process_pty_data(b"new text\n");
         assert!(!app.pty_pending_cr);
-        // bare \r finalised "old text" as its own line, then "new text" was finalized.
-        assert_eq!(app.output_lines, vec!["old text", "new text"]);
+        // bare \r clears the buffer, so "new text" overwrites "old text".
+        assert_eq!(app.output_lines, vec!["new text"]);
     }
 
     #[test]
@@ -591,5 +763,159 @@ mod tests {
         // strip_ansi_escapes also removes tabs; verify they don't cause issues.
         app.process_pty_data(b"col1\tcol2\n");
         assert_eq!(app.output_lines, vec!["col1col2"]);
+    }
+
+    // --- Container window tests ---
+
+    #[test]
+    fn container_window_starts_hidden() {
+        let app = App::new();
+        assert_eq!(app.container_window, ContainerWindowState::Hidden);
+        assert!(app.container_info.is_none());
+        assert!(app.vt100_parser.is_none());
+        assert!(app.last_container_summary.is_none());
+    }
+
+    #[test]
+    fn start_container_activates_window() {
+        let mut app = App::new();
+        app.start_container("aspec-test".into(), "Claude Code".into(), 78, 18);
+        assert_eq!(app.container_window, ContainerWindowState::Maximized);
+        assert!(app.container_info.is_some());
+        assert!(app.vt100_parser.is_some());
+        let info = app.container_info.as_ref().unwrap();
+        assert_eq!(info.container_name, "aspec-test");
+        assert_eq!(info.agent_display_name, "Claude Code");
+    }
+
+    #[test]
+    fn pty_data_routes_to_vt100_when_container_active() {
+        let mut app = App::new();
+        app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.start_container("aspec-test".into(), "Claude Code".into(), 80, 24);
+
+        // Feed data through the vt100 parser (simulating what tick() does).
+        if let Some(ref mut parser) = app.vt100_parser {
+            parser.process(b"Hello from container\r\n");
+        }
+
+        // Output goes to vt100 screen, not outer window lines.
+        let screen_text = app.vt100_parser.as_ref().unwrap().screen().contents();
+        assert!(
+            screen_text.contains("Hello from container"),
+            "vt100 screen should contain container output"
+        );
+        assert!(
+            app.output_lines.is_empty()
+                || !app.output_lines.iter().any(|l| l.contains("Hello from container")),
+            "Outer window should not contain container output"
+        );
+    }
+
+    #[test]
+    fn pty_data_routes_to_outer_when_no_container() {
+        let mut app = App::new();
+        app.phase = ExecutionPhase::Running { command: "test".into() };
+
+        app.process_pty_data(b"Hello outer\n");
+        assert_eq!(app.output_lines, vec!["Hello outer"]);
+        assert!(app.vt100_parser.is_none());
+    }
+
+    #[test]
+    fn finish_command_closes_container_and_creates_summary() {
+        let mut app = App::new();
+        app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.start_container("aspec-test".into(), "Claude Code".into(), 78, 18);
+
+        app.finish_command(0);
+
+        assert_eq!(app.container_window, ContainerWindowState::Hidden);
+        assert!(app.container_info.is_none());
+        assert!(app.vt100_parser.is_none());
+        assert!(app.last_container_summary.is_some());
+        let summary = app.last_container_summary.as_ref().unwrap();
+        assert_eq!(summary.container_name, "aspec-test");
+        assert_eq!(summary.agent_display_name, "Claude Code");
+        assert_eq!(summary.exit_code, 0);
+    }
+
+    #[test]
+    fn finish_command_with_error_records_exit_code() {
+        let mut app = App::new();
+        app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.start_container("aspec-test".into(), "Claude Code".into(), 78, 18);
+
+        app.finish_command(1);
+
+        let summary = app.last_container_summary.as_ref().unwrap();
+        assert_eq!(summary.exit_code, 1);
+    }
+
+    #[test]
+    fn start_container_clears_previous_summary() {
+        let mut app = App::new();
+        app.last_container_summary = Some(LastContainerSummary {
+            agent_display_name: "old".into(),
+            container_name: "old".into(),
+            avg_cpu: "0%".into(),
+            avg_memory: "0MiB".into(),
+            total_time: "0s".into(),
+            exit_code: 0,
+        });
+
+        app.start_container("aspec-new".into(), "Claude Code".into(), 78, 18);
+        assert!(app.last_container_summary.is_none());
+    }
+
+    #[test]
+    fn format_duration_seconds() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(45), "45s");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(format_duration(60), "1m");
+        assert_eq!(format_duration(120), "2m");
+        assert_eq!(format_duration(3599), "59m");
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        assert_eq!(format_duration(3600), "1h");
+        assert_eq!(format_duration(5400), "1h 30m");
+        assert_eq!(format_duration(7200), "2h");
+    }
+
+    #[test]
+    fn agent_display_name_known_agents() {
+        assert_eq!(agent_display_name("claude"), "Claude Code");
+        assert_eq!(agent_display_name("codex"), "Codex");
+        assert_eq!(agent_display_name("opencode"), "Opencode");
+    }
+
+    #[test]
+    fn agent_display_name_unknown_returns_input() {
+        assert_eq!(agent_display_name("custom-agent"), "custom-agent");
+    }
+
+    #[test]
+    fn container_stats_history_used_for_averages() {
+        let mut app = App::new();
+        app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.start_container("aspec-test".into(), "Claude Code".into(), 78, 18);
+
+        // Simulate stats arriving
+        if let Some(ref mut info) = app.container_info {
+            info.stats_history.push((5.0, 200.0));
+            info.stats_history.push((10.0, 300.0));
+        }
+
+        app.finish_command(0);
+
+        let summary = app.last_container_summary.as_ref().unwrap();
+        assert_eq!(summary.avg_cpu, "7.5%");
+        assert_eq!(summary.avg_memory, "250MiB");
     }
 }

@@ -114,13 +114,15 @@ pub fn print_interactive_notice(out: &OutputSink, agent_name: &str) {
 
 /// Command-mode entry point: prompts for mount scope and auth, then runs ready phases.
 /// The audit phase is only run when `--refresh` is passed.
-pub async fn run(auth_from_env: bool, refresh: bool, non_interactive: bool) -> Result<()> {
+pub async fn run(refresh: bool, non_interactive: bool) -> Result<()> {
     let opts = ReadyOptions { refresh, non_interactive };
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
     let config = load_repo_config(&git_root)?;
     let agent_name = config.agent.as_deref().unwrap_or("claude");
-    let env_vars = resolve_auth(&git_root, agent_name, auth_from_env)?;
+    let credentials = resolve_auth(&git_root, agent_name)?;
+    let env_vars = credentials.env_vars.clone();
+    let host_settings = docker::HostSettings::prepare(agent_name);
     let out = &OutputSink::Stdout;
 
     let mut summary = ReadySummary::default();
@@ -137,7 +139,6 @@ pub async fn run(auth_from_env: bool, refresh: bool, non_interactive: bool) -> R
             audit_entrypoint(&ctx.agent_name)
         };
         let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
-        let config_dir = docker::claude_config_dir();
 
         if opts.non_interactive {
             let (_cmd, audit_output) = docker::run_container_captured(
@@ -145,7 +146,7 @@ pub async fn run(auth_from_env: bool, refresh: bool, non_interactive: bool) -> R
                 &ctx.mount_path,
                 &entrypoint_refs,
                 &ctx.env_vars,
-                config_dir.as_deref(),
+                host_settings.as_ref(),
             )
             .context("Dockerfile audit container failed")?;
             for line in audit_output.lines() {
@@ -157,7 +158,7 @@ pub async fn run(auth_from_env: bool, refresh: bool, non_interactive: bool) -> R
                 &ctx.mount_path,
                 &entrypoint_refs,
                 &ctx.env_vars,
-                config_dir.as_deref(),
+                host_settings.as_ref(),
             )
             .context("Dockerfile audit container failed")?;
         }
@@ -179,6 +180,7 @@ pub async fn run(auth_from_env: bool, refresh: bool, non_interactive: bool) -> R
 
     out.println(String::new());
     out.println("aspec is ready.");
+
     Ok(())
 }
 
@@ -293,6 +295,7 @@ pub async fn run_with_sink(
     mount_path: PathBuf,
     env_vars: Vec<(String, String)>,
     opts: &ReadyOptions,
+    host_settings: Option<&docker::HostSettings>,
 ) -> Result<ReadySummary> {
     let mut summary = ReadySummary::default();
     let ctx = run_pre_audit(out, mount_path, env_vars, &mut summary).await?;
@@ -305,13 +308,12 @@ pub async fn run_with_sink(
         };
         let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-        let config_dir = docker::claude_config_dir();
         let (_run_cmd, audit_output) = docker::run_container_captured(
             &ctx.image_tag,
             &ctx.mount_path,
             &entrypoint_refs,
             &ctx.env_vars,
-            config_dir.as_deref(),
+            host_settings,
         )
         .context("Dockerfile audit container failed")?;
         for line in audit_output.lines() {
@@ -389,7 +391,7 @@ mod tests {
         let sink = OutputSink::Channel(tx);
         let mount_path = PathBuf::from("/tmp");
         let opts = ReadyOptions::default();
-        let result = run_with_sink(&sink, mount_path, vec![], &opts).await;
+        let result = run_with_sink(&sink, mount_path, vec![], &opts, None).await;
         assert!(result.is_err());
         let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(messages.iter().any(|m| m.contains("FAILED") || m.contains("Checking")));
@@ -413,7 +415,7 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let sink = OutputSink::Channel(tx);
         let opts = ReadyOptions::default();
-        let result = run_with_sink(&sink, git_root.clone(), vec![], &opts).await;
+        let result = run_with_sink(&sink, git_root.clone(), vec![], &opts, None).await;
         let _ = result;
 
         let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -451,7 +453,7 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let sink = OutputSink::Channel(tx);
         let opts = ReadyOptions { refresh: false, non_interactive: false };
-        let result = run_with_sink(&sink, git_root.clone(), vec![], &opts).await;
+        let result = run_with_sink(&sink, git_root.clone(), vec![], &opts, None).await;
         let _ = result;
 
         let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();

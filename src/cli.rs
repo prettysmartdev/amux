@@ -19,10 +19,6 @@ pub enum Command {
 
     /// Check Docker daemon, verify Dockerfile.dev, build image, and report status.
     Ready {
-        /// Read the agent API key from host environment variables instead of the system keychain.
-        #[arg(long)]
-        auth_from_env: bool,
-
         /// Run the Dockerfile agent audit (skipped by default).
         #[arg(long)]
         refresh: bool,
@@ -36,10 +32,6 @@ pub enum Command {
     Implement {
         /// Work item number (e.g. 0001).
         work_item: String,
-
-        /// Read the agent API key from host environment variables instead of the system keychain.
-        #[arg(long)]
-        auth_from_env: bool,
 
         /// Run the agent in non-interactive (print) mode instead of interactive mode.
         #[arg(long)]
@@ -125,15 +117,6 @@ mod tests {
     }
 
     #[test]
-    fn ready_auth_from_env_flag() {
-        let cli = parse(&["aspec", "ready", "--auth-from-env"]);
-        match cli.command.unwrap() {
-            Command::Ready { auth_from_env, .. } => assert!(auth_from_env),
-            _ => panic!("expected ready"),
-        }
-    }
-
-    #[test]
     fn ready_refresh_flag() {
         let cli = parse(&["aspec", "ready", "--refresh"]);
         match cli.command.unwrap() {
@@ -153,10 +136,9 @@ mod tests {
 
     #[test]
     fn ready_all_flags() {
-        let cli = parse(&["aspec", "ready", "--auth-from-env", "--refresh", "--non-interactive"]);
+        let cli = parse(&["aspec", "ready", "--refresh", "--non-interactive"]);
         match cli.command.unwrap() {
-            Command::Ready { auth_from_env, refresh, non_interactive } => {
-                assert!(auth_from_env);
+            Command::Ready { refresh, non_interactive } => {
                 assert!(refresh);
                 assert!(non_interactive);
             }
@@ -173,22 +155,6 @@ mod tests {
                 assert!(!non_interactive);
             }
             _ => panic!("expected ready"),
-        }
-    }
-
-    #[test]
-    fn implement_auth_from_env_flag() {
-        let cli = parse(&["aspec", "implement", "0001", "--auth-from-env"]);
-        match cli.command.unwrap() {
-            Command::Implement {
-                work_item,
-                auth_from_env,
-                ..
-            } => {
-                assert_eq!(work_item, "0001");
-                assert!(auth_from_env);
-            }
-            _ => panic!("expected implement"),
         }
     }
 

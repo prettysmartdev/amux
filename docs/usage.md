@@ -68,7 +68,7 @@ aspec init --agent=claude
 
 ---
 
-### `aspec ready [--auth-from-env] [--refresh] [--non-interactive]`
+### `aspec ready [--refresh] [--non-interactive]`
 
 Checks that your environment is ready for agentic development.
 
@@ -96,7 +96,6 @@ agent authentication flow as `implement` (see [Agent Auth](#agent-authentication
 
 | Flag | Description |
 |------|-------------|
-| `--auth-from-env` | Read the agent API key from host environment variables |
 | `--refresh` | Run the Dockerfile agent audit (skipped by default) |
 | `--non-interactive` | Run the agent in print/non-interactive mode |
 
@@ -132,7 +131,7 @@ aspec ready --refresh --non-interactive  # audit in non-interactive mode
 
 ---
 
-### `aspec implement <NNNN> [--auth-from-env] [--non-interactive]`
+### `aspec implement <NNNN> [--non-interactive]`
 
 Launches the dev container to implement a work item.
 
@@ -146,14 +145,13 @@ The work item number is a 4-digit identifier (e.g. `0001`). Both `0001` and
 
 - Finds the matching work item file in `aspec/work-items/`
 - Prompts to confirm the Docker mount scope (Git root vs CWD) on first run
-- Optionally mounts agent credentials from the host (see [Agent Auth](#agent-authentication))
+- Optionally passes agent credentials via environment variable (see [Agent Auth](#agent-authentication))
 - Launches a container with the configured agent
 
 **Flags**
 
 | Flag | Description |
 |------|-------------|
-| `--auth-from-env` | Read the agent API key from host environment variables |
 | `--non-interactive` | Run the agent in print/non-interactive mode |
 
 **Interactive Mode (default)**
@@ -227,19 +225,83 @@ aspec new
 
 ### Layout
 
+The TUI has two types of windows:
+
+- **Outer window** — displays plain-text streaming output from commands (Docker
+  builds, status messages, etc.)
+- **Container window** — appears as an overlay whenever a Docker container runs
+  a coding agent. Optimized for interactive experiences (TUI apps, spinners,
+  carriage returns, full-screen output).
+
 ```
-┌─── ● running: ready ──────────────────────────────┐
-│ Checking Docker daemon... OK                        │
-│ Checking Dockerfile.dev... OK                       │
-│ Building Docker image (aspec-dev:latest)...         │
-│                                                     │
-└─────────────────────────────────────────────────────┘
-  Done — use ↑/↓ to scroll, or type a new command
-┌─── command ─────────────────────────────────────────┐
-│ > _                                                  │
-└─────────────────────────────────────────────────────┘
-  init  ·  ready  ·  implement
+┌─── ● running: implement 0001 ────────────────────────────┐
+│ $ docker run --rm -it --name aspec-12345 ...               │
+│ ╔══════════════════════════════════════════════════╗        │
+│ ║  Agent 'claude' is launching in INTERACTIVE mode ║        │
+│ ╚══════════════════════════════════════════════════╝        │
+│                                                             │
+│ ╭─ 🔒 Claude Code (containerized) ── name | 5% | 200mb ──╮│
+│ │                                                          ││
+│ │ [Interactive agent output here...]                       ││
+│ │                                                          ││
+│ ╰──────────────────────────────────────────────────────────╯│
+└─────────────────────────────────────────────────────────────┘
+ Press Esc to minimize the container window
+┌─── command (inactive) ───────────────────────────────────────┐
+│ > _                                                           │
+└──────────────────────────────────────────────────────────────┘
+  init  ·  ready  ·  implement  ·  new
 ```
+
+### Container Window
+
+Whenever `aspec` launches a Docker container to run a coding agent (via
+`implement` or `ready --refresh`), a **container window** appears overlaying
+the bottom 90% of the outer window. This window is dedicated to the
+interactive agent session.
+
+**Visual indicators:**
+
+- Green border (rounded)
+- Title bar (top left): `🔒 Claude Code (containerized)`
+- Title bar (top right): `container_name | CPU% | memory | runtime`
+
+Docker stats (container name, CPU, memory, total runtime) are polled from the
+Docker daemon every 5 seconds and displayed in the title bar.
+
+**When the container window is maximized (default):**
+
+- All keyboard input is forwarded to the running container process
+- Arrow keys, Ctrl+C, Ctrl+O, and all other shortcuts work natively
+- Mouse scroll wheel scrolls the container output
+- Press **Esc** to minimize the container window
+- A status hint shows: "Press Esc to minimize the container window"
+
+**When the container window is minimized:**
+
+The container collapses to a 1-line green-bordered bar below the outer window,
+showing the agent name and Docker stats. The outer window becomes fully visible
+for reading its output.
+
+| Key | Action |
+|-----|--------|
+| **↑** / **↓** | Scroll the outer window |
+| **b** / **e** | Jump to beginning/end of outer window |
+| **c** | Restore the container window to maximized |
+| **Esc** | Return focus to the command text box |
+
+When the command text box is focused, pressing **↑** focuses the outer window
+(not the container window), regardless of whether the container is minimized
+or maximized.
+
+**When the container process exits:**
+
+The container window closes and focus returns to the command box. A summary
+bar appears below the outer window with a dashed-line border showing:
+
+- Agent used, container name, average CPU, average memory, total time, exit code
+
+This summary persists until a new container is launched.
 
 ### Command Box
 
@@ -254,7 +316,11 @@ aspec new
 | **q** (on empty input) | Show quit confirmation |
 | **Ctrl+C** | Show quit confirmation |
 
-### Execution Window
+### Outer Execution Window
+
+The outer window displays plain-text streaming output (Docker builds, status
+messages, command output). It is optimized for simple text — ANSI escape
+sequences are stripped and content is rendered as plain lines.
 
 | State | Focus | Border colour |
 |-------|-------|--------------|
@@ -265,7 +331,8 @@ aspec new
 | Done (error) | Selected | Red |
 | Done (error) | Unselected | Red |
 
-When the window is **selected while running** (blue border):
+When the window is **selected while running** (blue border, no container
+window active):
 
 - All keypresses are forwarded directly to the running process
 - Arrow keys, typing, and keyboard shortcuts (e.g. Ctrl+O, Ctrl+C) all work
@@ -348,51 +415,79 @@ By default, aspec reads the agent's OAuth access token directly from the
 system keychain. On first use per repository, aspec asks for your permission:
 
 ```
-Pass agent credentials (ANTHROPIC_API_KEY, from system keychain) into container?
+Pass agent credentials (from system keychain) into container?
 This will be saved for this repo. [y/n]
 ```
 
-- **y** — the token is extracted from the keychain and passed as an environment
-  variable; the decision is saved in `aspec/.aspec-cli.json`
+- **y** — the OAuth token is extracted from the keychain and passed into
+  the container; the decision is saved in `aspec/.aspec-cli.json`
   (`"autoAgentAuthAccepted": true`)
-- **n** — no credentials passed; you will be prompted to authenticate inside
-  the container
+- **n** — no credentials passed; you will need to authenticate inside
+  the container manually
 
 The decision is stored per Git repository and only asked once.
 
-**2. Environment variable (`--auth-from-env`)**
+### How credentials are passed
 
-Pass `--auth-from-env` to read the API key from host environment variables
-instead of the keychain. This skips the prompt entirely:
+When keychain auth is accepted, aspec:
 
-```sh
-aspec ready --auth-from-env
-aspec implement 0001 --auth-from-env
-```
+1. Reads the OAuth credentials JSON from the macOS Keychain
+   (service: `Claude Code-credentials`)
+2. Extracts the inner `claudeAiOauth` object and passes it as
+   `CLAUDE_CODE_OAUTH_TOKEN` via `-e` environment variable (Claude Code
+   reads this env var on startup for authentication)
 
-This is useful in CI/CD environments or when you have the API key set
-directly (e.g. `export ANTHROPIC_API_KEY=sk-ant-...`).
+No credential files are mounted into the container — the
+`CLAUDE_CODE_OAUTH_TOKEN` environment variable is the only credential passed.
 
-### Environment variables by agent
+Host agent settings (model preferences, onboarding state, plugins) are
+separately mounted read-only from sanitized copies — see
+[Host Settings](#host-settings) below.
 
-| Agent | `--auth-from-env` variables | Keychain env vars | Keychain service (macOS) |
-|-------|----------------------------|-----------------|--------------------------|
-| `claude` | `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` | `ANTHROPIC_API_KEY` + `CLAUDE_CODE_OAUTH_TOKEN` | `Claude Code-credentials` |
-| `codex` | `OPENAI_API_KEY` | — | — |
-| `opencode` | `OPENAI_API_KEY` | — | — |
+### Agent keychain support
 
-Agent credentials are passed into the container via `-e` flags. API key
+| Agent | Container env var | Keychain service (macOS) |
+|-------|-------------------|--------------------------|
+| `claude` | `CLAUDE_CODE_OAUTH_TOKEN` | `Claude Code-credentials` |
+| `codex` | — | — |
+| `opencode` | — | — |
+
+Agent credentials are passed into the container via `-e` flags only. API key
 values are **masked** (`***`) in all displayed Docker commands to prevent
 accidental exposure in logs or screenshots.
 
 **Note**: Claude Code stores its OAuth tokens in the macOS Keychain, not in
-filesystem files. Mounting `~/.claude` is insufficient for authentication.
-The keychain-based extraction is the default and most reliable method.
+filesystem files. The keychain extraction is required for authentication.
 
-When using the keychain, the OAuth access token is passed as both
-`ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` so Claude Code picks it
-up regardless of which env var it checks. The Anthropic SDK auto-detects
-OAuth tokens by their `sk-ant-oat` prefix.
+---
+
+## Host Settings
+
+When launching containers for Claude, aspec mounts sanitized copies of your
+host-machine Claude Code settings so the agent starts in a "set up" state
+(correct model, plugins, onboarding completed) without manual configuration.
+
+### What gets mounted
+
+| Host file | Container path | Notes |
+|-----------|----------------|-------|
+| `~/.claude.json` | `/root/.claude.json:ro` | Sanitized copy: `oauthAccount` field stripped to prevent auth interference |
+| `~/.claude/settings.json` | `/root/.claude/settings.json:ro` | Copied as-is (model preferences, plugins) |
+
+### How it works
+
+1. Before each container launch, aspec copies the relevant files to a temporary
+   directory on the host
+2. The `oauthAccount` field is stripped from `.claude.json` (this field causes
+   Claude Code to enter a broken OAuth state when tokens aren't accessible
+   from inside the container)
+3. The temporary copies are mounted read-only into the container
+4. When the container exits, the temporary directory is automatically cleaned up
+
+**Your original host files are never modified or deleted.**
+
+Only `~/.claude.json` and `~/.claude/settings.json` are copied — caches,
+sessions, backups, and other large files (~50MB) are not included.
 
 ---
 

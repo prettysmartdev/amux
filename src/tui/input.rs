@@ -1,5 +1,5 @@
 use crate::commands::new::WorkItemKind;
-use crate::tui::state::{App, Dialog, ExecutionPhase, Focus};
+use crate::tui::state::{App, ContainerWindowState, Dialog, ExecutionPhase, Focus};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 use strsim::levenshtein;
@@ -53,6 +53,50 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
 fn handle_window_key(app: &mut App, key: KeyEvent) -> Action {
     match &app.phase {
         ExecutionPhase::Running { .. } => {
+            // Container window maximized: Esc minimizes instead of going to command box.
+            if app.container_window == ContainerWindowState::Maximized {
+                if key.code == KeyCode::Esc {
+                    app.container_window = ContainerWindowState::Minimized;
+                    return Action::None;
+                }
+                // All other keys forwarded to the PTY for full interactivity.
+                if let Some(bytes) = key_to_bytes(&key) {
+                    return Action::ForwardToPty(bytes);
+                }
+                return Action::None;
+            }
+
+            // Container window minimized: outer window is in focus for scrolling.
+            if app.container_window == ContainerWindowState::Minimized {
+                match key.code {
+                    KeyCode::Char('c') => {
+                        app.container_window = ContainerWindowState::Maximized;
+                        return Action::None;
+                    }
+                    KeyCode::Up => {
+                        let max = app.output_lines.len();
+                        if app.scroll_offset < max {
+                            app.scroll_offset = app.scroll_offset.saturating_add(1);
+                        }
+                    }
+                    KeyCode::Down => {
+                        app.scroll_offset = app.scroll_offset.saturating_sub(1);
+                    }
+                    KeyCode::Char('b') => {
+                        app.scroll_offset = app.output_lines.len();
+                    }
+                    KeyCode::Char('e') => {
+                        app.scroll_offset = 0;
+                    }
+                    KeyCode::Esc => {
+                        app.focus = Focus::CommandBox;
+                    }
+                    _ => {}
+                }
+                return Action::None;
+            }
+
+            // No container window: original behavior.
             if key.code == KeyCode::Esc {
                 app.focus = Focus::CommandBox;
                 return Action::None;
@@ -489,6 +533,90 @@ mod tests {
         let action = handle_key(&mut app, key);
         assert!(matches!(action, Action::None));
         assert_eq!(app.scroll_offset, 0, "Down should decrement scroll_offset");
+    }
+
+    // --- Container window input tests ---
+
+    #[test]
+    fn esc_minimizes_container_window_when_maximized() {
+        let mut app = App::new();
+        app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.focus = Focus::ExecutionWindow;
+        app.container_window = ContainerWindowState::Maximized;
+
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        let action = handle_key(&mut app, key);
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.container_window, ContainerWindowState::Minimized);
+        // Focus stays on ExecutionWindow (outer window), not CommandBox
+        assert_eq!(app.focus, Focus::ExecutionWindow);
+    }
+
+    #[test]
+    fn c_key_restores_container_window_when_minimized() {
+        let mut app = App::new();
+        app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.focus = Focus::ExecutionWindow;
+        app.container_window = ContainerWindowState::Minimized;
+
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty());
+        let action = handle_key(&mut app, key);
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.container_window, ContainerWindowState::Maximized);
+    }
+
+    #[test]
+    fn esc_from_minimized_outer_window_goes_to_command_box() {
+        let mut app = App::new();
+        app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.focus = Focus::ExecutionWindow;
+        app.container_window = ContainerWindowState::Minimized;
+
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        let action = handle_key(&mut app, key);
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.focus, Focus::CommandBox);
+    }
+
+    #[test]
+    fn keys_forwarded_to_pty_when_container_maximized() {
+        let mut app = App::new();
+        app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.focus = Focus::ExecutionWindow;
+        app.container_window = ContainerWindowState::Maximized;
+
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty());
+        let action = handle_key(&mut app, key);
+        assert!(matches!(action, Action::ForwardToPty(_)));
+    }
+
+    #[test]
+    fn arrow_keys_scroll_outer_when_container_minimized() {
+        let mut app = App::new();
+        for i in 0..50 {
+            app.output_lines.push(format!("line {}", i));
+        }
+        app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.focus = Focus::ExecutionWindow;
+        app.container_window = ContainerWindowState::Minimized;
+        app.scroll_offset = 0;
+
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+        handle_key(&mut app, key);
+        assert_eq!(app.scroll_offset, 1, "Up should scroll outer window when container minimized");
+    }
+
+    #[test]
+    fn up_arrow_from_command_box_focuses_outer_regardless_of_container_state() {
+        let mut app = App::new();
+        app.output_lines.push("some output".into());
+        app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.focus = Focus::CommandBox;
+        app.container_window = ContainerWindowState::Minimized;
+
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+        handle_key(&mut app, key);
+        assert_eq!(app.focus, Focus::ExecutionWindow);
     }
 
     #[test]

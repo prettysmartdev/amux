@@ -13,12 +13,15 @@ pub fn parse_work_item(s: &str) -> Result<u32> {
 }
 
 /// Command-mode entry point.
-pub async fn run(work_item_str: &str, auth_from_env: bool, non_interactive: bool) -> Result<()> {
+pub async fn run(work_item_str: &str, non_interactive: bool) -> Result<()> {
     let work_item = parse_work_item(work_item_str)?;
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
-    let env_vars = resolve_auth(&git_root, agent_name(&git_root)?, auth_from_env)?;
-    run_with_sink(work_item, &OutputSink::Stdout, Some(mount_path), env_vars, non_interactive).await
+    let credentials = resolve_auth(&git_root, agent_name(&git_root)?)?;
+    let config = load_repo_config(&git_root)?;
+    let agent = config.agent.as_deref().unwrap_or("claude");
+    let host_settings = docker::HostSettings::prepare(agent);
+    run_with_sink(work_item, &OutputSink::Stdout, Some(mount_path), credentials.env_vars.clone(), non_interactive, host_settings.as_ref()).await
 }
 
 /// Core logic shared between command mode and TUI mode.
@@ -33,6 +36,7 @@ pub async fn run_with_sink(
     mount_override: Option<PathBuf>,
     env_vars: Vec<(String, String)>,
     non_interactive: bool,
+    host_settings: Option<&docker::HostSettings>,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let config = load_repo_config(&git_root)?;
@@ -61,8 +65,7 @@ pub async fn run_with_sink(
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
     // Show the full Docker CLI command being run (with masked env values).
-    let config_dir = docker::claude_config_dir();
-    let display_args = docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, config_dir.as_deref());
+    let display_args = docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, host_settings);
     out.println(format!("$ {}", docker::format_run_cmd(&display_args)));
 
     if !non_interactive {
@@ -77,7 +80,7 @@ pub async fn run_with_sink(
             mount_path.to_str().unwrap(),
             &entrypoint_refs,
             &env_vars,
-            config_dir.as_deref(),
+            host_settings,
         )
         .context("Container exited with an error")?;
         for line in output.lines() {
@@ -89,7 +92,7 @@ pub async fn run_with_sink(
             mount_path.to_str().unwrap(),
             &entrypoint_refs,
             &env_vars,
-            config_dir.as_deref(),
+            host_settings,
         )
         .context("Container exited with an error")?;
     }

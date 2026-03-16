@@ -47,11 +47,16 @@ src/
     mod.rs                 is_daemon_running, image_exists, project_image_tag,
                            build_image, build_image_streaming,
                            run_container, run_container_captured,
-                           build_run_args, build_run_args_pty
+                           build_run_args, build_run_args_pty,
+                           HostSettings (sanitized config mount),
+                           ContainerStats, generate_container_name,
+                           query_container_stats
   tui/
     mod.rs                 run() entry point; event loop; action dispatcher
     state.rs               App struct; Focus/ExecutionPhase/Dialog enums;
-                           PendingCommand (Ready/Implement with flags)
+                           PendingCommand (Ready/Implement with flags);
+                           ContainerWindowState, ContainerInfo,
+                           LastContainerSummary
     input.rs               handle_key(); Action enum; autocomplete; key→bytes
     render.rs              draw(); draw_exec_window/command_box/dialog etc.
     pty.rs                 PtySession; PtyEvent; spawn_text_command helper
@@ -215,9 +220,16 @@ Uses `agent_entrypoint_non_interactive()` which adds print-mode flags:
 Output is captured via `docker::run_container_captured()` and displayed.
 A tip suggests removing `--non-interactive` for direct interaction.
 
-The host's Claude settings (`~/.claude/` and `~/.claude.json`) are mounted into
-the container at `/root/.claude` and `/root/.claude.json` when they exist, so
-Claude inherits the user's existing configuration and skips first-run setup.
+Host agent settings are mounted read-only into the container via
+`docker::HostSettings::prepare()`, which copies sanitized versions of
+`~/.claude.json` (with `oauthAccount` stripped) and `~/.claude/settings.json`
+into a temporary directory. These are mounted at `/root/.claude.json:ro` and
+`/root/.claude:ro`. The temp directory is cleaned up automatically when the
+`HostSettings` struct is dropped (after the container exits).
+
+Authentication is handled entirely via the `CLAUDE_CODE_OAUTH_TOKEN` environment
+variable — the host settings mount provides agent configuration (onboarding
+state, model preferences, plugins) without interfering with auth.
 
 ---
 
@@ -311,24 +323,28 @@ Git root folder name via `docker::project_image_tag()`.
 
 ### Agent Credential Passing
 
-Agent credentials are passed into the container as environment variables
-(e.g. `-e ANTHROPIC_API_KEY=…`), not as file mounts. This is necessary
-because Claude Code stores its OAuth tokens in the OS keychain, not in
-filesystem files like `~/.claude` or `~/.claude.json`.
+Agent credentials are extracted from the macOS system keychain and passed
+into the container via a single environment variable:
 
-There are two credential sources, selected by the `--auth-from-env` flag:
+- **`CLAUDE_CODE_OAUTH_TOKEN`**: The OAuth credential JSON (containing
+  `accessToken`, `refreshToken`, `expiresAt`), passed via `-e`. Claude Code
+  reads this env var on startup for authentication.
 
-- **Default (keychain)**: `auth::agent_keychain_vars()` calls macOS
-  `security find-generic-password` to extract the OAuth access token from the
-  keychain, then sets it on both `ANTHROPIC_API_KEY` and
-  `CLAUDE_CODE_OAUTH_TOKEN` so that Claude Code picks it up regardless of
-  which env var it checks. The Anthropic SDK auto-detects OAuth tokens by
-  their `sk-ant-oat` prefix. The `auth::resolve_auth()` dispatcher checks
-  the saved preference in `aspec/.aspec-cli.json` and prompts on first use.
+No credential files are mounted. The environment variable is the only
+credential passed to the container. Host agent settings (model preferences,
+onboarding state) are mounted separately via `HostSettings` — see the
+Implement Command section above.
 
-- **`--auth-from-env`**: `auth::agent_env_vars()` reads the API key directly
-  from host environment variables. No prompt is shown — credentials are passed
-  unconditionally if the env var is set.
+The credential extraction flow:
+
+1. `auth::read_keychain_raw()` calls macOS `security find-generic-password`
+   to read the full JSON blob from the keychain (service: `Claude Code-credentials`)
+2. `auth::extract_token_from_keychain_json()` parses the JSON and extracts
+   the `claudeAiOauth` inner object as a JSON string
+3. The JSON is returned and passed as the `CLAUDE_CODE_OAUTH_TOKEN` env var
+
+`auth::resolve_auth()` always returns keychain credentials (auto-passthrough)
+without prompting. No opt-in dialog is needed.
 
 `docker::append_env_args()` translates `(key, value)` pairs into
 `-e KEY=VALUE` Docker flags.
@@ -345,33 +361,109 @@ stdout; in TUI mode it appears in the execution window output.
 
 ---
 
+## Container Window
+
+When `implement` or `ready --refresh` launches an interactive agent, the TUI
+displays a dedicated **container window** overlaying the outer execution window.
+
+### State Machine
+
+```
+Hidden ──[start_container()]──► Maximized ──[Esc]──► Minimized ──['c']──► Maximized
+                                     │                    │
+                                     └────[finish]────────┘──► Hidden + Summary bar
+```
+
+`ContainerWindowState` is an enum with three variants: `Hidden`, `Maximized`,
+and `Minimized`. The state transitions are:
+
+- **Hidden → Maximized**: `start_container()` is called when an agent launches.
+  It sets the container name, agent display name, start time, and initializes
+  the stats channel receiver.
+- **Maximized → Minimized**: User presses `Esc`. The outer window becomes
+  visible and scrollable while the container continues running in the background.
+  A 1-line green-bordered bar shows the agent name and live stats.
+- **Minimized → Maximized**: User presses `c`. The container window re-overlays
+  the outer window and keyboard input is forwarded to the container again.
+- **Maximized/Minimized → Hidden**: `finish_command()` transitions the container
+  window to `Hidden` and generates a `LastContainerSummary` with average CPU,
+  peak memory, and total runtime.
+
+### Layout
+
+When **maximized**, the container window covers 90% of the outer execution
+window area, anchored to the bottom. It has a green border with:
+- Left title: `🔒 {agent} (containerized)` (e.g. `🔒 Claude Code (containerized)`)
+- Right title: `{container_name} | CPU {cpu}% | Mem {mem}MB | {runtime}`
+
+When **minimized**, a 1-line bar with green border appears between the outer
+execution window and the command box, showing agent name and live stats.
+
+After the container **exits**, a summary bar with dashed border shows:
+`{agent} exited | avg CPU {cpu}% | peak mem {mem}MB | runtime {duration}`
+
+### PTY Output Routing
+
+PTY output bytes are routed to different line buffers depending on the container
+window state:
+
+- **Container window active** (`Maximized` or `Minimized`): PTY data goes to
+  `container_output_lines`, displayed inside the container window.
+- **Container window hidden**: PTY data goes to `output_lines`, displayed in
+  the outer execution window (original behavior).
+
+The routing decision is made in `process_pty_data()` using `pty_uses_container()`,
+which returns `true` when `container_window` is not `Hidden`. This avoids a
+mutable borrow conflict by returning a boolean flag instead of a mutable
+reference to the target buffer.
+
+### Docker Stats Polling
+
+When a container starts, `spawn_stats_poller()` creates a tokio task that polls
+Docker stats every 5 seconds:
+
+```
+tokio::spawn ──► loop {
+    interval.tick().await           (5s)
+    spawn_blocking(query_container_stats)
+    tx.send(stats)
+}
+```
+
+`query_container_stats()` runs `docker stats --no-stream --format` and parses
+the JSON output into a `ContainerStats` struct (name, cpu_percent, memory).
+The stats are sent via `tokio::sync::mpsc::unbounded_channel` and drained in
+`App::tick()` each render cycle.
+
+Each polled stats snapshot is appended to `ContainerInfo::stats_history` for
+computing averages and peaks when the container exits.
+
+### Container Naming
+
+`generate_container_name()` produces a deterministic name (`aspec-{pid}-{nanos}`)
+passed to `docker run --name`. This allows `query_container_stats()` to query
+stats for the specific container by name.
+
+---
+
 ## Agent Auth Flow
 
 ```
 ready/implement submitted
         │
         ▼
-  --auth-from-env flag?
+  autoAgentAuthAccepted in config?
         │
    ┌────┴──────────────────┐
-  yes                      no
-   │                        │
-   ▼                        ▼
-read env var              autoAgentAuthAccepted in config?
-(ANTHROPIC_API_KEY or            │
- CLAUDE_CODE_OAUTH_TOKEN)   ┌────┴──────────────────┐
-   │                       None                  Some(v)
-   ▼                        │                       │
-pass to container           ▼                  ┌────┴────┐
-                     AgentAuth dialog        true       false
-                        │                     │           │
-                       [y]          read keychain →    no auth
-                        │           CLAUDE_CODE_OAUTH_TOKEN
-                       [n]──────────────────────────────► no auth
+  None                  Some(v)
+   │                       │
+   ▼                  ┌────┴────┐
+Auto-passthrough:
+   read_keychain_raw() → extract OAuth JSON → CLAUDE_CODE_OAUTH_TOKEN env var
 ```
 
-The decision is saved to `GITROOT/aspec/.aspec-cli.json` so the prompt only
-appears once per repository.
+Credentials are always sourced from the macOS system keychain and passed
+automatically (no opt-in dialog needed).
 
 ---
 
@@ -382,12 +474,16 @@ appears once per repository.
 | Unit — per module | inline `#[cfg(test)]` | Individual functions, data structures |
 | Unit — border colors | `tui::state::tests` | All 6 combinations of phase × focus |
 | Unit — PTY data | `tui::state::tests` | `\r`/`\n`/`\r\n` processing, live-line updates |
+| Unit — container window | `tui::state::tests` | Container state transitions, PTY routing, summary generation |
+| Unit — container render | `tui::render::tests` | Container window overlay, minimized bar, summary bar |
+| Unit — container input | `tui::input::tests` | Key handling in maximized/minimized/hidden states |
+| Unit — docker stats | `docker::tests` | Stats parsing, container name generation |
 | Unit — PTY | `tui::pty::tests` | Real `echo` and `sh -c 'exit 42'` processes |
 | Unit — ready | `commands::ready::tests` | Summary table, interactive notice, options, entrypoints |
 | Unit — implement | `commands::implement::tests` | Entrypoints (interactive + non-interactive) |
 | Unit — new | `commands::new::tests` | Slugify, numbering, template, find_template, kind parsing, run_with_sink |
 | Integration — CLI | `tests/cli_integration.rs` | Binary-level: help, version, flags, work items |
-| Integration — parity | `tests/command_tui_parity.rs` | Shared logic between command/TUI modes |
+| Integration — parity | `tests/command_tui_parity.rs` | Shared logic between command/TUI modes, container lifecycle |
 
 ### Window Border Color Matrix
 
