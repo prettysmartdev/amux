@@ -28,11 +28,17 @@ pub async fn run_with_sink(agent: Agent, out: &OutputSink) -> Result<()> {
         git_root.join("aspec/.aspec-cli.json").display()
     ));
 
-    write_dockerfile(&git_root, &agent)?;
-    out.println(format!(
-        "Dockerfile.dev written to: {}",
-        git_root.join("Dockerfile.dev").display()
-    ));
+    if write_dockerfile(&git_root, &agent)? {
+        out.println(format!(
+            "Dockerfile.dev written to: {}",
+            git_root.join("Dockerfile.dev").display()
+        ));
+    } else {
+        out.println(format!(
+            "Dockerfile.dev already exists at: {} (not overwritten)",
+            git_root.join("Dockerfile.dev").display()
+        ));
+    }
 
     Ok(())
 }
@@ -51,11 +57,17 @@ pub fn find_git_root() -> Option<std::path::PathBuf> {
 }
 
 /// Write Dockerfile.dev to the git root using the template for the given agent.
+/// Returns `true` if a new file was created, `false` if an existing file was preserved.
 /// Public so other commands (e.g. ready) can initialize a missing Dockerfile.dev.
-pub fn write_dockerfile(git_root: &Path, agent: &Agent) -> Result<()> {
+pub fn write_dockerfile(git_root: &Path, agent: &Agent) -> Result<bool> {
     let path = git_root.join("Dockerfile.dev");
+    if path.exists() {
+        return Ok(false);
+    }
     let content = dockerfile_for_agent(agent);
-    std::fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))
+    std::fs::write(&path, content)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(true)
 }
 
 pub fn dockerfile_for_agent(agent: &Agent) -> String {
@@ -109,5 +121,64 @@ mod tests {
         drop(result);
         // Should have received at least one message via the channel.
         assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn write_dockerfile_creates_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let result = write_dockerfile(tmp.path(), &Agent::Claude).unwrap();
+        assert!(result, "should return true when creating a new file");
+        assert!(tmp.path().join("Dockerfile.dev").exists());
+        let content = std::fs::read_to_string(tmp.path().join("Dockerfile.dev")).unwrap();
+        assert!(content.contains("debian:bookworm-slim"));
+    }
+
+    #[test]
+    fn write_dockerfile_does_not_overwrite_existing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Dockerfile.dev");
+        std::fs::write(&path, "CUSTOM CONTENT").unwrap();
+
+        let result = write_dockerfile(tmp.path(), &Agent::Claude).unwrap();
+        assert!(!result, "should return false when file already exists");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "CUSTOM CONTENT", "existing file must not be overwritten");
+    }
+
+    #[test]
+    fn dockerfile_for_agent_uses_debian_slim_base() {
+        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode] {
+            let content = dockerfile_for_agent(agent);
+            assert!(
+                content.contains("debian:bookworm-slim"),
+                "{:?} template should use debian:bookworm-slim base image",
+                agent
+            );
+        }
+    }
+
+    #[test]
+    fn dockerfile_for_agent_does_not_use_npm_install() {
+        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode] {
+            let content = dockerfile_for_agent(agent);
+            assert!(
+                !content.contains("npm install"),
+                "{:?} template should not use npm install",
+                agent
+            );
+        }
+    }
+
+    #[test]
+    fn dockerfile_templates_install_via_apt_or_direct_download() {
+        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode] {
+            let content = dockerfile_for_agent(agent);
+            assert!(
+                content.contains("apt-get") || content.contains("curl"),
+                "{:?} template should install packages via apt-get or direct download",
+                agent
+            );
+        }
     }
 }

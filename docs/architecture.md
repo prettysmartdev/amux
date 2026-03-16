@@ -61,12 +61,13 @@ src/
     render.rs              draw(); draw_exec_window/command_box/dialog etc.
     pty.rs                 PtySession; PtyEvent; spawn_text_command helper
 templates/
-  Dockerfile.claude        Embedded via include_str! into init.rs
-  Dockerfile.codex
-  Dockerfile.opencode
+  Dockerfile.claude        Embedded via include_str! into init.rs (debian:bookworm-slim base)
+  Dockerfile.codex         Codex CLI from GitHub releases (debian:bookworm-slim base)
+  Dockerfile.opencode      OpenCode from GitHub releases (debian:bookworm-slim base)
 tests/
   cli_integration.rs       Binary-level integration tests
   command_tui_parity.rs    Verifies command/TUI mode share the same logic
+  dockerfile_build.rs      Builds each template Dockerfile to verify validity
 docs/
   usage.md                 End-user reference
   architecture.md          This file
@@ -484,6 +485,7 @@ automatically (no opt-in dialog needed).
 | Unit — new | `commands::new::tests` | Slugify, numbering, template, find_template, kind parsing, run_with_sink |
 | Integration — CLI | `tests/cli_integration.rs` | Binary-level: help, version, flags, work items |
 | Integration — parity | `tests/command_tui_parity.rs` | Shared logic between command/TUI modes, container lifecycle |
+| Integration — Docker | `tests/dockerfile_build.rs` | Builds each agent template Dockerfile to verify validity |
 
 ### Window Border Color Matrix
 

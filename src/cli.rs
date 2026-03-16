@@ -42,7 +42,7 @@ pub enum Command {
     New,
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum)]
 pub enum Agent {
     Claude,
     Codex,

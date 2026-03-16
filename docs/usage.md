@@ -52,7 +52,7 @@ Initialises the current Git repository for use with `aspec`.
 
 - Detects the Git root directory
 - Writes `aspec/.aspec-cli.json` (repository config)
-- Writes `Dockerfile.dev` (dev container definition)
+- Writes `Dockerfile.dev` from the agent template (only if one does not already exist)
 
 **Flags**
 

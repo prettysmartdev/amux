@@ -213,15 +213,18 @@ pub async fn run_pre_audit(
 
     // 3. Initialize Dockerfile.dev from template if missing
     out.print("Checking Dockerfile.dev... ");
-    if dockerfile.exists() {
-        out.println(format!("OK ({})", dockerfile.display()));
-        summary.dockerfile = StepStatus::Ok("exists".into());
-    } else {
-        out.println("MISSING — initializing from template...");
+    {
         let agent = agent_from_str(&agent_name);
-        write_dockerfile(&git_root, &agent)?;
-        out.println(format!("Dockerfile.dev created at {}", dockerfile.display()));
-        summary.dockerfile = StepStatus::Ok("created".into());
+        if write_dockerfile(&git_root, &agent)? {
+            out.println(format!(
+                "MISSING — created from template at {}",
+                dockerfile.display()
+            ));
+            summary.dockerfile = StepStatus::Ok("created".into());
+        } else {
+            out.println(format!("OK ({})", dockerfile.display()));
+            summary.dockerfile = StepStatus::Ok("exists".into());
+        }
     }
 
     // 4. Check if project image exists; build if missing
