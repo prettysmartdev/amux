@@ -379,6 +379,9 @@ fn flag_suggestions_for(cmd: &str, _typed: &str) -> Vec<String> {
         ],
         "ready" => vec![
             "ready --refresh".into(),
+            "ready --build".into(),
+            "ready --no-cache".into(),
+            "ready --build --no-cache".into(),
             "ready --non-interactive".into(),
             "ready --refresh --non-interactive".into(),
         ],

@@ -15,8 +15,10 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Init { agent } => init::run(agent).await,
         Command::Ready {
             refresh,
+            build,
+            no_cache,
             non_interactive,
-        } => ready::run(refresh, non_interactive).await,
+        } => ready::run(refresh, build, no_cache, non_interactive).await,
         Command::Implement {
             work_item,
             non_interactive,

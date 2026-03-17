@@ -30,15 +30,23 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::time::Duration;
 
+/// Flags passed from the root `aspec` CLI to the `ready` command run at TUI startup.
+#[derive(Clone, Debug, Default)]
+pub struct StartupReadyFlags {
+    pub build: bool,
+    pub no_cache: bool,
+    pub refresh: bool,
+}
+
 /// Launches the interactive TUI. Blocks until the user quits.
-pub async fn run() -> Result<()> {
+pub async fn run(startup_flags: StartupReadyFlags) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal).await;
+    let result = run_app(&mut terminal, startup_flags).await;
 
     // Always restore the terminal, even on error.
     disable_raw_mode()?;
@@ -47,15 +55,25 @@ pub async fn run() -> Result<()> {
     result
 }
 
-async fn run_app<B>(terminal: &mut Terminal<B>) -> Result<()>
+async fn run_app<B>(terminal: &mut Terminal<B>, startup_flags: StartupReadyFlags) -> Result<()>
 where
     B: ratatui::backend::Backend + io::Write,
     <B as ratatui::backend::Backend>::Error: Send + Sync + 'static,
 {
     let mut app = App::new();
 
-    // Auto-run `ready` at startup (edge case from work item spec).
-    execute_command(&mut app, "ready").await;
+    // Auto-run `ready` at startup, forwarding any flags passed to the root `aspec` command.
+    let mut startup_cmd = "ready".to_string();
+    if startup_flags.refresh {
+        startup_cmd.push_str(" --refresh");
+    }
+    if startup_flags.build {
+        startup_cmd.push_str(" --build");
+    }
+    if startup_flags.no_cache {
+        startup_cmd.push_str(" --no-cache");
+    }
+    execute_command(&mut app, &startup_cmd).await;
 
     loop {
         terminal.draw(|f| render::draw(f, &app))?;
@@ -179,11 +197,13 @@ async fn handle_action(app: &mut App, action: Action) {
     }
 }
 
-/// Parse flags from the command parts, returning (refresh, non_interactive).
-fn parse_ready_flags(parts: &[&str]) -> (bool, bool) {
+/// Parse flags from the command parts, returning (refresh, build, no_cache, non_interactive).
+fn parse_ready_flags(parts: &[&str]) -> (bool, bool, bool, bool) {
     let refresh = parts.iter().any(|p| *p == "--refresh");
+    let build = parts.iter().any(|p| *p == "--build");
+    let no_cache = parts.iter().any(|p| *p == "--no-cache");
     let non_interactive = parts.iter().any(|p| *p == "--non-interactive");
-    (refresh, non_interactive)
+    (refresh, build, no_cache, non_interactive)
 }
 
 /// Parse flags from implement command parts, returning non_interactive.
@@ -211,9 +231,11 @@ async fn execute_command(app: &mut App, cmd: &str) {
         }
 
         "ready" => {
-            let (refresh, non_interactive) = parse_ready_flags(&parts);
-            app.pending_command = PendingCommand::Ready { refresh, non_interactive };
-            app.ready_opts = ReadyOptions { refresh, non_interactive };
+            let (refresh, build, no_cache, non_interactive) = parse_ready_flags(&parts);
+            // If --refresh is set, ignore --build (refresh always rebuilds after audit).
+            let effective_build = if refresh { false } else { build };
+            app.pending_command = PendingCommand::Ready { refresh, build: effective_build, no_cache, non_interactive };
+            app.ready_opts = ReadyOptions { refresh, build: effective_build, no_cache, non_interactive };
             show_pre_command_dialogs(app).await;
         }
 
@@ -288,8 +310,8 @@ async fn show_pre_command_dialogs(app: &mut App) {
 /// Resume the pending command after all dialogs have been answered.
 async fn launch_pending_command(app: &mut App) {
     match app.pending_command.clone() {
-        PendingCommand::Ready { refresh, non_interactive } => {
-            app.ready_opts = ReadyOptions { refresh, non_interactive };
+        PendingCommand::Ready { refresh, build, no_cache, non_interactive } => {
+            app.ready_opts = ReadyOptions { refresh, build, no_cache, non_interactive };
             launch_ready(app).await;
         }
         PendingCommand::Implement { work_item, non_interactive } => {
@@ -342,9 +364,10 @@ async fn launch_ready(app: &mut App) {
             Ok(())
         });
     } else {
+        let opts_clone = opts.clone();
         spawn_text_command(tx, exit_tx, move |sink| async move {
             let mut summary = ready::ReadySummary::default();
-            let ctx = ready::run_pre_audit(&sink, mount_path, env_vars, &mut summary).await?;
+            let ctx = ready::run_pre_audit(&sink, mount_path, env_vars, &opts_clone, &mut summary).await?;
             let _ = ctx_tx.send((ctx, summary));
             Ok(())
         });
@@ -517,6 +540,7 @@ fn launch_ready_post_audit(app: &mut App) {
         }
     };
 
+    let opts = app.ready_opts.clone();
     app.ready_phase = ReadyPhase::PostAudit;
     app.continue_command("ready (rebuild)".to_string());
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
@@ -529,7 +553,7 @@ fn launch_ready_post_audit(app: &mut App) {
         summary.dockerfile = ready::StepStatus::Ok("checked".into());
         summary.dev_image = ready::StepStatus::Ok("checked".into());
         summary.refresh = ready::StepStatus::Ok("completed".into());
-        ready::run_post_audit(&sink, &ctx, &mut summary).await?;
+        ready::run_post_audit(&sink, &ctx, &opts, &mut summary).await?;
         print_summary(&sink, &summary);
         sink.println(String::new());
         sink.println("aspec is ready.");

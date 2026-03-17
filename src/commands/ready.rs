@@ -32,6 +32,11 @@ pub struct ReadyContext {
 pub struct ReadyOptions {
     /// When true, run the Dockerfile agent audit. When false, skip it.
     pub refresh: bool,
+    /// When true, force rebuild the dev container image even if one exists.
+    /// Ignored when `refresh` is true (refresh always rebuilds after audit).
+    pub build: bool,
+    /// When true, pass `--no-cache` to `docker build`.
+    pub no_cache: bool,
     /// When true, launch the agent in non-interactive (print) mode.
     pub non_interactive: bool,
 }
@@ -116,8 +121,10 @@ pub fn print_interactive_notice(out: &OutputSink, agent_name: &str) {
 
 /// Command-mode entry point: prompts for mount scope and auth, then runs ready phases.
 /// The audit phase is only run when `--refresh` is passed.
-pub async fn run(refresh: bool, non_interactive: bool) -> Result<()> {
-    let opts = ReadyOptions { refresh, non_interactive };
+pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bool) -> Result<()> {
+    // If --refresh is set, ignore --build (refresh always rebuilds after audit).
+    let effective_build = if refresh { false } else { build };
+    let opts = ReadyOptions { refresh, build: effective_build, no_cache, non_interactive };
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
     let config = load_repo_config(&git_root)?;
@@ -128,7 +135,7 @@ pub async fn run(refresh: bool, non_interactive: bool) -> Result<()> {
     let out = &OutputSink::Stdout;
 
     let mut summary = ReadySummary::default();
-    let ctx = run_pre_audit(out, mount_path, env_vars, &mut summary).await?;
+    let ctx = run_pre_audit(out, mount_path, env_vars, &opts, &mut summary).await?;
 
     if opts.refresh {
         if !opts.non_interactive {
@@ -166,11 +173,16 @@ pub async fn run(refresh: bool, non_interactive: bool) -> Result<()> {
         }
 
         summary.refresh = StepStatus::Ok("completed".into());
-        run_post_audit(out, &ctx, &mut summary).await?;
+        run_post_audit(out, &ctx, &opts, &mut summary).await?;
     } else {
         out.println("Skipping Dockerfile audit (use --refresh to run it).");
         summary.refresh = StepStatus::Skipped("use --refresh to run".into());
-        summary.image_rebuild = StepStatus::Skipped("no refresh".into());
+        // When --build is set, force a rebuild even without --refresh.
+        if opts.build {
+            run_force_build(out, &ctx, &opts, &mut summary).await?;
+        } else {
+            summary.image_rebuild = StepStatus::Skipped("no refresh".into());
+        }
     }
 
     print_summary(out, &summary);
@@ -193,6 +205,7 @@ pub async fn run_pre_audit(
     out: &OutputSink,
     mount_path: PathBuf,
     env_vars: Vec<(String, String)>,
+    opts: &ReadyOptions,
     summary: &mut ReadySummary,
 ) -> Result<ReadyContext> {
     // 1. Docker daemon check
@@ -214,7 +227,10 @@ pub async fn run_pre_audit(
     let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
 
     // 3. Initialize Dockerfile.dev from template if missing
+    //    When the Dockerfile was missing and created from template, always build
+    //    even if an image with the correct name already exists.
     out.print("Checking Dockerfile.dev... ");
+    let dockerfile_was_missing;
     {
         let agent = agent_from_str(&agent_name);
         if write_dockerfile(&git_root, &agent)? {
@@ -223,28 +239,43 @@ pub async fn run_pre_audit(
                 dockerfile.display()
             ));
             summary.dockerfile = StepStatus::Ok("created".into());
+            dockerfile_was_missing = true;
         } else {
             out.println(format!("OK ({})", dockerfile.display()));
             summary.dockerfile = StepStatus::Ok("exists".into());
+            dockerfile_was_missing = false;
         }
     }
 
-    // 4. Check if project image exists; build if missing
+    // 4. Check if project image exists; build if missing, forced by --build, or
+    //    if Dockerfile.dev was just created from template.
     let dockerfile_str = dockerfile.to_str().unwrap().to_string();
     let git_root_str = git_root.to_str().unwrap().to_string();
     let mount_path_str = mount_path.to_str().unwrap().to_string();
 
-    if !docker::image_exists(&image_tag) {
-        out.println(format!("Image {} not found. Building...", image_tag));
-        out.println(format!(
-            "$ {}",
+    let needs_build = dockerfile_was_missing || !docker::image_exists(&image_tag);
+
+    if needs_build {
+        let reason = if !docker::image_exists(&image_tag) {
+            format!("Image {} not found. Building...", image_tag)
+        } else if dockerfile_was_missing {
+            format!("Dockerfile.dev was missing — rebuilding image {}...", image_tag)
+        } else {
+            format!("Rebuilding image {} (--build)...", image_tag)
+        };
+        out.println(&reason);
+        let build_cmd_display = if opts.no_cache {
+            docker::format_build_cmd_no_cache(&image_tag, &dockerfile_str, &git_root_str)
+        } else {
             docker::format_build_cmd(&image_tag, &dockerfile_str, &git_root_str)
-        ));
+        };
+        out.println(format!("$ {}", build_cmd_display));
         let out_clone = out.clone();
         docker::build_image_streaming(
             &image_tag,
             &dockerfile_str,
             &git_root_str,
+            opts.no_cache,
             |line| { out_clone.println(line); },
         )
         .context("Failed to build Docker image")?;
@@ -269,21 +300,56 @@ pub async fn run_pre_audit(
 pub async fn run_post_audit(
     out: &OutputSink,
     ctx: &ReadyContext,
+    opts: &ReadyOptions,
     summary: &mut ReadySummary,
 ) -> Result<()> {
     out.println(format!(
         "Rebuilding image {} with updated Dockerfile.dev...",
         ctx.image_tag
     ));
-    out.println(format!(
-        "$ {}",
+    let build_cmd_display = if opts.no_cache {
+        docker::format_build_cmd_no_cache(&ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
+    } else {
         docker::format_build_cmd(&ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
-    ));
+    };
+    out.println(format!("$ {}", build_cmd_display));
     let out_clone = out.clone();
     docker::build_image_streaming(
         &ctx.image_tag,
         &ctx.dockerfile_str,
         &ctx.git_root_str,
+        opts.no_cache,
+        |line| { out_clone.println(line); },
+    )
+    .context("Failed to rebuild Docker image")?;
+
+    summary.image_rebuild = StepStatus::Ok("rebuilt".into());
+    Ok(())
+}
+
+/// Force-rebuild the Docker image (used when --build is passed without --refresh).
+async fn run_force_build(
+    out: &OutputSink,
+    ctx: &ReadyContext,
+    opts: &ReadyOptions,
+    summary: &mut ReadySummary,
+) -> Result<()> {
+    out.println(format!(
+        "Rebuilding image {} (--build)...",
+        ctx.image_tag
+    ));
+    let build_cmd_display = if opts.no_cache {
+        docker::format_build_cmd_no_cache(&ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
+    } else {
+        docker::format_build_cmd(&ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
+    };
+    out.println(format!("$ {}", build_cmd_display));
+    let out_clone = out.clone();
+    docker::build_image_streaming(
+        &ctx.image_tag,
+        &ctx.dockerfile_str,
+        &ctx.git_root_str,
+        opts.no_cache,
         |line| { out_clone.println(line); },
     )
     .context("Failed to rebuild Docker image")?;
@@ -303,7 +369,7 @@ pub async fn run_with_sink(
     host_settings: Option<&docker::HostSettings>,
 ) -> Result<ReadySummary> {
     let mut summary = ReadySummary::default();
-    let ctx = run_pre_audit(out, mount_path, env_vars, &mut summary).await?;
+    let ctx = run_pre_audit(out, mount_path, env_vars, opts, &mut summary).await?;
 
     if opts.refresh {
         let entrypoint = if opts.non_interactive {
@@ -326,11 +392,15 @@ pub async fn run_with_sink(
         }
         summary.refresh = StepStatus::Ok("completed".into());
 
-        run_post_audit(out, &ctx, &mut summary).await?;
+        run_post_audit(out, &ctx, opts, &mut summary).await?;
     } else {
         out.println("Skipping Dockerfile audit (use --refresh to run it).");
         summary.refresh = StepStatus::Skipped("use --refresh to run".into());
-        summary.image_rebuild = StepStatus::Skipped("no refresh".into());
+        if opts.build {
+            run_force_build(out, &ctx, opts, &mut summary).await?;
+        } else {
+            summary.image_rebuild = StepStatus::Skipped("no refresh".into());
+        }
     }
 
     print_summary(out, &summary);
@@ -457,7 +527,7 @@ mod tests {
 
         let (tx, mut rx) = unbounded_channel();
         let sink = OutputSink::Channel(tx);
-        let opts = ReadyOptions { refresh: false, non_interactive: false };
+        let opts = ReadyOptions { refresh: false, build: false, no_cache: false, non_interactive: false };
         let result = run_with_sink(&sink, git_root.clone(), vec![], &opts, None).await;
         let _ = result;
 
@@ -563,6 +633,30 @@ mod tests {
     fn ready_options_default_no_refresh() {
         let opts = ReadyOptions::default();
         assert!(!opts.refresh);
+        assert!(!opts.build);
+        assert!(!opts.no_cache);
         assert!(!opts.non_interactive);
+    }
+
+    #[test]
+    fn ready_options_build_flag() {
+        let opts = ReadyOptions { build: true, ..Default::default() };
+        assert!(opts.build);
+        assert!(!opts.refresh);
+        assert!(!opts.no_cache);
+    }
+
+    #[test]
+    fn ready_options_no_cache_flag() {
+        let opts = ReadyOptions { no_cache: true, ..Default::default() };
+        assert!(opts.no_cache);
+        assert!(!opts.build);
+    }
+
+    #[test]
+    fn ready_options_build_and_no_cache() {
+        let opts = ReadyOptions { build: true, no_cache: true, ..Default::default() };
+        assert!(opts.build);
+        assert!(opts.no_cache);
     }
 }

@@ -207,7 +207,7 @@ async fn ready_no_refresh_skips_audit_with_message() {
 
     let (tx, mut rx) = unbounded_channel::<String>();
     let sink = OutputSink::Channel(tx);
-    let opts = ReadyOptions { refresh: false, non_interactive: false };
+    let opts = ReadyOptions::default();
     let _ = ready::run_with_sink(&sink, git_root.clone(), vec![], &opts, None).await;
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let has_skip = messages.iter().any(|m| m.contains("Skipping"));
@@ -276,10 +276,12 @@ fn autocomplete_returns_matching_subcommands() {
 }
 
 #[test]
-fn autocomplete_ready_shows_new_flags() {
+fn autocomplete_ready_shows_all_flags() {
     let sug = autocomplete_suggestions("ready ");
-    assert!(sug.iter().any(|s| s.contains("--refresh")));
-    assert!(sug.iter().any(|s| s.contains("--non-interactive")));
+    assert!(sug.iter().any(|s| s.contains("--refresh")), "Missing --refresh");
+    assert!(sug.iter().any(|s| s.contains("--build")), "Missing --build");
+    assert!(sug.iter().any(|s| s.contains("--no-cache")), "Missing --no-cache");
+    assert!(sug.iter().any(|s| s.contains("--non-interactive")), "Missing --non-interactive");
 }
 
 #[test]
@@ -413,14 +415,48 @@ fn parse_work_item_accepts_various_formats() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. ReadyOptions defaults
+// 8. ReadyOptions defaults and new fields
 // ---------------------------------------------------------------------------
 
 #[test]
 fn ready_options_default_no_refresh_no_non_interactive() {
     let opts = ReadyOptions::default();
     assert!(!opts.refresh);
+    assert!(!opts.build);
+    assert!(!opts.no_cache);
     assert!(!opts.non_interactive);
+}
+
+#[test]
+fn ready_options_build_flag() {
+    let opts = ReadyOptions { build: true, ..Default::default() };
+    assert!(opts.build);
+    assert!(!opts.refresh);
+    assert!(!opts.no_cache);
+    assert!(!opts.non_interactive);
+}
+
+#[test]
+fn ready_options_no_cache_flag() {
+    let opts = ReadyOptions { no_cache: true, ..Default::default() };
+    assert!(opts.no_cache);
+    assert!(!opts.build);
+}
+
+#[test]
+fn ready_options_build_and_no_cache() {
+    let opts = ReadyOptions { build: true, no_cache: true, ..Default::default() };
+    assert!(opts.build);
+    assert!(opts.no_cache);
+}
+
+#[test]
+fn ready_options_refresh_ignores_build() {
+    // When refresh is true, build should be ignored per spec.
+    // The run() function handles this, but ReadyOptions itself is just data.
+    let opts = ReadyOptions { refresh: true, build: true, ..Default::default() };
+    assert!(opts.refresh);
+    assert!(opts.build); // ReadyOptions stores both; run() ignores build when refresh is true.
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,4 +1083,172 @@ fn chat_entrypoint_non_interactive_has_no_prompt() {
             impl_args.len()
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// 38. PendingCommand::Ready includes build and no_cache fields
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pending_command_ready_build_no_cache_fields() {
+    use aspec::tui::state::PendingCommand;
+
+    let cmd = PendingCommand::Ready {
+        refresh: false,
+        build: true,
+        no_cache: true,
+        non_interactive: false,
+    };
+    assert_eq!(cmd, PendingCommand::Ready {
+        refresh: false,
+        build: true,
+        no_cache: true,
+        non_interactive: false,
+    });
+    // Different build flag should not match
+    assert_ne!(cmd, PendingCommand::Ready {
+        refresh: false,
+        build: false,
+        no_cache: true,
+        non_interactive: false,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 39. Docker format_build_cmd_no_cache
+// ---------------------------------------------------------------------------
+
+#[test]
+fn docker_format_build_cmd_no_cache() {
+    let cmd = aspec::docker::format_build_cmd_no_cache("img:latest", "Dockerfile.dev", "/repo");
+    assert!(cmd.contains("--no-cache"), "Should contain --no-cache flag");
+    assert!(cmd.contains("img:latest"), "Should contain image tag");
+    assert!(cmd.contains("Dockerfile.dev"), "Should contain dockerfile");
+}
+
+// ---------------------------------------------------------------------------
+// 40. CLI parses --build and --no-cache flags for ready
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_ready_build_flag() {
+    use aspec::cli::{Cli, Command};
+    use clap::Parser;
+
+    let cli = Cli::parse_from(&["aspec", "ready", "--build"]);
+    match cli.command.unwrap() {
+        Command::Ready { build, .. } => assert!(build),
+        _ => panic!("expected ready"),
+    }
+}
+
+#[test]
+fn cli_ready_no_cache_flag() {
+    use aspec::cli::{Cli, Command};
+    use clap::Parser;
+
+    let cli = Cli::parse_from(&["aspec", "ready", "--no-cache"]);
+    match cli.command.unwrap() {
+        Command::Ready { no_cache, .. } => assert!(no_cache),
+        _ => panic!("expected ready"),
+    }
+}
+
+#[test]
+fn cli_ready_build_and_no_cache() {
+    use aspec::cli::{Cli, Command};
+    use clap::Parser;
+
+    let cli = Cli::parse_from(&["aspec", "ready", "--build", "--no-cache"]);
+    match cli.command.unwrap() {
+        Command::Ready { build, no_cache, .. } => {
+            assert!(build);
+            assert!(no_cache);
+        }
+        _ => panic!("expected ready"),
+    }
+}
+
+#[test]
+fn cli_ready_all_flags_combined() {
+    use aspec::cli::{Cli, Command};
+    use clap::Parser;
+
+    let cli = Cli::parse_from(&["aspec", "ready", "--refresh", "--build", "--no-cache", "--non-interactive"]);
+    match cli.command.unwrap() {
+        Command::Ready { refresh, build, no_cache, non_interactive } => {
+            assert!(refresh);
+            assert!(build);
+            assert!(no_cache);
+            assert!(non_interactive);
+        }
+        _ => panic!("expected ready"),
+    }
+}
+
+#[test]
+fn cli_ready_defaults_all_false() {
+    use aspec::cli::{Cli, Command};
+    use clap::Parser;
+
+    let cli = Cli::parse_from(&["aspec", "ready"]);
+    match cli.command.unwrap() {
+        Command::Ready { refresh, build, no_cache, non_interactive } => {
+            assert!(!refresh);
+            assert!(!build);
+            assert!(!no_cache);
+            assert!(!non_interactive);
+        }
+        _ => panic!("expected ready"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Root-level flags forwarded to ready at TUI startup
+// ---------------------------------------------------------------------------
+
+/// Flags passed to `aspec` (no subcommand) are available on the Cli struct
+/// and should be forwarded to the `ready` command when the TUI starts.
+#[test]
+fn root_build_flag_parsed_for_tui_startup() {
+    use aspec::cli::Cli;
+    use clap::Parser;
+
+    let cli = Cli::parse_from(&["aspec", "--build"]);
+    assert!(cli.command.is_none(), "no subcommand when flags are on root");
+    assert!(cli.build);
+    assert!(!cli.no_cache);
+    assert!(!cli.refresh);
+}
+
+#[test]
+fn root_no_cache_flag_parsed_for_tui_startup() {
+    use aspec::cli::Cli;
+    use clap::Parser;
+
+    let cli = Cli::parse_from(&["aspec", "--no-cache"]);
+    assert!(cli.command.is_none());
+    assert!(cli.no_cache);
+}
+
+#[test]
+fn root_refresh_flag_parsed_for_tui_startup() {
+    use aspec::cli::Cli;
+    use clap::Parser;
+
+    let cli = Cli::parse_from(&["aspec", "--refresh"]);
+    assert!(cli.command.is_none());
+    assert!(cli.refresh);
+}
+
+#[test]
+fn root_all_flags_parsed_for_tui_startup() {
+    use aspec::cli::Cli;
+    use clap::Parser;
+
+    let cli = Cli::parse_from(&["aspec", "--build", "--no-cache", "--refresh"]);
+    assert!(cli.command.is_none());
+    assert!(cli.build);
+    assert!(cli.no_cache);
+    assert!(cli.refresh);
 }

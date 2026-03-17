@@ -38,6 +38,8 @@ Running `aspec` with a subcommand executes it and exits immediately:
 aspec init
 aspec ready
 aspec ready --refresh
+aspec ready --build
+aspec ready --build --no-cache
 aspec implement 0001
 aspec chat
 aspec new
@@ -69,13 +71,14 @@ aspec init --agent=claude
 
 ---
 
-### `aspec ready [--refresh] [--non-interactive]`
+### `aspec ready [--refresh] [--build] [--no-cache] [--non-interactive]`
 
 Checks that your environment is ready for agentic development.
 
 1. Verifies the Docker daemon is running
 2. Checks that `Dockerfile.dev` exists — if missing, initialises it from the
-   agent template (same as `init`)
+   agent template (same as `init`) and **always rebuilds the image** (even if
+   one with the correct name already exists)
 3. Checks for an existing `aspec-{projectname}:latest` image — builds one if
    it does not exist yet (with streaming output)
 4. Presents a summary table showing the status of each step
@@ -88,6 +91,16 @@ When `--refresh` is passed, `ready` also runs the Dockerfile agent audit:
 
 Without `--refresh`, the audit is skipped and a tip is shown suggesting its use.
 
+When `--build` is passed (without `--refresh`), `ready` forces a rebuild of the
+dev container image from the current `Dockerfile.dev`, even if an image already
+exists. This is useful when you have manually edited the Dockerfile and want a
+fresh image without re-running the agent audit.
+
+When `--no-cache` is passed, `docker build` is invoked with `--no-cache`,
+forcing Docker to rebuild every layer from scratch. This flag applies to all
+build operations — whether triggered by `--build`, `--refresh`, or a missing
+image. Combine with `--build` to get a completely fresh image.
+
 The image tag is derived from the Git root folder name (e.g. `aspec-myapp:latest`).
 
 Before launching the audit container, `ready` applies the same mount scope and
@@ -98,7 +111,17 @@ agent authentication flow as `implement` (see [Agent Auth](#agent-authentication
 | Flag | Description |
 |------|-------------|
 | `--refresh` | Run the Dockerfile agent audit (skipped by default) |
+| `--build` | Force rebuild the dev container image (ignored if `--refresh` is also set) |
+| `--no-cache` | Pass `--no-cache` to `docker build` for all build operations |
 | `--non-interactive` | Run the agent in print/non-interactive mode |
+
+**Flag interactions**
+
+- `--refresh` + `--build`: `--build` is ignored because `--refresh` always
+  rebuilds the image after the agent audit completes.
+- `--refresh` + `--no-cache`: `--no-cache` is applied to the post-audit
+  image rebuild.
+- `--build` + `--no-cache`: The image is rebuilt without Docker layer caching.
 
 **Docker Build Output**
 
@@ -125,9 +148,12 @@ of each step:
 **Examples**
 
 ```sh
-aspec ready                            # quick check — skips audit
-aspec ready --refresh                  # full check with Dockerfile audit
-aspec ready --refresh --non-interactive  # audit in non-interactive mode
+aspec ready                                # quick check — skips audit
+aspec ready --refresh                      # full check with Dockerfile audit
+aspec ready --refresh --non-interactive    # audit in non-interactive mode
+aspec ready --build                        # rebuild image from current Dockerfile.dev
+aspec ready --build --no-cache             # full rebuild without Docker cache
+aspec ready --refresh --no-cache           # audit + rebuild without cache
 ```
 
 ---
@@ -417,7 +443,7 @@ init --
   init --agent=claude  ·  init --agent=codex  ·  init --agent=opencode
 
 ready --
-  ready --refresh  ·  ready --non-interactive  ·  ready --refresh --non-interactive
+  ready --refresh  ·  ready --build  ·  ready --no-cache  ·  ready --build --no-cache  ·  ready --non-interactive  ·  ready --refresh --non-interactive
 
 implement --
   implement <NNNN>  e.g. implement 0001  ·  implement <NNNN> --non-interactive

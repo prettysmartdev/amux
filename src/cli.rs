@@ -6,6 +6,18 @@ use clap::{Parser, Subcommand, ValueEnum};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    /// Force rebuild the dev container image from Dockerfile.dev (passed to ready on TUI startup).
+    #[arg(long, global = true)]
+    pub build: bool,
+
+    /// Pass --no-cache to docker build (passed to ready on TUI startup).
+    #[arg(long, global = true)]
+    pub no_cache: bool,
+
+    /// Run the Dockerfile agent audit (passed to ready on TUI startup).
+    #[arg(long, global = true)]
+    pub refresh: bool,
 }
 
 #[derive(Subcommand)]
@@ -22,6 +34,14 @@ pub enum Command {
         /// Run the Dockerfile agent audit (skipped by default).
         #[arg(long)]
         refresh: bool,
+
+        /// Force rebuild the dev container image from Dockerfile.dev.
+        #[arg(long)]
+        build: bool,
+
+        /// Pass --no-cache to docker build.
+        #[arg(long)]
+        no_cache: bool,
 
         /// Run the agent in non-interactive (print) mode instead of interactive mode.
         #[arg(long)]
@@ -143,10 +163,12 @@ mod tests {
 
     #[test]
     fn ready_all_flags() {
-        let cli = parse(&["aspec", "ready", "--refresh", "--non-interactive"]);
+        let cli = parse(&["aspec", "ready", "--refresh", "--build", "--no-cache", "--non-interactive"]);
         match cli.command.unwrap() {
-            Command::Ready { refresh, non_interactive } => {
+            Command::Ready { refresh, build, no_cache, non_interactive } => {
                 assert!(refresh);
+                assert!(build);
+                assert!(no_cache);
                 assert!(non_interactive);
             }
             _ => panic!("expected ready"),
@@ -157,9 +179,41 @@ mod tests {
     fn ready_defaults_no_refresh_no_non_interactive() {
         let cli = parse(&["aspec", "ready"]);
         match cli.command.unwrap() {
-            Command::Ready { refresh, non_interactive, .. } => {
+            Command::Ready { refresh, build, no_cache, non_interactive } => {
                 assert!(!refresh);
+                assert!(!build);
+                assert!(!no_cache);
                 assert!(!non_interactive);
+            }
+            _ => panic!("expected ready"),
+        }
+    }
+
+    #[test]
+    fn ready_build_flag() {
+        let cli = parse(&["aspec", "ready", "--build"]);
+        match cli.command.unwrap() {
+            Command::Ready { build, .. } => assert!(build),
+            _ => panic!("expected ready"),
+        }
+    }
+
+    #[test]
+    fn ready_no_cache_flag() {
+        let cli = parse(&["aspec", "ready", "--no-cache"]);
+        match cli.command.unwrap() {
+            Command::Ready { no_cache, .. } => assert!(no_cache),
+            _ => panic!("expected ready"),
+        }
+    }
+
+    #[test]
+    fn ready_build_and_no_cache_flags() {
+        let cli = parse(&["aspec", "ready", "--build", "--no-cache"]);
+        match cli.command.unwrap() {
+            Command::Ready { build, no_cache, .. } => {
+                assert!(build);
+                assert!(no_cache);
             }
             _ => panic!("expected ready"),
         }
@@ -211,5 +265,47 @@ mod tests {
             Command::Chat { non_interactive } => assert!(non_interactive),
             _ => panic!("expected chat"),
         }
+    }
+
+    #[test]
+    fn root_build_flag() {
+        let cli = parse(&["aspec", "--build"]);
+        assert!(cli.build);
+        assert!(!cli.no_cache);
+        assert!(!cli.refresh);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn root_no_cache_flag() {
+        let cli = parse(&["aspec", "--no-cache"]);
+        assert!(cli.no_cache);
+        assert!(!cli.build);
+        assert!(!cli.refresh);
+    }
+
+    #[test]
+    fn root_refresh_flag() {
+        let cli = parse(&["aspec", "--refresh"]);
+        assert!(cli.refresh);
+        assert!(!cli.build);
+        assert!(!cli.no_cache);
+    }
+
+    #[test]
+    fn root_all_flags() {
+        let cli = parse(&["aspec", "--build", "--no-cache", "--refresh"]);
+        assert!(cli.build);
+        assert!(cli.no_cache);
+        assert!(cli.refresh);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn root_flags_default_false() {
+        let cli = parse(&["aspec"]);
+        assert!(!cli.build);
+        assert!(!cli.no_cache);
+        assert!(!cli.refresh);
     }
 }

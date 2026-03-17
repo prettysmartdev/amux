@@ -54,6 +54,8 @@ pub enum PendingCommand {
     None,
     Ready {
         refresh: bool,
+        build: bool,
+        no_cache: bool,
         non_interactive: bool,
     },
     Implement {

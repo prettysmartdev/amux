@@ -240,6 +240,11 @@ pub fn format_build_cmd(tag: &str, dockerfile: &str, context: &str) -> String {
     format!("docker build -t {} -f {} {}", tag, dockerfile, context)
 }
 
+/// Formats a `docker build --no-cache` invocation as a single-line CLI string for display.
+pub fn format_build_cmd_no_cache(tag: &str, dockerfile: &str, context: &str) -> String {
+    format!("docker build --no-cache -t {} -f {} {}", tag, dockerfile, context)
+}
+
 /// Formats a `docker run` invocation (from pre-built args) as a CLI string for display.
 ///
 /// **Note**: callers should use `build_run_args_display` to build the args for display,
@@ -261,12 +266,19 @@ pub fn is_daemon_running() -> bool {
 
 /// Builds a Docker image from the given Dockerfile and build context directory.
 ///
+/// When `no_cache` is true, `--no-cache` is passed to `docker build`.
+///
 /// Returns the combined stdout + stderr output so callers (especially the TUI)
 /// can display progress. Docker emits most build progress on stderr.
 #[allow(dead_code)]
-pub fn build_image(tag: &str, dockerfile: &str, context: &str) -> Result<String> {
+pub fn build_image(tag: &str, dockerfile: &str, context: &str, no_cache: bool) -> Result<String> {
+    let mut args = vec!["build"];
+    if no_cache {
+        args.push("--no-cache");
+    }
+    args.extend_from_slice(&["-t", tag, "-f", dockerfile, context]);
     let output = Command::new("docker")
-        .args(["build", "-t", tag, "-f", dockerfile, context])
+        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -295,11 +307,14 @@ pub fn build_image(tag: &str, dockerfile: &str, context: &str) -> Result<String>
 /// of stdout/stderr as it is produced. This avoids the "frozen" appearance of
 /// buffered builds.
 ///
+/// When `no_cache` is true, `--no-cache` is passed to `docker build`.
+///
 /// Returns the full combined output for callers that also need the text.
 pub fn build_image_streaming<F>(
     tag: &str,
     dockerfile: &str,
     context: &str,
+    no_cache: bool,
     mut on_line: F,
 ) -> Result<String>
 where
@@ -307,8 +322,13 @@ where
 {
     use std::io::BufRead;
 
+    let mut build_args = vec!["build"];
+    if no_cache {
+        build_args.push("--no-cache");
+    }
+    build_args.extend_from_slice(&["-t", tag, "-f", dockerfile, context]);
     let mut child = Command::new("docker")
-        .args(["build", "-t", tag, "-f", dockerfile, context])
+        .args(&build_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -890,6 +910,15 @@ mod tests {
     }
 
     #[test]
+    fn format_build_cmd_no_cache_produces_valid_string() {
+        let cmd = format_build_cmd_no_cache("aspec-test:latest", "Dockerfile.dev", "/repo");
+        assert_eq!(
+            cmd,
+            "docker build --no-cache -t aspec-test:latest -f Dockerfile.dev /repo"
+        );
+    }
+
+    #[test]
     fn format_run_cmd_produces_valid_string() {
         let args = build_run_args("img", "/repo", &["echo", "hello"], &[], None);
         let cmd = format_run_cmd(&args);
@@ -912,6 +941,7 @@ mod tests {
             "aspec-dev:latest",
             dockerfile.to_str().unwrap(),
             git_root.to_str().unwrap(),
+            false,
         )
         .expect("docker build should succeed");
 
