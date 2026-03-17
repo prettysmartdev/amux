@@ -35,6 +35,8 @@ pub enum Dialog {
     /// Ask whether to mount the Git root or just CWD.
     MountScope { git_root: PathBuf, cwd: PathBuf },
     /// Ask whether to mount agent credentials (and save the decision).
+    /// Retained for completeness but currently unused (auto-passthrough).
+    #[allow(dead_code)]
     AgentAuth { agent: String, git_root: PathBuf },
     /// Step 1 of `new`: select work item kind (Feature/Bug/Task).
     NewKindSelect,
@@ -56,6 +58,9 @@ pub enum PendingCommand {
     },
     Implement {
         work_item: u32,
+        non_interactive: bool,
+    },
+    Chat {
         non_interactive: bool,
     },
 }

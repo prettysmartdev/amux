@@ -104,3 +104,31 @@ fn new_help_shows_subcommand() {
         "help should mention 'new' subcommand"
     );
 }
+
+#[test]
+fn chat_help_shows_subcommand() {
+    let output = aspec()
+        .args(["--help"])
+        .output()
+        .expect("failed to run aspec");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("chat"),
+        "help should mention 'chat' subcommand"
+    );
+}
+
+#[test]
+fn chat_help_shows_non_interactive_flag() {
+    let output = aspec()
+        .args(["chat", "--help"])
+        .output()
+        .expect("failed to run aspec");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--non-interactive"),
+        "chat --help should mention --non-interactive flag"
+    );
+}

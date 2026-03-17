@@ -11,7 +11,8 @@ Top level command groups:
 - aspec (no arguments): launches "interactive mode" repl using a Ratatui TUI
 - aspec init: initializes the current Git repo (detect the Git root) to be used with aspec. --agent=[claude|codex|opencode] flag configures which agentic tool will be installed in the Dockerfile.dev container.
 - aspec ready: ensures the local Docker daemon is running and accessible, checks that Dockerfile.dev is present, builds it into a local Docker image, and reports status back to user.
-- aspec implement <work item number>: launches the Doocker image (built from Dockerfile.dev) with the user's preferred code agent to implement the indicated work item from the project's aspec folder.
+- aspec implement <work item number>: launches the Docker image (built from Dockerfile.dev) with the user's preferred code agent to implement the indicated work item from the project's aspec folder.
+- aspec chat: launches the Docker image (built from Dockerfile.dev) with the user's preferred code agent for a freeform interactive chat session with no pre-configured prompt.
 
 ### Flag structure
 Flag guidance:

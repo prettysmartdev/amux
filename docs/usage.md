@@ -39,6 +39,7 @@ aspec init
 aspec ready
 aspec ready --refresh
 aspec implement 0001
+aspec chat
 aspec new
 ```
 
@@ -186,6 +187,53 @@ The agent's output is captured and displayed. No user interaction is required.
 
 ---
 
+### `aspec chat [--non-interactive]`
+
+Starts a freeform chat session with the configured agent in a container.
+
+Unlike `implement`, which sends an initial prompt to the agent, `chat` launches
+the agent with no pre-configured prompt — giving you a clean interactive session.
+
+```sh
+aspec chat                      # start interactive chat
+aspec chat --non-interactive    # start in non-interactive mode
+```
+
+- Prompts to confirm the Docker mount scope (Git root vs CWD) if needed
+- Passes agent credentials via environment variable (see [Agent Auth](#agent-authentication))
+- Launches a container with the configured agent (no initial prompt)
+
+**Flags**
+
+| Flag | Description |
+|------|-------------|
+| `--non-interactive` | Run the agent in print/non-interactive mode |
+
+**Interactive Mode (default)**
+
+By default, the agent launches in **interactive mode**. This is identical to
+`implement`, but without an initial prompt — you start with a blank slate and
+can type any instructions or questions directly.
+
+In **command mode**, the container's stdin/stdout/stderr are fully connected to
+your terminal. In **TUI mode**, the container window opens with full keyboard
+passthrough, just like `implement`.
+
+**Non-Interactive Mode (`--non-interactive`)**
+
+When `--non-interactive` is passed, the agent launches in print/batch mode
+(Claude uses `-p`, Codex uses `--quiet`). Since there is no initial prompt,
+the agent reads from stdin in non-interactive mode.
+
+**Shared Implementation**
+
+`chat` and `implement` share the same underlying container-launching code
+(`commands/agent.rs`). The only difference is:
+- `implement` passes the work item implementation prompt as the agent entrypoint
+- `chat` passes no prompt — just the agent command itself
+
+---
+
 ### `aspec new`
 
 Creates a new work item from the template (`aspec/work-items/0000-template.md`).
@@ -250,7 +298,7 @@ The TUI has two types of windows:
 ┌─── command (inactive) ───────────────────────────────────────┐
 │ > _                                                           │
 └──────────────────────────────────────────────────────────────┘
-  init  ·  ready  ·  implement  ·  new
+  init  ·  ready  ·  implement  ·  chat  ·  new
 ```
 
 ### Container Window
@@ -363,7 +411,7 @@ As you type, aspec shows suggestions below the command box:
 ```
 ready
   ready
-  init  ·  ready  ·  implement  ·  new
+  init  ·  ready  ·  implement  ·  chat  ·  new
 
 init --
   init --agent=claude  ·  init --agent=codex  ·  init --agent=opencode
@@ -373,6 +421,9 @@ ready --
 
 implement --
   implement <NNNN>  e.g. implement 0001  ·  implement <NNNN> --non-interactive
+
+chat --
+  chat  (start a freeform agent session)  ·  chat --non-interactive
 ```
 
 ### Unknown Commands

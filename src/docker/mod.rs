@@ -263,6 +263,7 @@ pub fn is_daemon_running() -> bool {
 ///
 /// Returns the combined stdout + stderr output so callers (especially the TUI)
 /// can display progress. Docker emits most build progress on stderr.
+#[allow(dead_code)]
 pub fn build_image(tag: &str, dockerfile: &str, context: &str) -> Result<String> {
     let output = Command::new("docker")
         .args(["build", "-t", tag, "-f", dockerfile, context])

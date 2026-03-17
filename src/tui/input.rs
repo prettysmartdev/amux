@@ -343,7 +343,7 @@ fn handle_new_title_input(
 
 // --- Autocomplete ---
 
-const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "new"];
+const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "new"];
 
 /// Return suggestions for the current input string.
 pub fn autocomplete_suggestions(input: &str) -> Vec<String> {
@@ -385,6 +385,10 @@ fn flag_suggestions_for(cmd: &str, _typed: &str) -> Vec<String> {
         "implement" => vec![
             "implement <NNNN>  e.g. implement 0001".into(),
             "implement <NNNN> --non-interactive".into(),
+        ],
+        "chat" => vec![
+            "chat  (start a freeform agent session)".into(),
+            "chat --non-interactive".into(),
         ],
         "new" => vec![
             "new  (creates a new work item from template)".into(),

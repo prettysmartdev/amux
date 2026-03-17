@@ -6,7 +6,7 @@
 User
  │
  ▼
-aspec binary ──► command mode  ──► commands/{init,ready,implement,new}
+aspec binary ──► command mode  ──► commands/{init,ready,implement,chat,new}
      │                                       │
      └──────► interactive mode (TUI)         │
                     │                        ▼
@@ -33,6 +33,8 @@ src/
     mod.rs                 Public run() dispatcher
     output.rs              OutputSink: routes output to stdout or TUI channel
     auth.rs                Agent credential path resolution, auth prompts
+    agent.rs               Shared agent launching: run_agent_with_sink()
+                           Used by both implement and chat
     init.rs                `aspec init` — run() + run_with_sink()
     new.rs                 `aspec new` — run() + run_with_sink()
                            WorkItemKind, slugify, apply_template,
@@ -43,6 +45,8 @@ src/
                            audit_entrypoint, audit_entrypoint_non_interactive
     implement.rs           `aspec implement` — run() + run_with_sink()
                            agent_entrypoint, agent_entrypoint_non_interactive
+    chat.rs                `aspec chat` — run() + run_with_sink()
+                           chat_entrypoint, chat_entrypoint_non_interactive
   docker/
     mod.rs                 is_daemon_running, image_exists, project_image_tag,
                            build_image, build_image_streaming,
@@ -54,7 +58,7 @@ src/
   tui/
     mod.rs                 run() entry point; event loop; action dispatcher
     state.rs               App struct; Focus/ExecutionPhase/Dialog enums;
-                           PendingCommand (Ready/Implement with flags);
+                           PendingCommand (Ready/Implement/Chat with flags);
                            ContainerWindowState, ContainerInfo,
                            LastContainerSummary
     input.rs               handle_key(); Action enum; autocomplete; key→bytes
@@ -129,14 +133,15 @@ and capturing keyboard input.
 ### `Dialog`
 
 ```
-None ──[q / Ctrl+C]───────────────────► QuitConfirm ──[y]──► quit
-     ──[ready|implement, cwd ≠ root]──► MountScope   ──[r/c]──► resume
-     ──[ready|implement, auth=None]───► AgentAuth    ──[y/n]──► resume
-     ──[new]──────────────────────────► NewKindSelect ──[1/2/3]──► NewTitleInput ──[Enter]──► create
+None ──[q / Ctrl+C]──────────────────────────► QuitConfirm ──[y]──► quit
+     ──[ready|implement|chat, cwd ≠ root]──► MountScope   ──[r/c]──► resume
+     ──[ready|implement|chat, auth=None]───► AgentAuth    ──[y/n]──► resume
+     ──[new]───────────────────────────────► NewKindSelect ──[1/2/3]──► NewTitleInput ──[Enter]──► create
 ```
 
 Dialogs intercept all key events until dismissed. A `PendingCommand` enum
-(`Ready { refresh, non_interactive }` or `Implement { work_item, non_interactive }`)
+(`Ready { refresh, non_interactive }`, `Implement { work_item, non_interactive }`,
+or `Chat { non_interactive }`)
 and the mount path are preserved in `App` fields while a dialog is active, so
 the correct command resumes after the dialog is dismissed.
 
@@ -231,6 +236,40 @@ into a temporary directory. These are mounted at `/root/.claude.json:ro` and
 Authentication is handled entirely via the `CLAUDE_CODE_OAUTH_TOKEN` environment
 variable — the host settings mount provides agent configuration (onboarding
 state, model preferences, plugins) without interfering with auth.
+
+---
+
+## Chat Command
+
+The `chat` command starts a freeform agent session with no pre-configured prompt.
+It shares the same underlying container-launching logic as `implement` via the
+`commands/agent.rs` module.
+
+### Shared Agent Launching (`commands/agent.rs`)
+
+The `run_agent_with_sink()` function is the shared code path for both `implement`
+and `chat`. It handles:
+
+- Git root detection and config loading
+- Mount path resolution
+- Docker image tag derivation
+- Docker command display (with masked secrets)
+- Interactive notice display
+- Container launching (interactive or captured)
+
+The only differences between `chat` and `implement` are:
+- **Entrypoint**: `chat` passes just the agent command (e.g. `["claude"]`);
+  `implement` passes the agent command + a structured prompt
+- **Status message**: `chat` shows "Starting chat session"; `implement` shows
+  the work item being implemented
+
+### Chat Entrypoints
+
+| Agent | Interactive | Non-Interactive |
+|-------|-----------|-----------------|
+| `claude` | `["claude"]` | `["claude", "-p"]` |
+| `codex` | `["codex"]` | `["codex", "--quiet"]` |
+| `opencode` | `["opencode"]` | `["opencode"]` |
 
 ---
 
@@ -364,7 +403,7 @@ stdout; in TUI mode it appears in the execution window output.
 
 ## Container Window
 
-When `implement` or `ready --refresh` launches an interactive agent, the TUI
+When `implement`, `chat`, or `ready --refresh` launches an interactive agent, the TUI
 displays a dedicated **container window** overlaying the outer execution window.
 
 ### State Machine
@@ -482,6 +521,8 @@ automatically (no opt-in dialog needed).
 | Unit — PTY | `tui::pty::tests` | Real `echo` and `sh -c 'exit 42'` processes |
 | Unit — ready | `commands::ready::tests` | Summary table, interactive notice, options, entrypoints |
 | Unit — implement | `commands::implement::tests` | Entrypoints (interactive + non-interactive) |
+| Unit — chat | `commands::chat::tests` | Entrypoints, no-prompt verification |
+| Unit — agent | `commands::agent::tests` | Shared agent launching |
 | Unit — new | `commands::new::tests` | Slugify, numbering, template, find_template, kind parsing, run_with_sink |
 | Integration — CLI | `tests/cli_integration.rs` | Binary-level: help, version, flags, work items |
 | Integration — parity | `tests/command_tui_parity.rs` | Shared logic between command/TUI modes, container lifecycle |

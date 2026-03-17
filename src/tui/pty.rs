@@ -158,7 +158,9 @@ mod tests {
         let mut received_data = false;
         let mut exit_code = None;
 
-        // Collect events with a reasonable timeout.
+        // Collect events with a reasonable timeout. Continue draining after
+        // Exit because Data events may arrive in the channel before Exit but
+        // be polled after it (race between reader and wait threads).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             match event_rx.try_recv() {
@@ -170,6 +172,13 @@ mod tests {
                 }
                 Ok(PtyEvent::Exit(code)) => {
                     exit_code = Some(code);
+                    // Drain any remaining Data events already in the channel.
+                    while let Ok(PtyEvent::Data(bytes)) = event_rx.try_recv() {
+                        let text = String::from_utf8_lossy(&bytes);
+                        if text.contains("hello from pty") {
+                            received_data = true;
+                        }
+                    }
                     break;
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),

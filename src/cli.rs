@@ -38,6 +38,13 @@ pub enum Command {
         non_interactive: bool,
     },
 
+    /// Start a freeform chat session with the configured agent in a container.
+    Chat {
+        /// Run the agent in non-interactive (print) mode instead of interactive mode.
+        #[arg(long)]
+        non_interactive: bool,
+    },
+
     /// Create a new work item from the template.
     New,
 }
@@ -180,5 +187,29 @@ mod tests {
     fn new_subcommand_parsed() {
         let cli = parse(&["aspec", "new"]);
         assert!(matches!(cli.command.unwrap(), Command::New));
+    }
+
+    #[test]
+    fn chat_subcommand_parsed() {
+        let cli = parse(&["aspec", "chat"]);
+        assert!(matches!(cli.command.unwrap(), Command::Chat { .. }));
+    }
+
+    #[test]
+    fn chat_defaults_interactive() {
+        let cli = parse(&["aspec", "chat"]);
+        match cli.command.unwrap() {
+            Command::Chat { non_interactive } => assert!(!non_interactive),
+            _ => panic!("expected chat"),
+        }
+    }
+
+    #[test]
+    fn chat_non_interactive_flag() {
+        let cli = parse(&["aspec", "chat", "--non-interactive"]);
+        match cli.command.unwrap() {
+            Command::Chat { non_interactive } => assert!(non_interactive),
+            _ => panic!("expected chat"),
+        }
     }
 }

@@ -1,4 +1,6 @@
+pub mod agent;
 pub mod auth;
+pub mod chat;
 pub mod implement;
 pub mod init;
 pub mod new;
@@ -19,6 +21,7 @@ pub async fn run(command: Command) -> Result<()> {
             work_item,
             non_interactive,
         } => implement::run(&work_item, non_interactive).await,
+        Command::Chat { non_interactive } => chat::run(non_interactive).await,
         Command::New => new::run().await,
     }
 }

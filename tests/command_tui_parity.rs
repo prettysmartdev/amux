@@ -6,6 +6,9 @@ use aspec::commands::auth::{
     apply_auth_decision, agent_keychain_credentials, read_keychain_raw,
     AgentCredentials,
 };
+use aspec::commands::chat::{
+    chat_entrypoint, chat_entrypoint_non_interactive,
+};
 use aspec::commands::implement::{
     agent_entrypoint, agent_entrypoint_non_interactive, find_work_item, implement_prompt,
     parse_work_item,
@@ -650,7 +653,7 @@ fn container_window_lifecycle() {
 
 #[test]
 fn container_pty_output_routing() {
-    use aspec::tui::state::{App, ContainerWindowState, ExecutionPhase};
+    use aspec::tui::state::{App, ExecutionPhase};
 
     let mut app = App::new();
     app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
@@ -745,7 +748,7 @@ fn pty_args_container_name() {
 
 #[test]
 fn container_summary_averages_stats() {
-    use aspec::tui::state::{App, ContainerWindowState, ExecutionPhase};
+    use aspec::tui::state::{App, ExecutionPhase};
 
     let mut app = App::new();
     app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
@@ -864,4 +867,184 @@ fn docker_display_args_mask_secrets() {
     let args = aspec::docker::build_run_args_display("img", "/repo", &[], &env, None);
     assert!(args.contains(&"ANTHROPIC_API_KEY=***".to_string()), "API key should be masked");
     assert!(!args.iter().any(|a| a.contains("sk-ant-oat01-secret")), "Secret must not appear");
+}
+
+// ---------------------------------------------------------------------------
+// 31. Chat entrypoint for each agent
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chat_entrypoint_for_each_agent() {
+    let claude = chat_entrypoint("claude");
+    assert_eq!(claude.len(), 1);
+    assert_eq!(claude[0], "claude");
+
+    let codex = chat_entrypoint("codex");
+    assert_eq!(codex.len(), 1);
+    assert_eq!(codex[0], "codex");
+
+    let opencode = chat_entrypoint("opencode");
+    assert_eq!(opencode.len(), 1);
+    assert_eq!(opencode[0], "opencode");
+}
+
+// ---------------------------------------------------------------------------
+// 32. Chat entrypoint non-interactive for each agent
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chat_entrypoint_non_interactive_for_each_agent() {
+    let claude = chat_entrypoint_non_interactive("claude");
+    assert_eq!(claude[0], "claude");
+    assert_eq!(claude[1], "-p");
+
+    let codex = chat_entrypoint_non_interactive("codex");
+    assert_eq!(codex[0], "codex");
+    assert_eq!(codex[1], "--quiet");
+
+    let opencode = chat_entrypoint_non_interactive("opencode");
+    assert_eq!(opencode.len(), 1);
+    assert_eq!(opencode[0], "opencode");
+}
+
+// ---------------------------------------------------------------------------
+// 33. Chat entrypoint has no prompt (unlike implement)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chat_entrypoint_has_no_prompt() {
+    for agent in &["claude", "codex", "opencode"] {
+        let chat_args = chat_entrypoint(agent);
+        let impl_args = agent_entrypoint(agent, 1);
+
+        // Chat should have fewer args than implement (no prompt).
+        assert!(
+            chat_args.len() < impl_args.len(),
+            "Chat entrypoint for {} should be shorter than implement entrypoint ({} vs {})",
+            agent,
+            chat_args.len(),
+            impl_args.len()
+        );
+
+        // Chat should not contain any prompt-like text.
+        for arg in &chat_args {
+            assert!(
+                !arg.contains("Implement"),
+                "Chat entrypoint for {} should not contain implement prompt",
+                agent
+            );
+            assert!(
+                !arg.contains("work item"),
+                "Chat entrypoint for {} should not reference a work item",
+                agent
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 34. Chat and implement share docker run arg construction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chat_and_implement_share_docker_args() {
+    let chat_ep = chat_entrypoint("claude");
+    let impl_ep = agent_entrypoint("claude", 1);
+
+    let chat_ep_refs: Vec<&str> = chat_ep.iter().map(String::as_str).collect();
+    let impl_ep_refs: Vec<&str> = impl_ep.iter().map(String::as_str).collect();
+
+    let chat_args = aspec::docker::build_run_args("img", "/repo", &chat_ep_refs, &[], None);
+    let impl_args = aspec::docker::build_run_args("img", "/repo", &impl_ep_refs, &[], None);
+
+    // Both should start with the same Docker flags.
+    assert_eq!(chat_args[0], impl_args[0]); // "run"
+    assert_eq!(chat_args[1], impl_args[1]); // "--rm"
+    assert_eq!(chat_args[2], impl_args[2]); // "-it"
+
+    // Both should use the same image.
+    assert!(chat_args.contains(&"img".to_string()));
+    assert!(impl_args.contains(&"img".to_string()));
+
+    // Chat should have "claude" only; implement should have "claude" + prompt.
+    let chat_post_image: Vec<&String> = chat_args.iter().skip_while(|a| *a != "img").skip(1).collect();
+    let impl_post_image: Vec<&String> = impl_args.iter().skip_while(|a| *a != "img").skip(1).collect();
+    assert_eq!(chat_post_image.len(), 1, "Chat: just the agent command");
+    assert_eq!(impl_post_image.len(), 2, "Implement: agent + prompt");
+}
+
+// ---------------------------------------------------------------------------
+// 35. Autocomplete includes chat subcommand
+// ---------------------------------------------------------------------------
+
+#[test]
+fn autocomplete_includes_chat_subcommand() {
+    let sug = autocomplete_suggestions("");
+    assert!(
+        sug.contains(&"chat".to_string()),
+        "Expected 'chat' in suggestions"
+    );
+
+    let sug = autocomplete_suggestions("ch");
+    assert_eq!(sug, vec!["chat"]);
+}
+
+#[test]
+fn autocomplete_chat_shows_hints() {
+    let sug = autocomplete_suggestions("chat ");
+    assert!(
+        sug.iter().any(|s| s.contains("chat")),
+        "Expected hint for 'chat' command, got: {:?}",
+        sug
+    );
+    assert!(
+        sug.iter().any(|s| s.contains("--non-interactive")),
+        "Expected --non-interactive hint for 'chat' command, got: {:?}",
+        sug
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 36. Chat PendingCommand variant
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pending_command_chat_variant() {
+    use aspec::tui::state::PendingCommand;
+
+    let cmd = PendingCommand::Chat { non_interactive: false };
+    assert_eq!(cmd, PendingCommand::Chat { non_interactive: false });
+    assert_ne!(cmd, PendingCommand::Chat { non_interactive: true });
+    assert_ne!(cmd, PendingCommand::None);
+}
+
+// ---------------------------------------------------------------------------
+// 37. Chat entrypoint non-interactive has no prompt
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chat_entrypoint_non_interactive_has_no_prompt() {
+    for agent in &["claude", "codex", "opencode"] {
+        let chat_args = chat_entrypoint_non_interactive(agent);
+        let impl_args = agent_entrypoint_non_interactive(agent, 1);
+
+        // Chat non-interactive should not contain prompt text.
+        for arg in &chat_args {
+            assert!(
+                !arg.contains("Implement"),
+                "Chat non-interactive for {} should not contain prompt: {}",
+                agent,
+                arg
+            );
+        }
+
+        // Chat should have fewer or equal args than implement.
+        assert!(
+            chat_args.len() <= impl_args.len(),
+            "Chat non-interactive for {} should not be longer than implement ({} vs {})",
+            agent,
+            chat_args.len(),
+            impl_args.len()
+        );
+    }
 }

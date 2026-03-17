@@ -5,6 +5,7 @@ pub mod state;
 
 use crate::cli::Agent;
 use crate::commands::auth::{agent_keychain_credentials, apply_auth_decision};
+use crate::commands::chat::{chat_entrypoint, chat_entrypoint_non_interactive};
 use crate::commands::implement::{
     agent_entrypoint, agent_entrypoint_non_interactive, find_work_item, parse_work_item,
 };
@@ -235,6 +236,12 @@ async fn execute_command(app: &mut App, cmd: &str) {
             show_pre_command_dialogs(app).await;
         }
 
+        "chat" => {
+            let non_interactive = parts.iter().any(|p| *p == "--non-interactive");
+            app.pending_command = PendingCommand::Chat { non_interactive };
+            show_pre_command_dialogs(app).await;
+        }
+
         "new" => {
             app.dialog = state::Dialog::NewKindSelect;
         }
@@ -287,6 +294,9 @@ async fn launch_pending_command(app: &mut App) {
         }
         PendingCommand::Implement { work_item, non_interactive } => {
             launch_implement(app, work_item, non_interactive).await;
+        }
+        PendingCommand::Chat { non_interactive } => {
+            launch_chat(app, non_interactive).await;
         }
         PendingCommand::None => {}
     }
@@ -589,6 +599,113 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool) 
         let mount_str = mount_path.to_str().unwrap().to_string();
         spawn_text_command(tx, exit_tx, move |sink| async move {
             let entrypoint = agent_entrypoint_non_interactive(&agent_name, work_item);
+            let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+            let (_cmd, output) = docker::run_container_captured(
+                &image_tag,
+                &mount_str,
+                &entrypoint_refs,
+                &env_vars,
+                host_settings.as_ref(),
+            )?;
+            for line in output.lines() {
+                sink.println(line);
+            }
+            Ok(())
+        });
+    } else {
+        // Print interactive notice to the outer window.
+        let sink = crate::commands::output::OutputSink::Channel(app.output_tx.clone());
+        print_interactive_notice(&sink, &agent_name);
+
+        let docker_args =
+            docker::build_run_args_pty(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, Some(&container_name), app.host_settings.as_ref());
+        let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
+
+        // Use actual terminal dimensions for the PTY.
+        let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
+        let size = PtySize {
+            rows: inner_rows,
+            cols: inner_cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+
+        // Activate the container window.
+        let display_name = state::agent_display_name(&agent_name).to_string();
+        app.start_container(container_name.clone(), display_name, inner_cols, inner_rows);
+
+        match PtySession::spawn("docker", &docker_str_refs, size) {
+            Ok((session, pty_rx)) => {
+                app.pty = Some(session);
+                app.pty_rx = Some(pty_rx);
+                // Start Docker stats polling.
+                app.stats_rx = Some(spawn_stats_poller(container_name));
+            }
+            Err(e) => {
+                app.push_output(format!("Failed to launch container: {}", e));
+                app.finish_command(1);
+            }
+        }
+    }
+}
+
+/// Actually spawn the docker container for `chat` via PTY.
+async fn launch_chat(app: &mut App, non_interactive: bool) {
+    let git_root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            app.input_error = Some("Not inside a Git repository.".into());
+            return;
+        }
+    };
+
+    let config = load_repo_config(&git_root).unwrap_or_default();
+    let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
+    let mount_path = app.pending_mount_path.take().unwrap_or_else(|| git_root.clone());
+
+    // Auto-passthrough: always pass credentials from keychain if available.
+    let credentials = agent_keychain_credentials(&agent_name);
+    let env_vars = credentials.env_vars;
+
+    // Prepare host settings (sanitized config files in a temp dir).
+    app.host_settings = docker::HostSettings::prepare(&agent_name);
+
+    let entrypoint = if non_interactive {
+        chat_entrypoint_non_interactive(&agent_name)
+    } else {
+        chat_entrypoint(&agent_name)
+    };
+    let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+
+    let image_tag = docker::project_image_tag(&git_root);
+
+    // Generate a container name for stats polling.
+    let container_name = docker::generate_container_name();
+
+    // Show the full Docker CLI command in the execution window (with masked env values).
+    let display_args = if non_interactive {
+        docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.host_settings.as_ref())
+    } else {
+        docker::build_run_args_pty_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, Some(&container_name), app.host_settings.as_ref())
+    };
+    let cmd_display = docker::format_run_cmd(&display_args);
+
+    let command_display = "chat".to_string();
+    app.start_command(command_display);
+    app.push_output(format!("$ {}", cmd_display));
+
+    if non_interactive {
+        app.push_output("Tip: remove --non-interactive to interact with the agent directly.");
+        // Move host_settings into the task so the temp dir lives until the container exits.
+        let host_settings = app.host_settings.take();
+        // Run captured in a text command.
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        app.exit_rx = Some(exit_rx);
+        let tx = app.output_tx.clone();
+        let mount_str = mount_path.to_str().unwrap().to_string();
+        spawn_text_command(tx, exit_tx, move |sink| async move {
+            let entrypoint = chat_entrypoint_non_interactive(&agent_name);
             let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
             let (_cmd, output) = docker::run_container_captured(
                 &image_tag,

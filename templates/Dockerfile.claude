@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code via official standalone installer
-RUN curl -fsSL https://claude.ai/install.sh | bash
-ENV PATH="/root/.claude/bin:${PATH}"
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && cp /root/.local/bin/claude /usr/local/bin/claude
 
 WORKDIR /workspace

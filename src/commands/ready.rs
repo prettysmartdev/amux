@@ -12,7 +12,9 @@ use std::path::PathBuf;
 const AUDIT_PROMPT: &str = "scan this project and determine every tool needed to build, run, \
     and test it per the local development workflows defined in the aspec. Modify Dockerfile.dev \
     to ensure that all of those tools, at the correct version, get installed when the Dockerfile \
-    is built";
+    is built. Pin to specific versions wherever possible. Ensure all relevant tools are in $PATH \
+    and can be executed by the container entrypoint command. Only modify Dockerfile.dev; do not \
+    modify any other files. Do not add any new files.";
 
 /// Context produced by the pre-audit phase, needed by the audit and post-audit phases.
 #[derive(Clone)]

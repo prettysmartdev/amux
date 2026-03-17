@@ -1,3 +1,4 @@
+use crate::commands::agent::run_agent_with_sink;
 use crate::commands::auth::resolve_auth;
 use crate::commands::init::find_git_root;
 use crate::commands::output::OutputSink;
@@ -21,7 +22,31 @@ pub async fn run(work_item_str: &str, non_interactive: bool) -> Result<()> {
     let config = load_repo_config(&git_root)?;
     let agent = config.agent.as_deref().unwrap_or("claude");
     let host_settings = docker::HostSettings::prepare(agent);
-    run_with_sink(work_item, &OutputSink::Stdout, Some(mount_path), credentials.env_vars.clone(), non_interactive, host_settings.as_ref()).await
+
+    let entrypoint = if non_interactive {
+        agent_entrypoint_non_interactive(agent, work_item)
+    } else {
+        agent_entrypoint(agent, work_item)
+    };
+
+    let work_item_path = find_work_item(&git_root, work_item)?;
+    let status = format!(
+        "Implementing work item {:04} with agent '{}': {}",
+        work_item,
+        agent,
+        work_item_path.display()
+    );
+
+    run_agent_with_sink(
+        entrypoint,
+        &status,
+        &OutputSink::Stdout,
+        Some(mount_path),
+        credentials.env_vars.clone(),
+        non_interactive,
+        host_settings.as_ref(),
+    )
+    .await
 }
 
 /// Core logic shared between command mode and TUI mode.
@@ -40,64 +65,32 @@ pub async fn run_with_sink(
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let config = load_repo_config(&git_root)?;
-
     let agent = config.agent.as_deref().unwrap_or("claude").to_string();
     let work_item_path = find_work_item(&git_root, work_item)?;
 
-    out.println(format!(
-        "Implementing work item {:04} with agent '{}': {}",
-        work_item,
-        agent,
-        work_item_path.display()
-    ));
-
-    let mount_path = match mount_override {
-        Some(p) => p,
-        None => confirm_mount_scope_stdin(&git_root)?,
-    };
-
-    let image_tag = crate::docker::project_image_tag(&git_root);
     let entrypoint = if non_interactive {
         agent_entrypoint_non_interactive(&agent, work_item)
     } else {
         agent_entrypoint(&agent, work_item)
     };
-    let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    // Show the full Docker CLI command being run (with masked env values).
-    let display_args = docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, host_settings);
-    out.println(format!("$ {}", docker::format_run_cmd(&display_args)));
+    let status = format!(
+        "Implementing work item {:04} with agent '{}': {}",
+        work_item,
+        agent,
+        work_item_path.display()
+    );
 
-    if !non_interactive {
-        crate::commands::ready::print_interactive_notice(out, &agent);
-    } else {
-        out.println("Tip: remove --non-interactive to interact with the agent directly.");
-    }
-
-    if non_interactive {
-        let (_cmd, output) = docker::run_container_captured(
-            &image_tag,
-            mount_path.to_str().unwrap(),
-            &entrypoint_refs,
-            &env_vars,
-            host_settings,
-        )
-        .context("Container exited with an error")?;
-        for line in output.lines() {
-            out.println(line);
-        }
-    } else {
-        docker::run_container(
-            &image_tag,
-            mount_path.to_str().unwrap(),
-            &entrypoint_refs,
-            &env_vars,
-            host_settings,
-        )
-        .context("Container exited with an error")?;
-    }
-
-    Ok(())
+    run_agent_with_sink(
+        entrypoint,
+        &status,
+        out,
+        mount_override,
+        env_vars,
+        non_interactive,
+        host_settings,
+    )
+    .await
 }
 
 fn agent_name(git_root: &PathBuf) -> Result<&'static str> {
