@@ -666,8 +666,24 @@ $ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_O
 ## Build & Development
 
 ```sh
-make all        # cargo build --release
-make install    # build + install to /usr/local/bin/ (may need sudo)
-make test       # cargo test
-make clean      # cargo clean
+make all                      # cargo build --release
+make install                  # build + install to /usr/local/bin/ (may need sudo)
+make test                     # cargo test
+make clean                    # cargo clean
+make release VERSION=v1.0.0   # create and publish a release (see below)
 ```
+
+### Releasing
+
+`make release VERSION=vx.y.z` automates the full release process:
+
+1. Switches to `main`, pulls latest, and verifies a clean working tree
+2. Creates `docs/releases/vx.y.z.md` with a release notes template
+3. Launches `aspec chat` so you can prompt the agent to write release notes
+4. Runs all tests locally
+5. Commits the release notes and tags the commit with the version
+6. Pushes the commit and tag to `main`
+7. Creates a GitHub Release with the release notes via `gh`
+
+The tag push triggers the release CI pipeline, which builds binaries for all
+platforms and uploads them to the GitHub Release.
