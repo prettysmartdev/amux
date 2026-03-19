@@ -17,3 +17,9 @@
 - add --plan flag to `implement` and `chat` subcommands to initiate agent in plan mode
 - send a greeting to claude outside the container to refresh auth token
 - automatic skills and subagents from spec
+- multiple tabs within TUI
+	- each tab includes an outer window and container window
+	- each tab lets you choose which project it's attached to (aspec keeps track of where you've used it in global config)
+	- ctrl + wasd to move between tabs and command box
+	- typing a new command while a container is running in current tab automatically launches a new tab
+	- detect when agent needs your input, put alarm bell in the tab title and a message ticker below the window
