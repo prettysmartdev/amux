@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
 /// The prompt sent to the agent for Dockerfile.dev audit.
-const AUDIT_PROMPT: &str = "scan this project and determine every tool needed to build, run, \
+pub const AUDIT_PROMPT: &str = "scan this project and determine every tool needed to build, run, \
     and test it per the local development workflows defined in the aspec. Modify Dockerfile.dev \
     to ensure that all of those tools, at the correct version, get installed when the Dockerfile \
     is built. Pin to specific versions wherever possible. Ensure all relevant tools are in $PATH \

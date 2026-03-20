@@ -47,6 +47,7 @@ aspec chat
 aspec chat --plan
 aspec chat --allow-docker
 aspec new
+aspec claws ready
 ```
 
 ---
@@ -294,6 +295,87 @@ section for details on how each agent's plan mode is activated.
 (`commands/agent.rs`). The only difference is:
 - `implement` passes the work item implementation prompt as the agent entrypoint
 - `chat` passes no prompt — just the agent command itself
+
+---
+
+### `aspec claws ready`
+
+Sets up and manages a persistent nanoclaw agent container — a machine-global
+installation of [nanoclaw](https://github.com/qwibitai/nanoclaw) that runs a
+background agent accessible from anywhere on the machine.
+
+Unlike `implement` and `chat` (per-project, ephemeral containers), the nanoclaw
+container is persistent and machine-global. It lives at `/usr/local/nanoclaw`
+and survives across `aspec` sessions.
+
+#### First-run wizard
+
+On the first run, `aspec claws ready` guides you through:
+
+1. **Fork check** — asks whether you have already forked nanoclaw on GitHub.
+   - **Yes** — prompts for your GitHub username and clones
+     `github.com/<username>/nanoclaw` to `/usr/local/nanoclaw`.
+   - **No** — offers to fork and clone using the GitHub CLI (`gh repo fork`).
+     If you decline, provides manual instructions.
+2. **Docker daemon** — verifies the Docker daemon is running.
+3. **Dockerfile setup** — writes or verifies `Dockerfile.dev` inside the
+   nanoclaw repo and builds the `aspec-nanoclaw:latest` image.
+4. **Docker socket warning** — explains (and requires explicit acceptance) that
+   the nanoclaw container will be mounted to the host Docker socket, granting
+   elevated access identical to `--allow-docker`.
+5. **`/setup` explanation** — reminds you to run `/setup` inside the agent
+   after launching, and requires explicit acceptance before proceeding.
+6. **Container launch** — creates a Docker named volume (`aspec-nanoclaw-vol`),
+   starts the container in the background, waits for it to reach running state,
+   and saves the container ID to `/usr/local/nanoclaw/.aspec.json`.
+7. **Attach** — attaches to the running container and launches the configured
+   code agent interactively (identical to `aspec chat`).
+
+#### Subsequent runs
+
+On subsequent runs, `claws ready` checks whether the saved container is still
+running:
+
+- **Container running** — shows a summary table and exits immediately.
+- **Container stopped** — offers to restart it. If accepted, starts the
+  container and attaches the agent. Reminds you to run `/setup` if needed.
+
+#### Agent session behavior
+
+Once attached, the experience is identical to `aspec chat`:
+
+- In **command mode**, stdin/stdout/stderr are fully connected.
+- In **TUI mode**, the container window opens with full keyboard passthrough.
+- Press **Ctrl+C** to detach from the agent — the container **continues
+  running in the background**. The next `claws ready` will re-attach.
+
+#### Authentication
+
+The nanoclaw container is auto-authenticated using the same keychain
+passthrough as `chat` and `implement` — no manual login required.
+
+#### Docker Socket Access
+
+The nanoclaw container always mounts the host Docker socket. This is required
+for nanoclaw to manage Docker containers on your behalf. A warning is shown and
+explicit acceptance is required on first run.
+
+#### Configuration
+
+The container ID is stored at `/usr/local/nanoclaw/.aspec.json`:
+
+```json
+{
+  "nanoclawContainerID": "abc123..."
+}
+```
+
+#### Examples
+
+```sh
+aspec claws ready    # first run: full wizard
+aspec claws ready    # subsequent run: check status or re-attach
+```
 
 ---
 

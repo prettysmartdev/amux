@@ -46,6 +46,21 @@ pub enum Dialog {
         /// Current title text being typed.
         title: String,
     },
+    /// Claws wizard: ask if user has already forked nanoclaw.
+    ClawsReadyHasForked,
+    /// Claws wizard: enter GitHub username (if already forked).
+    ClawsReadyUsernameInput { username: String },
+    /// Claws wizard: confirm Docker socket access warning.
+    ClawsReadyDockerSocketWarning,
+    /// Claws wizard: confirm /setup explanation before launching.
+    ClawsReadySetupExplain,
+    /// Claws subsequent run: offer to start the stopped container.
+    ClawsReadyOfferStart,
+    /// Claws wizard: clone failed with permission denied; collect sudo password for retry.
+    ClawsReadySudoConfirm {
+        /// The sudo password being entered (displayed as '*').
+        password: String,
+    },
 }
 
 /// Tracks which command is waiting for dialog answers (mount scope, auth).
@@ -70,6 +85,16 @@ pub enum PendingCommand {
         plan: bool,
         allow_docker: bool,
     },
+    ClawsReady,
+}
+
+/// Which phase of the multi-step claws workflow is active in the TUI.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClawsPhase {
+    /// Not running a claws workflow.
+    Inactive,
+    /// Non-interactive setup (clone + image build + container start) is running.
+    Setup,
 }
 
 /// State of the container overlay window.
@@ -226,6 +251,28 @@ pub struct App {
 
     /// Set to true to break out of the event loop.
     pub should_quit: bool,
+
+    // --- Claws wizard state ---
+    /// Which phase of the claws workflow is active.
+    pub claws_phase: ClawsPhase,
+    /// Container ID received from the claws setup task; consumed when attaching.
+    pub claws_container_id: Option<String>,
+    /// Receives the container ID from the claws setup task when it completes.
+    pub claws_container_id_rx: Option<tokio::sync::oneshot::Receiver<String>>,
+    /// GitHub username entered during the claws first-run wizard.
+    pub claws_wizard_username: Option<String>,
+    /// Whether the user indicated they have already forked nanoclaw.
+    pub claws_wizard_already_forked: bool,
+    /// Receives a unit signal from the background clone task when it encounters
+    /// a permission-denied error and needs the user's permission to use sudo.
+    pub claws_sudo_request_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Sends the user's sudo password (Some = accepted with password, None = declined) to the clone task.
+    pub claws_sudo_response_tx: Option<tokio::sync::oneshot::Sender<Option<String>>>,
+    /// Receives a unit signal from the background build task when it needs the user to
+    /// accept docker socket access (shown after the image rebuild completes).
+    pub claws_docker_accept_request_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Sends the user's docker-socket acceptance (true = accepted, false = declined) to the build task.
+    pub claws_docker_accept_response_tx: Option<tokio::sync::oneshot::Sender<bool>>,
 }
 
 impl App {
@@ -263,6 +310,15 @@ impl App {
             stats_rx: None,
             host_settings: None,
             should_quit: false,
+            claws_phase: ClawsPhase::Inactive,
+            claws_container_id: None,
+            claws_container_id_rx: None,
+            claws_wizard_username: None,
+            claws_wizard_already_forked: false,
+            claws_sudo_request_rx: None,
+            claws_sudo_response_tx: None,
+            claws_docker_accept_request_rx: None,
+            claws_docker_accept_response_tx: None,
         }
     }
 
@@ -342,10 +398,12 @@ impl App {
         self.pty_pending_cr = false;
         self.exit_rx = None;
 
-        // Drop host settings only if no multi-phase ready workflow is in progress.
-        // During ready --refresh, the pre-audit phase completes (triggering finish_command)
-        // before the audit container launches — host_settings must survive across phases.
-        if self.ready_phase == ReadyPhase::Inactive {
+        // Drop host settings only if no multi-phase workflow is in progress.
+        // During ready --refresh, the pre-audit phase completes before the audit container
+        // launches — host_settings must survive across phases.
+        // During claws setup, the text task completes before the PTY exec session starts —
+        // host_settings must survive until the exec session ends.
+        if self.ready_phase == ReadyPhase::Inactive && self.claws_phase == ClawsPhase::Inactive {
             self.host_settings = None;
         }
 
@@ -565,6 +623,29 @@ impl App {
         if let Some(ref mut rx) = self.ready_ctx_rx {
             if let Ok((ctx, _summary)) = rx.try_recv() {
                 self.ready_ctx = Some(ctx);
+            }
+        }
+
+        // Check for container ID from the claws setup task.
+        if let Some(ref mut rx) = self.claws_container_id_rx {
+            if let Ok(id) = rx.try_recv() {
+                self.claws_container_id = Some(id);
+            }
+        }
+
+        // Check if the background clone task needs sudo permission.
+        if let Some(ref mut rx) = self.claws_sudo_request_rx {
+            if rx.try_recv().is_ok() {
+                self.claws_sudo_request_rx = None;
+                self.dialog = Dialog::ClawsReadySudoConfirm { password: String::new() };
+            }
+        }
+
+        // Check if the background build task needs docker socket acceptance.
+        if let Some(ref mut rx) = self.claws_docker_accept_request_rx {
+            if rx.try_recv().is_ok() {
+                self.claws_docker_accept_request_rx = None;
+                self.dialog = Dialog::ClawsReadyDockerSocketWarning;
             }
         }
 
@@ -948,6 +1029,46 @@ mod tests {
         app.container_scroll_offset = 10;
         app.start_container("test".into(), "Agent".into(), 80, 24);
         assert_eq!(app.container_scroll_offset, 0);
+    }
+
+    #[test]
+    fn claws_wizard_defaults_correct() {
+        let app = App::new();
+        assert!(app.claws_wizard_username.is_none());
+        assert!(!app.claws_wizard_already_forked);
+        assert_eq!(app.claws_phase, ClawsPhase::Inactive);
+        assert!(app.claws_container_id.is_none());
+        assert!(app.claws_sudo_request_rx.is_none());
+        assert!(app.claws_sudo_response_tx.is_none()); // channel for Option<String> (password or None)
+    }
+
+    #[test]
+    fn tick_shows_sudo_confirm_dialog_when_request_received() {
+        let mut app = App::new();
+        let (sudo_tx, sudo_rx) = tokio::sync::oneshot::channel::<()>();
+        app.claws_sudo_request_rx = Some(sudo_rx);
+        // Send the signal.
+        sudo_tx.send(()).unwrap();
+        app.tick();
+        assert_eq!(app.dialog, Dialog::ClawsReadySudoConfirm { password: String::new() });
+        assert!(app.claws_sudo_request_rx.is_none(), "rx should be consumed after signal");
+    }
+
+    #[test]
+    fn tick_does_not_show_sudo_dialog_when_no_signal() {
+        let mut app = App::new();
+        let (_sudo_tx, sudo_rx) = tokio::sync::oneshot::channel::<()>();
+        app.claws_sudo_request_rx = Some(sudo_rx);
+        // Do NOT send the signal.
+        app.tick();
+        assert_eq!(app.dialog, Dialog::None);
+    }
+
+    #[test]
+    fn pending_command_claws_ready() {
+        let mut app = App::new();
+        app.pending_command = PendingCommand::ClawsReady;
+        assert_eq!(app.pending_command, PendingCommand::ClawsReady);
     }
 
     #[test]

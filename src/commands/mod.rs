@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod auth;
 pub mod chat;
+pub mod claws;
 pub mod download;
 pub mod implement;
 pub mod init;
@@ -31,5 +32,6 @@ pub async fn run(command: Command) -> Result<()> {
             chat::run(non_interactive, plan, allow_docker).await
         }
         Command::New => new::run().await,
+        Command::Claws { action } => claws::run(action).await,
     }
 }

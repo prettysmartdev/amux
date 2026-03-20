@@ -87,6 +87,19 @@ pub enum Command {
 
     /// Create a new work item from the template.
     New,
+
+    /// Manage persistent background agent containers (claws agents).
+    Claws {
+        #[command(subcommand)]
+        action: ClawsAction,
+    },
+}
+
+/// Subcommands for `aspec claws`.
+#[derive(Subcommand)]
+pub enum ClawsAction {
+    /// Set up and ensure the nanoclaw container is running.
+    Ready,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -486,6 +499,24 @@ mod tests {
                 assert!(refresh);
             }
             _ => panic!("expected ready"),
+        }
+    }
+
+    #[test]
+    fn claws_ready_parsed() {
+        let cli = parse(&["aspec", "claws", "ready"]);
+        assert!(matches!(
+            cli.command.unwrap(),
+            Command::Claws { action: ClawsAction::Ready }
+        ));
+    }
+
+    #[test]
+    fn claws_ready_is_ready_action() {
+        let cli = parse(&["aspec", "claws", "ready"]);
+        match cli.command.unwrap() {
+            Command::Claws { action } => assert!(matches!(action, ClawsAction::Ready)),
+            _ => panic!("expected claws"),
         }
     }
 }

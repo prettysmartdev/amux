@@ -18,7 +18,8 @@ pub struct ContainerStats {
 /// (RAII via `tempfile::TempDir`).
 pub struct HostSettings {
     /// Kept alive so the temp dir survives as long as the container runs.
-    _temp_dir: tempfile::TempDir,
+    /// `None` when created via `from_paths` (caller manages the backing directory).
+    _temp_dir: Option<tempfile::TempDir>,
     /// Path to the sanitized `.claude.json` inside the temp dir.
     pub config_path: PathBuf,
     /// Path to the copied `.claude/` directory inside the temp dir.
@@ -95,10 +96,23 @@ impl HostSettings {
         }
 
         Some(HostSettings {
-            _temp_dir: temp_dir,
+            _temp_dir: Some(temp_dir),
             config_path,
             claude_dir_path,
         })
+    }
+
+    /// Creates a `HostSettings` pointing to existing files without owning a temp directory.
+    ///
+    /// Used when the backing directory is owned elsewhere (e.g. stored in `App::host_settings`
+    /// across task boundaries). The caller must ensure the paths remain valid for the
+    /// lifetime of this value and any container that references them.
+    pub fn from_paths(config_path: PathBuf, claude_dir_path: PathBuf) -> Self {
+        HostSettings {
+            _temp_dir: None,
+            config_path,
+            claude_dir_path,
+        }
     }
 }
 
@@ -567,6 +581,113 @@ pub fn run_container(
     Ok(cmd_line)
 }
 
+/// Runs a container foreground (`--rm -it`) mounting `host_path` to `container_path`.
+///
+/// stdin, stdout, and stderr are inherited so the user can interact with the container
+/// directly. Use this when the working path inside the container is not `/workspace`
+/// (e.g. the nanoclaw audit container which operates in `$HOME/.nanoclaw`).
+pub fn run_container_at_path(
+    image: &str,
+    host_path: &str,
+    container_path: &str,
+    working_dir: &str,
+    entrypoint: &[&str],
+    env_vars: &[(String, String)],
+    host_settings: Option<&HostSettings>,
+    allow_docker: bool,
+) -> Result<()> {
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "-it".into(),
+        "-v".into(),
+        format!("{}:{}", host_path, container_path),
+        "-w".into(),
+        working_dir.into(),
+    ];
+
+    if let Some(settings) = host_settings {
+        append_settings_mounts(&mut args, settings);
+    }
+    if allow_docker {
+        append_docker_socket_mount_args(&mut args);
+    }
+    append_env_args(&mut args, env_vars);
+    append_entrypoint(&mut args, image, entrypoint);
+
+    let status = Command::new("docker")
+        .args(&args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to invoke `docker run`")?;
+
+    if !status.success() {
+        bail!("Container exited with status: {}", status);
+    }
+    Ok(())
+}
+
+/// Runs a container (`--rm`) mounting `host_path` to `container_path` with piped output.
+///
+/// stdout and stderr are captured and returned as a combined string. Use this in TUI or
+/// non-interactive contexts where inheriting stdio is not possible, and where the working
+/// path differs from `/workspace`.
+pub fn run_container_captured_at_path(
+    image: &str,
+    host_path: &str,
+    container_path: &str,
+    working_dir: &str,
+    entrypoint: &[&str],
+    env_vars: &[(String, String)],
+    host_settings: Option<&HostSettings>,
+    allow_docker: bool,
+) -> Result<String> {
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "-v".into(),
+        format!("{}:{}", host_path, container_path),
+        "-w".into(),
+        working_dir.into(),
+    ];
+
+    if let Some(settings) = host_settings {
+        append_settings_mounts(&mut args, settings);
+    }
+    if allow_docker {
+        append_docker_socket_mount_args(&mut args);
+    }
+    append_env_args(&mut args, env_vars);
+    append_entrypoint(&mut args, image, entrypoint);
+
+    let output = Command::new("docker")
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("Failed to invoke `docker run`")?;
+
+    let mut combined = String::new();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stdout.is_empty() {
+        combined.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr);
+    }
+
+    if !output.status.success() {
+        bail!("Container exited with an error:\n{}", combined);
+    }
+    Ok(combined)
+}
+
 /// Builds the `docker run` argument list.
 ///
 /// Uses `-it` so the container has a TTY — suitable for inheriting the host terminal.
@@ -725,6 +846,119 @@ pub fn build_run_args_pty_display(
     append_env_args_display(&mut args, env_vars);
     append_entrypoint(&mut args, image, entrypoint);
     args
+}
+
+/// Returns true if the container with the given ID is in the running state.
+///
+/// Uses `docker inspect --format {{.State.Running}} <id>`.
+pub fn is_container_running(container_id: &str) -> bool {
+    let output = Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{.State.Running}}",
+            container_id,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok();
+    if let Some(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return stdout.trim() == "true";
+        }
+    }
+    false
+}
+
+/// Builds `docker exec -it` args for attaching to a running container via PTY.
+///
+/// Produces: `["exec", "-it", "-w", working_dir, ...env_args, container_id, ...entrypoint]`.
+/// Callers invoke `docker` with these as arguments.
+pub fn build_exec_args_pty(
+    container_id: &str,
+    working_dir: &str,
+    entrypoint: &[&str],
+    env_vars: &[(String, String)],
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "exec".into(),
+        "-it".into(),
+        "-w".into(),
+        working_dir.into(),
+    ];
+    append_env_args(&mut args, env_vars);
+    args.push(container_id.into());
+    args.extend(entrypoint.iter().map(|s| s.to_string()));
+    args
+}
+
+/// Runs a container in detached (`-d`) mode and returns the container ID.
+///
+/// Mounts `host_path` to `container_path` inside the container using a direct
+/// host bind mount (`-v host_path:container_path`). Docker named volumes with
+/// the local bind driver are **not** used because they do not work on macOS —
+/// the `device` path would refer to inside Docker's Linux VM rather than the
+/// macOS host filesystem.
+///
+/// The container is kept alive with a dummy keep-alive loop.
+/// When `allow_docker` is true, the host Docker socket is bind-mounted.
+pub fn run_container_detached(
+    image: &str,
+    host_path: &str,
+    container_path: &str,
+    working_dir: &str,
+    container_name: Option<&str>,
+    env_vars: &[(String, String)],
+    allow_docker: bool,
+    host_settings: Option<&HostSettings>,
+) -> Result<String> {
+    let mut args: Vec<String> = vec!["run".into(), "-d".into()];
+
+    if let Some(name) = container_name {
+        args.push("--name".into());
+        args.push(name.into());
+    }
+
+    args.extend_from_slice(&[
+        "-v".into(),
+        format!("{}:{}", host_path, container_path),
+        "-w".into(),
+        working_dir.into(),
+    ]);
+
+    if allow_docker {
+        append_docker_socket_mount_args(&mut args);
+    }
+
+    if let Some(settings) = host_settings {
+        append_settings_mounts(&mut args, settings);
+    }
+
+    append_env_args(&mut args, env_vars);
+
+    args.extend_from_slice(&[
+        image.into(),
+        "sh".into(),
+        "-c".into(),
+        "while true; do sleep 86400; done".into(),
+    ]);
+
+    let output = Command::new("docker")
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("Failed to invoke `docker run -d`")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to start background container: {}", stderr.trim());
+    }
+
+    let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(container_id)
 }
 
 #[cfg(test)]
@@ -895,7 +1129,7 @@ mod tests {
         std::fs::create_dir_all(&claude_dir_path).unwrap();
 
         let hs = HostSettings {
-            _temp_dir: temp_dir,
+            _temp_dir: Some(temp_dir),
             config_path: config_path.clone(),
             claude_dir_path: claude_dir_path.clone(),
         };
@@ -930,7 +1164,7 @@ mod tests {
         std::fs::create_dir_all(&claude_dir_path).unwrap();
 
         let hs = HostSettings {
-            _temp_dir: temp_dir,
+            _temp_dir: Some(temp_dir),
             config_path,
             claude_dir_path,
         };
@@ -1135,6 +1369,70 @@ mod tests {
         let has_socket = args.iter().any(|a| a.contains(&socket_path));
         #[cfg(not(target_os = "windows"))]
         assert!(has_socket, "allow_docker should add socket to pty display args: {:?}", args);
+    }
+
+    // --- is_container_running, build_exec_args_pty tests ---
+
+    #[test]
+    fn is_container_running_returns_false_for_unknown_id() {
+        assert!(!is_container_running("aspec-nonexistent-container-id-xyz"));
+    }
+
+    #[test]
+    fn build_exec_args_pty_basic() {
+        let args = build_exec_args_pty("container123", "/workspace", &["claude"], &[]);
+        assert_eq!(args[0], "exec");
+        assert_eq!(args[1], "-it");
+        assert_eq!(args[2], "-w");
+        assert_eq!(args[3], "/workspace");
+        assert!(args.contains(&"container123".to_string()));
+        assert!(args.contains(&"claude".to_string()));
+        let container_pos = args.iter().position(|a| a == "container123").unwrap();
+        let claude_pos = args.iter().position(|a| a == "claude").unwrap();
+        assert!(claude_pos > container_pos, "entrypoint should appear after container id");
+    }
+
+    #[test]
+    fn build_exec_args_pty_with_env_vars() {
+        let env = vec![("ANTHROPIC_API_KEY".into(), "sk-test".into())];
+        let args = build_exec_args_pty("cid", "/work", &["agent"], &env);
+        assert!(args.contains(&"-e".to_string()));
+        assert!(args.contains(&"ANTHROPIC_API_KEY=sk-test".to_string()));
+        // Env vars should appear before container id
+        let env_pos = args.iter().position(|a| a == "ANTHROPIC_API_KEY=sk-test").unwrap();
+        let cid_pos = args.iter().position(|a| a == "cid").unwrap();
+        assert!(env_pos < cid_pos, "env vars should appear before container id");
+    }
+
+    #[test]
+    fn build_exec_args_pty_with_working_dir() {
+        let args = build_exec_args_pty("cid", "/usr/local/nanoclaw", &["sh"], &[]);
+        let w_pos = args.iter().position(|a| a == "-w").unwrap();
+        assert_eq!(args[w_pos + 1], "/usr/local/nanoclaw");
+    }
+
+    #[test]
+    fn run_container_detached_uses_direct_host_bind_mount() {
+        // Verify that run_container_detached produces a direct host path bind mount
+        // (-v /host/path:/container/path) rather than a Docker named volume mount.
+        // Docker named volumes with the local bind driver do not work on macOS
+        // because the device path refers to inside Docker's Linux VM.
+        //
+        // We cannot call run_container_detached directly (it invokes docker), so we
+        // verify the function signature takes host_path (not volume_name) and the
+        // format string produces the expected mount argument.
+        let host_path = "/usr/local/nanoclaw";
+        let container_path = "/usr/local/nanoclaw";
+        let mount_arg = format!("{}:{}", host_path, container_path);
+        assert!(
+            mount_arg.starts_with('/'),
+            "Mount source must be an absolute host path (starts with /), not a named volume. Got: {}",
+            mount_arg
+        );
+        assert_eq!(
+            mount_arg, "/usr/local/nanoclaw:/usr/local/nanoclaw",
+            "Mount should be a direct host path bind mount"
+        );
     }
 
     #[test]

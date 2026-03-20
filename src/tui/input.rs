@@ -24,6 +24,10 @@ pub enum Action {
         kind: WorkItemKind,
         title: String,
     },
+    /// Claws first-run wizard completed: proceed with launch.
+    ClawsReadyProceed,
+    /// Claws subsequent run: start the stopped container.
+    ClawsReadyStartContainer,
 }
 
 /// Dispatch a key press to the correct handler based on application state.
@@ -38,6 +42,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         Dialog::NewKindSelect => return handle_new_kind_select(app, key),
         Dialog::NewTitleInput { kind, title } => {
             return handle_new_title_input(app, key, kind.clone(), title.clone())
+        }
+        Dialog::ClawsReadyHasForked => return handle_claws_has_forked(app, key),
+        Dialog::ClawsReadyUsernameInput { username } => {
+            return handle_claws_username_input(app, key, username.clone())
+        }
+        Dialog::ClawsReadyDockerSocketWarning => {
+            return handle_claws_docker_socket_warning(app, key)
+        }
+        Dialog::ClawsReadySetupExplain => return handle_claws_setup_explain(app, key),
+        Dialog::ClawsReadyOfferStart => return handle_claws_offer_start(app, key),
+        Dialog::ClawsReadySudoConfirm { password } => {
+            return handle_claws_sudo_confirm(app, key, password.clone())
         }
         Dialog::None => {}
     }
@@ -341,9 +357,133 @@ fn handle_new_title_input(
     Action::None
 }
 
+// --- Claws dialog handlers ---
+
+fn handle_claws_has_forked(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+            app.claws_wizard_already_forked = true;
+            app.dialog = Dialog::ClawsReadyUsernameInput { username: String::new() };
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => {
+            app.dialog = Dialog::None;
+            app.input_error = Some(
+                "Please fork nanoclaw at github.com/qwibitai/nanoclaw, \
+                 then run 'claws ready' again."
+                    .into(),
+            );
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_claws_username_input(app: &mut App, key: KeyEvent, mut username: String) -> Action {
+    match key.code {
+        KeyCode::Enter => {
+            let trimmed = username.trim().to_string();
+            if trimmed.is_empty() {
+                return Action::None;
+            }
+            app.claws_wizard_username = Some(trimmed);
+            app.dialog = Dialog::ClawsReadySetupExplain;
+        }
+        KeyCode::Esc => {
+            app.dialog = Dialog::None;
+            app.input_error = Some("Command cancelled.".into());
+        }
+        KeyCode::Backspace => {
+            username.pop();
+            app.dialog = Dialog::ClawsReadyUsernameInput { username };
+        }
+        KeyCode::Char(c) => {
+            username.push(c);
+            app.dialog = Dialog::ClawsReadyUsernameInput { username };
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_claws_docker_socket_warning(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+            app.dialog = Dialog::None;
+            if let Some(tx) = app.claws_docker_accept_response_tx.take() {
+                let _ = tx.send(true);
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => {
+            app.dialog = Dialog::None;
+            if let Some(tx) = app.claws_docker_accept_response_tx.take() {
+                let _ = tx.send(false);
+            }
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_claws_setup_explain(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+            app.dialog = Dialog::None;
+            return Action::ClawsReadyProceed;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => {
+            app.dialog = Dialog::None;
+            app.input_error = Some("Setup cancelled.".into());
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_claws_offer_start(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+            app.dialog = Dialog::None;
+            return Action::ClawsReadyStartContainer;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => {
+            app.dialog = Dialog::None;
+            app.input_error = Some("Container not started.".into());
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_claws_sudo_confirm(app: &mut App, key: KeyEvent, mut password: String) -> Action {
+    match key.code {
+        KeyCode::Enter => {
+            app.dialog = Dialog::None;
+            if let Some(tx) = app.claws_sudo_response_tx.take() {
+                let _ = tx.send(Some(password));
+            }
+        }
+        KeyCode::Esc => {
+            app.dialog = Dialog::None;
+            if let Some(tx) = app.claws_sudo_response_tx.take() {
+                let _ = tx.send(None);
+            }
+        }
+        KeyCode::Backspace => {
+            password.pop();
+            app.dialog = Dialog::ClawsReadySudoConfirm { password };
+        }
+        KeyCode::Char(c) => {
+            password.push(c);
+            app.dialog = Dialog::ClawsReadySudoConfirm { password };
+        }
+        _ => {}
+    }
+    Action::None
+}
+
 // --- Autocomplete ---
 
-const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "new"];
+const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "new", "claws"];
 
 /// Return suggestions for the current input string.
 pub fn autocomplete_suggestions(input: &str) -> Vec<String> {
@@ -400,6 +540,9 @@ fn flag_suggestions_for(cmd: &str, _typed: &str) -> Vec<String> {
         ],
         "new" => vec![
             "new  (creates a new work item from template)".into(),
+        ],
+        "claws" => vec![
+            "claws ready  (set up and ensure nanoclaw container is running)".into(),
         ],
         _ => vec![],
     }
@@ -462,6 +605,7 @@ mod tests {
         assert!(suggestions.contains(&"init".to_string()));
         assert!(suggestions.contains(&"ready".to_string()));
         assert!(suggestions.contains(&"implement".to_string()));
+        assert!(suggestions.contains(&"claws".to_string()));
     }
 
     #[test]
@@ -632,6 +776,22 @@ mod tests {
     }
 
     #[test]
+    fn suggestions_claws_prefix() {
+        let suggestions = autocomplete_suggestions("cl");
+        assert!(suggestions.contains(&"claws".to_string()), "cl should match claws: {:?}", suggestions);
+    }
+
+    #[test]
+    fn suggestions_claws_space_shows_ready() {
+        let suggestions = autocomplete_suggestions("claws ");
+        assert!(
+            suggestions.iter().any(|s| s.contains("ready")),
+            "claws  should show ready suggestion: {:?}",
+            suggestions
+        );
+    }
+
+    #[test]
     fn arrow_up_from_command_box_focuses_window_then_scrolls() {
         let mut app = App::new();
         for i in 0..50 {
@@ -652,5 +812,76 @@ mod tests {
         handle_key(&mut app, key);
         assert_eq!(app.focus, Focus::ExecutionWindow);
         assert_eq!(app.scroll_offset, 1, "Second Up should scroll");
+    }
+
+    #[test]
+    fn sudo_confirm_dialog_enter_sends_password_and_clears_dialog() {
+        let mut app = App::new();
+        app.dialog = Dialog::ClawsReadySudoConfirm { password: "s3cr3t".to_string() };
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Option<String>>();
+        app.claws_sudo_response_tx = Some(tx);
+
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        handle_key(&mut app, key);
+
+        assert_eq!(app.dialog, Dialog::None);
+        assert!(app.claws_sudo_response_tx.is_none());
+        assert_eq!(rx.try_recv().unwrap(), Some("s3cr3t".to_string()));
+    }
+
+    #[test]
+    fn sudo_confirm_dialog_esc_sends_none_and_clears_dialog() {
+        let mut app = App::new();
+        app.dialog = Dialog::ClawsReadySudoConfirm { password: "abc".to_string() };
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Option<String>>();
+        app.claws_sudo_response_tx = Some(tx);
+
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        handle_key(&mut app, key);
+
+        assert_eq!(app.dialog, Dialog::None);
+        assert_eq!(rx.try_recv().unwrap(), None);
+    }
+
+    #[test]
+    fn sudo_confirm_dialog_char_appends_to_password() {
+        let mut app = App::new();
+        app.dialog = Dialog::ClawsReadySudoConfirm { password: String::new() };
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Option<String>>();
+        app.claws_sudo_response_tx = Some(tx);
+
+        for c in "pass".chars() {
+            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
+            handle_key(&mut app, key);
+        }
+        assert_eq!(app.dialog, Dialog::ClawsReadySudoConfirm { password: "pass".to_string() });
+    }
+
+    #[test]
+    fn sudo_confirm_dialog_backspace_removes_last_char() {
+        let mut app = App::new();
+        app.dialog = Dialog::ClawsReadySudoConfirm { password: "abc".to_string() };
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Option<String>>();
+        app.claws_sudo_response_tx = Some(tx);
+
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty());
+        handle_key(&mut app, key);
+
+        assert_eq!(app.dialog, Dialog::ClawsReadySudoConfirm { password: "ab".to_string() });
+    }
+
+    #[test]
+    fn sudo_confirm_dialog_enter_with_empty_password_sends_some_empty() {
+        let mut app = App::new();
+        app.dialog = Dialog::ClawsReadySudoConfirm { password: String::new() };
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Option<String>>();
+        app.claws_sudo_response_tx = Some(tx);
+
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        handle_key(&mut app, key);
+
+        assert_eq!(app.dialog, Dialog::None);
+        // Empty password is allowed (e.g. NOPASSWD sudo configs).
+        assert_eq!(rx.try_recv().unwrap(), Some(String::new()));
     }
 }

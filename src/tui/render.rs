@@ -628,11 +628,44 @@ fn draw_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 title
             ),
         ),
+        Dialog::ClawsReadyHasForked => (
+            " Claws Ready — Fork ",
+            "  Have you already forked nanoclaw on GitHub?\n\n  1) Yes\n  2) No (fork first)\n\n  [1/2 or Esc to cancel]  ".to_string(),
+        ),
+        Dialog::ClawsReadyUsernameInput { username } => (
+            " Claws Ready — GitHub Username ",
+            format!(
+                "  Enter your GitHub username (fork owner):\n\n  > {}\n\n  [Enter to confirm, Esc to cancel]  ",
+                username
+            ),
+        ),
+        Dialog::ClawsReadyDockerSocketWarning => (
+            " Claws Ready — Docker Socket Warning ",
+            "  The nanoclaw container will be mounted to the host\n  Docker socket (like --allow-docker).\n  This grants elevated access to Docker.\n\n  Accept Docker socket access? [1=yes/2=no]  ".to_string(),
+        ),
+        Dialog::ClawsReadySetupExplain => (
+            " Claws Ready — /setup Required ",
+            "  After the agent launches, run /setup and follow the\n  prompts to configure nanoclaw.\n  Required on first launch.\n\n  Accept and continue? [1=yes/2=no]  ".to_string(),
+        ),
+        Dialog::ClawsReadyOfferStart => (
+            " Claws Ready — Start Container ",
+            "  The nanoclaw container is not running.\n  You may need to run /setup again inside the agent.\n\n  Start the nanoclaw container? [1=yes/2=no]  ".to_string(),
+        ),
+        Dialog::ClawsReadySudoConfirm { password } => (
+            " Claws Ready — Sudo Password ",
+            format!(
+                "  Clone to {} failed: permission denied.\n  Enter your sudo password to retry with sudo.\n\n  Password: {}\n\n  [Enter to confirm, Esc to cancel]  ",
+                crate::commands::claws::nanoclaw_path_str(),
+                "*".repeat(password.len()),
+            ),
+        ),
         Dialog::None => return,
     };
 
-    let popup_width = 60u16.min(area.width.saturating_sub(4));
-    let popup_height = 7u16.min(area.height.saturating_sub(4));
+    let popup_width = 64u16.min(area.width.saturating_sub(4));
+    // Height = line count + 2 border rows, capped to terminal height.
+    let line_count = body.chars().filter(|&c| c == '\n').count() as u16 + 1;
+    let popup_height = (line_count + 2).max(5).min(area.height.saturating_sub(4));
     let popup = centered_rect(popup_width, popup_height, area);
 
     frame.render_widget(Clear, popup);
