@@ -1,6 +1,6 @@
-# Getting Started with aspec
+# Getting Started with amux
 
-This guide walks you through installing `aspec` and running your first agentic coding session.
+This guide walks you through installing `amux` and running your first agentic coding session.
 
 ---
 
@@ -19,9 +19,9 @@ This guide walks you through installing `aspec` and running your first agentic c
 Clone the repository and build:
 
 ```sh
-git clone https://github.com/cohix/aspec-cli.git
-cd aspec-cli
-make install    # builds and installs to /usr/local/bin/aspec
+git clone https://github.com/cohix/amux.git
+cd amux
+make install    # builds and installs to /usr/local/bin/amux
 ```
 
 To install to a different location:
@@ -33,12 +33,12 @@ INSTALL_PATH=~/bin make install
 ### From GitHub Releases
 
 Download the latest binary for your platform from the
-[Releases page](https://github.com/cohix/aspec-cli/releases), make it
+[Releases page](https://github.com/cohix/amux/releases), make it
 executable, and move it to a directory on your `PATH`:
 
 ```sh
-chmod +x aspec-*
-mv aspec-* /usr/local/bin/aspec
+chmod +x amux-*
+mv amux-* /usr/local/bin/amux
 ```
 
 ---
@@ -50,7 +50,7 @@ mv aspec-* /usr/local/bin/aspec
 Navigate to your project's Git root and run:
 
 ```sh
-aspec init
+amux init
 ```
 
 This creates the `aspec/` directory with project specification templates and a
@@ -58,50 +58,50 @@ This creates the `aspec/` directory with project specification templates and a
 Claude agent is used. To choose a different agent:
 
 ```sh
-aspec init --agent=codex      # or opencode
+amux init --agent=codex      # or opencode
 ```
 
-See [init reference](usage.md#aspec-init---agentname) for details.
+See [init reference](usage.md#amux-init---agentname) for details.
 
 ### 2. Verify your environment
 
 ```sh
-aspec ready
+amux ready
 ```
 
 This checks that Docker is running, `Dockerfile.dev` exists, and the dev
-container image is built. If the image does not exist yet, `aspec ready`
+container image is built. If the image does not exist yet, `amux ready`
 builds it automatically.
 
 On your first run (or after changing project dependencies), use `--refresh`
 to have the agent audit your Dockerfile and add any missing tools:
 
 ```sh
-aspec ready --refresh
+amux ready --refresh
 ```
 
-See [ready reference](usage.md#aspec-ready---refresh---build---no-cache---non-interactive) for all flags and options.
+See [ready reference](usage.md#amux-ready---refresh---build---no-cache---non-interactive) for all flags and options.
 
 ### 3. Start a chat session
 
 To explore the codebase or ask questions before implementing anything:
 
 ```sh
-aspec chat
+amux chat
 ```
 
 This launches an interactive session with your agent inside a Docker container.
 The agent has full access to your project files (mounted read-write) but runs
 entirely inside the container — nothing executes on your host machine.
 
-See [chat reference](usage.md#aspec-chat---non-interactive---plan) for details.
+See [chat reference](usage.md#amux-chat---non-interactive---plan) for details.
 
 ### 4. Implement a work item
 
 Create a work item describing what you want to build:
 
 ```sh
-aspec new
+amux new
 ```
 
 Follow the prompts to choose a type (Feature, Bug, or Task) and enter a title.
@@ -111,23 +111,23 @@ to describe the implementation details, edge cases, and test considerations.
 Then implement it:
 
 ```sh
-aspec implement 0001
+amux implement 0001
 ```
 
 The agent launches in interactive mode inside a container. It reads the work
 item, implements the changes, runs tests, and writes documentation — all while
 you can observe and interact with it in real time.
 
-See [implement reference](usage.md#aspec-implement-nnnn---non-interactive---plan) for details.
+See [implement reference](usage.md#amux-implement-nnnn---non-interactive---plan) for details.
 
 ---
 
 ## Interactive TUI Mode
 
-Running `aspec` with no arguments opens the interactive TUI:
+Running `amux` with no arguments opens the interactive TUI:
 
 ```sh
-aspec
+amux
 ```
 
 The TUI provides a persistent command box where you can type any subcommand.
@@ -145,8 +145,8 @@ To have the agent analyse code and suggest changes without modifying any files,
 use plan mode:
 
 ```sh
-aspec implement 0001 --plan
-aspec chat --plan
+amux implement 0001 --plan
+amux chat --plan
 ```
 
 This is useful for code review, architecture exploration, or understanding
@@ -161,5 +161,5 @@ unfamiliar code before making changes.
   it needs to write better code
 - Read the full [Usage Guide](usage.md) for all commands, flags, and
   configuration options
-- Read the [Architecture Guide](architecture.md) to understand how `aspec`
+- Read the [Architecture Guide](architecture.md) to understand how `amux`
   works internally

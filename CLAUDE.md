@@ -1,4 +1,4 @@
-# aspec-cli
+# amux
 
 ## Source of Truth
 
@@ -21,12 +21,12 @@ All decisions — architecture, behavior, security, UX, and implementation — a
 - **Language**: Rust (idiomatic, async)
 - **TUI framework**: Ratatui
 - **Build tools**: `make`, `cargo`, `docker`
-- **Output**: single statically-linked binary (`aspec`)
+- **Output**: single statically-linked binary (`amux`)
 
 ## Build & Test Commands
 
 ```
-make all      # build the aspec binary
+make all      # build the amux binary
 make install  # build + install to /usr/local/bin/
 make test     # run all tests
 ```
@@ -54,10 +54,10 @@ make test     # run all tests
 
 ## Configuration
 
-- Per-repo config: `GITROOT/aspec/.aspec-cli.json`
-- Global config: `$HOME/.aspec/config.json`
+- Per-repo config: `GITROOT/aspec/.amux.json`
+- Global config: `$HOME/.amux/config.json`
 - Binary install path: `/usr/local/bin/`
-- Data/storage: `$HOME/.aspec/`
+- Data/storage: `$HOME/.amux/`
 
 ## Work Items
 

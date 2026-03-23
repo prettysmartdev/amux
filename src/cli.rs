@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
-/// Manage predictable and secure agentic coding environments.
+/// A containerized code and claw agent manager.
 #[derive(Parser)]
-#[command(name = "aspec", version)]
+#[command(name = "amux", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -22,7 +22,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Initialize the current Git repo for use with aspec.
+    /// Initialize the current Git repo for use with amux.
     Init {
         /// Code agent to install in the Dockerfile.dev container.
         #[arg(long, value_enum, default_value = "claude")]
@@ -95,7 +95,7 @@ pub enum Command {
     },
 }
 
-/// Subcommands for `aspec claws`.
+/// Subcommands for `amux claws`.
 #[derive(Subcommand)]
 pub enum ClawsAction {
     /// Set up and ensure the nanoclaw container is running.
@@ -130,13 +130,13 @@ mod tests {
 
     #[test]
     fn no_args_gives_no_subcommand() {
-        let cli = parse(&["aspec"]);
+        let cli = parse(&["amux"]);
         assert!(cli.command.is_none());
     }
 
     #[test]
     fn init_default_agent_is_claude() {
-        let cli = parse(&["aspec", "init"]);
+        let cli = parse(&["amux", "init"]);
         match cli.command.unwrap() {
             Command::Init { agent } => assert_eq!(agent.as_str(), "claude"),
             _ => panic!("expected init"),
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn init_explicit_agent() {
-        let cli = parse(&["aspec", "init", "--agent", "codex"]);
+        let cli = parse(&["amux", "init", "--agent", "codex"]);
         match cli.command.unwrap() {
             Command::Init { agent } => assert_eq!(agent.as_str(), "codex"),
             _ => panic!("expected init"),
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn implement_parses_work_item_number() {
-        let cli = parse(&["aspec", "implement", "42"]);
+        let cli = parse(&["amux", "implement", "42"]);
         match cli.command.unwrap() {
             Command::Implement { work_item, .. } => assert_eq!(work_item, "42"),
             _ => panic!("expected implement"),
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn implement_parses_four_digit_work_item() {
-        let cli = parse(&["aspec", "implement", "0001"]);
+        let cli = parse(&["amux", "implement", "0001"]);
         match cli.command.unwrap() {
             Command::Implement { work_item, .. } => assert_eq!(work_item, "0001"),
             _ => panic!("expected implement"),
@@ -172,13 +172,13 @@ mod tests {
 
     #[test]
     fn ready_subcommand_parsed() {
-        let cli = parse(&["aspec", "ready"]);
+        let cli = parse(&["amux", "ready"]);
         assert!(matches!(cli.command.unwrap(), Command::Ready { .. }));
     }
 
     #[test]
     fn ready_refresh_flag() {
-        let cli = parse(&["aspec", "ready", "--refresh"]);
+        let cli = parse(&["amux", "ready", "--refresh"]);
         match cli.command.unwrap() {
             Command::Ready { refresh, .. } => assert!(refresh),
             _ => panic!("expected ready"),
@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn ready_non_interactive_flag() {
-        let cli = parse(&["aspec", "ready", "--non-interactive"]);
+        let cli = parse(&["amux", "ready", "--non-interactive"]);
         match cli.command.unwrap() {
             Command::Ready { non_interactive, .. } => assert!(non_interactive),
             _ => panic!("expected ready"),
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn ready_all_flags() {
-        let cli = parse(&["aspec", "ready", "--refresh", "--build", "--no-cache", "--non-interactive"]);
+        let cli = parse(&["amux", "ready", "--refresh", "--build", "--no-cache", "--non-interactive"]);
         match cli.command.unwrap() {
             Command::Ready { refresh, build, no_cache, non_interactive, .. } => {
                 assert!(refresh);
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn ready_defaults_no_refresh_no_non_interactive() {
-        let cli = parse(&["aspec", "ready"]);
+        let cli = parse(&["amux", "ready"]);
         match cli.command.unwrap() {
             Command::Ready { refresh, build, no_cache, non_interactive, allow_docker } => {
                 assert!(!refresh);
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn ready_build_flag() {
-        let cli = parse(&["aspec", "ready", "--build"]);
+        let cli = parse(&["amux", "ready", "--build"]);
         match cli.command.unwrap() {
             Command::Ready { build, .. } => assert!(build),
             _ => panic!("expected ready"),
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn ready_no_cache_flag() {
-        let cli = parse(&["aspec", "ready", "--no-cache"]);
+        let cli = parse(&["amux", "ready", "--no-cache"]);
         match cli.command.unwrap() {
             Command::Ready { no_cache, .. } => assert!(no_cache),
             _ => panic!("expected ready"),
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn ready_build_and_no_cache_flags() {
-        let cli = parse(&["aspec", "ready", "--build", "--no-cache"]);
+        let cli = parse(&["amux", "ready", "--build", "--no-cache"]);
         match cli.command.unwrap() {
             Command::Ready { build, no_cache, .. } => {
                 assert!(build);
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn implement_non_interactive_flag() {
-        let cli = parse(&["aspec", "implement", "0001", "--non-interactive"]);
+        let cli = parse(&["amux", "implement", "0001", "--non-interactive"]);
         match cli.command.unwrap() {
             Command::Implement { non_interactive, .. } => assert!(non_interactive),
             _ => panic!("expected implement"),
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn implement_defaults_interactive() {
-        let cli = parse(&["aspec", "implement", "0001"]);
+        let cli = parse(&["amux", "implement", "0001"]);
         match cli.command.unwrap() {
             Command::Implement { non_interactive, .. } => assert!(!non_interactive),
             _ => panic!("expected implement"),
@@ -273,19 +273,19 @@ mod tests {
 
     #[test]
     fn new_subcommand_parsed() {
-        let cli = parse(&["aspec", "new"]);
+        let cli = parse(&["amux", "new"]);
         assert!(matches!(cli.command.unwrap(), Command::New));
     }
 
     #[test]
     fn chat_subcommand_parsed() {
-        let cli = parse(&["aspec", "chat"]);
+        let cli = parse(&["amux", "chat"]);
         assert!(matches!(cli.command.unwrap(), Command::Chat { .. }));
     }
 
     #[test]
     fn chat_defaults_interactive() {
-        let cli = parse(&["aspec", "chat"]);
+        let cli = parse(&["amux", "chat"]);
         match cli.command.unwrap() {
             Command::Chat { non_interactive, .. } => assert!(!non_interactive),
             _ => panic!("expected chat"),
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn chat_non_interactive_flag() {
-        let cli = parse(&["aspec", "chat", "--non-interactive"]);
+        let cli = parse(&["amux", "chat", "--non-interactive"]);
         match cli.command.unwrap() {
             Command::Chat { non_interactive, .. } => assert!(non_interactive),
             _ => panic!("expected chat"),
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn chat_plan_flag() {
-        let cli = parse(&["aspec", "chat", "--plan"]);
+        let cli = parse(&["amux", "chat", "--plan"]);
         match cli.command.unwrap() {
             Command::Chat { plan, non_interactive, .. } => {
                 assert!(plan);
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn chat_defaults_no_plan() {
-        let cli = parse(&["aspec", "chat"]);
+        let cli = parse(&["amux", "chat"]);
         match cli.command.unwrap() {
             Command::Chat { plan, .. } => assert!(!plan),
             _ => panic!("expected chat"),
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn chat_plan_and_non_interactive() {
-        let cli = parse(&["aspec", "chat", "--plan", "--non-interactive"]);
+        let cli = parse(&["amux", "chat", "--plan", "--non-interactive"]);
         match cli.command.unwrap() {
             Command::Chat { plan, non_interactive, .. } => {
                 assert!(plan);
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn implement_plan_flag() {
-        let cli = parse(&["aspec", "implement", "0001", "--plan"]);
+        let cli = parse(&["amux", "implement", "0001", "--plan"]);
         match cli.command.unwrap() {
             Command::Implement { plan, work_item, non_interactive, .. } => {
                 assert!(plan);
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn implement_defaults_no_plan() {
-        let cli = parse(&["aspec", "implement", "0001"]);
+        let cli = parse(&["amux", "implement", "0001"]);
         match cli.command.unwrap() {
             Command::Implement { plan, .. } => assert!(!plan),
             _ => panic!("expected implement"),
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn implement_plan_and_non_interactive() {
-        let cli = parse(&["aspec", "implement", "0001", "--plan", "--non-interactive"]);
+        let cli = parse(&["amux", "implement", "0001", "--plan", "--non-interactive"]);
         match cli.command.unwrap() {
             Command::Implement { plan, non_interactive, .. } => {
                 assert!(plan);
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn root_build_flag() {
-        let cli = parse(&["aspec", "--build"]);
+        let cli = parse(&["amux", "--build"]);
         assert!(cli.build);
         assert!(!cli.no_cache);
         assert!(!cli.refresh);
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn root_no_cache_flag() {
-        let cli = parse(&["aspec", "--no-cache"]);
+        let cli = parse(&["amux", "--no-cache"]);
         assert!(cli.no_cache);
         assert!(!cli.build);
         assert!(!cli.refresh);
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn root_refresh_flag() {
-        let cli = parse(&["aspec", "--refresh"]);
+        let cli = parse(&["amux", "--refresh"]);
         assert!(cli.refresh);
         assert!(!cli.build);
         assert!(!cli.no_cache);
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn root_all_flags() {
-        let cli = parse(&["aspec", "--build", "--no-cache", "--refresh"]);
+        let cli = parse(&["amux", "--build", "--no-cache", "--refresh"]);
         assert!(cli.build);
         assert!(cli.no_cache);
         assert!(cli.refresh);
@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn root_flags_default_false() {
-        let cli = parse(&["aspec"]);
+        let cli = parse(&["amux"]);
         assert!(!cli.build);
         assert!(!cli.no_cache);
         assert!(!cli.refresh);
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn implement_allow_docker_flag() {
-        let cli = parse(&["aspec", "implement", "0001", "--allow-docker"]);
+        let cli = parse(&["amux", "implement", "0001", "--allow-docker"]);
         match cli.command.unwrap() {
             Command::Implement { allow_docker, .. } => assert!(allow_docker),
             _ => panic!("expected implement"),
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn implement_defaults_no_allow_docker() {
-        let cli = parse(&["aspec", "implement", "0001"]);
+        let cli = parse(&["amux", "implement", "0001"]);
         match cli.command.unwrap() {
             Command::Implement { allow_docker, .. } => assert!(!allow_docker),
             _ => panic!("expected implement"),
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn implement_allow_docker_with_plan() {
-        let cli = parse(&["aspec", "implement", "0001", "--allow-docker", "--plan"]);
+        let cli = parse(&["amux", "implement", "0001", "--allow-docker", "--plan"]);
         match cli.command.unwrap() {
             Command::Implement { allow_docker, plan, .. } => {
                 assert!(allow_docker);
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn chat_allow_docker_flag() {
-        let cli = parse(&["aspec", "chat", "--allow-docker"]);
+        let cli = parse(&["amux", "chat", "--allow-docker"]);
         match cli.command.unwrap() {
             Command::Chat { allow_docker, .. } => assert!(allow_docker),
             _ => panic!("expected chat"),
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn chat_defaults_no_allow_docker() {
-        let cli = parse(&["aspec", "chat"]);
+        let cli = parse(&["amux", "chat"]);
         match cli.command.unwrap() {
             Command::Chat { allow_docker, .. } => assert!(!allow_docker),
             _ => panic!("expected chat"),
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn chat_allow_docker_with_plan() {
-        let cli = parse(&["aspec", "chat", "--allow-docker", "--plan"]);
+        let cli = parse(&["amux", "chat", "--allow-docker", "--plan"]);
         match cli.command.unwrap() {
             Command::Chat { allow_docker, plan, .. } => {
                 assert!(allow_docker);
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn ready_allow_docker_flag() {
-        let cli = parse(&["aspec", "ready", "--allow-docker"]);
+        let cli = parse(&["amux", "ready", "--allow-docker"]);
         match cli.command.unwrap() {
             Command::Ready { allow_docker, .. } => assert!(allow_docker),
             _ => panic!("expected ready"),
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn ready_defaults_no_allow_docker() {
-        let cli = parse(&["aspec", "ready"]);
+        let cli = parse(&["amux", "ready"]);
         match cli.command.unwrap() {
             Command::Ready { allow_docker, .. } => assert!(!allow_docker),
             _ => panic!("expected ready"),
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn ready_allow_docker_with_refresh() {
-        let cli = parse(&["aspec", "ready", "--allow-docker", "--refresh"]);
+        let cli = parse(&["amux", "ready", "--allow-docker", "--refresh"]);
         match cli.command.unwrap() {
             Command::Ready { allow_docker, refresh, .. } => {
                 assert!(allow_docker);
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn claws_ready_parsed() {
-        let cli = parse(&["aspec", "claws", "ready"]);
+        let cli = parse(&["amux", "claws", "ready"]);
         assert!(matches!(
             cli.command.unwrap(),
             Command::Claws { action: ClawsAction::Ready }
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn claws_ready_is_ready_action() {
-        let cli = parse(&["aspec", "claws", "ready"]);
+        let cli = parse(&["amux", "claws", "ready"]);
         match cli.command.unwrap() {
             Command::Claws { action } => assert!(matches!(action, ClawsAction::Ready)),
             _ => panic!("expected claws"),

@@ -44,11 +44,11 @@ check_file_contains ".github/workflows/release.yml" 'aarch64-unknown-linux-gnu'
 check_file_contains ".github/workflows/release.yml" 'x86_64-apple-darwin'
 check_file_contains ".github/workflows/release.yml" 'aarch64-apple-darwin'
 check_file_contains ".github/workflows/release.yml" 'x86_64-pc-windows-msvc'
-check_file_contains ".github/workflows/release.yml" 'aspec-linux-amd64'
-check_file_contains ".github/workflows/release.yml" 'aspec-macos-amd64'
-check_file_contains ".github/workflows/release.yml" 'aspec-macos-arm64'
-check_file_contains ".github/workflows/release.yml" 'aspec-linux-arm64'
-check_file_contains ".github/workflows/release.yml" 'aspec-windows-amd64.exe'
+check_file_contains ".github/workflows/release.yml" 'amux-linux-amd64'
+check_file_contains ".github/workflows/release.yml" 'amux-macos-amd64'
+check_file_contains ".github/workflows/release.yml" 'amux-macos-arm64'
+check_file_contains ".github/workflows/release.yml" 'amux-linux-arm64'
+check_file_contains ".github/workflows/release.yml" 'amux-windows-amd64.exe'
 check_file_contains ".github/workflows/release.yml" 'upload-artifact'
 check_file_contains ".github/workflows/release.yml" 'download-artifact'
 check_file_contains ".github/workflows/release.yml" 'action-gh-release'
@@ -86,10 +86,10 @@ echo "=== Documentation ==="
 # Getting started guide
 check_file_exists "docs/getting-started.md"
 check_file_contains "docs/getting-started.md" "Getting Started"
-check_file_contains "docs/getting-started.md" "aspec init"
-check_file_contains "docs/getting-started.md" "aspec ready"
-check_file_contains "docs/getting-started.md" "aspec chat"
-check_file_contains "docs/getting-started.md" "aspec implement"
+check_file_contains "docs/getting-started.md" "amux init"
+check_file_contains "docs/getting-started.md" "amux ready"
+check_file_contains "docs/getting-started.md" "amux chat"
+check_file_contains "docs/getting-started.md" "amux implement"
 check_file_contains "docs/getting-started.md" "usage.md"
 check_file_contains "docs/getting-started.md" "Installation"
 check_file_contains "docs/getting-started.md" "Docker"
@@ -116,9 +116,9 @@ check_file_contains "README.md" "usage.md"
 check_file_contains "README.md" "architecture.md"
 check_file_contains "README.md" "github.com/cohix/aspec"
 check_file_contains "README.md" "GitHub Releases"
-check_file_contains "README.md" "aspec-linux-amd64"
-check_file_contains "README.md" "aspec-macos-arm64"
-check_file_contains "README.md" "aspec-windows-amd64.exe"
+check_file_contains "README.md" "amux-linux-amd64"
+check_file_contains "README.md" "amux-macos-arm64"
+check_file_contains "README.md" "amux-windows-amd64.exe"
 
 echo ""
 echo "==============================="

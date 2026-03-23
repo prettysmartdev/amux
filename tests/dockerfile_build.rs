@@ -49,15 +49,15 @@ fn build_template(template_path: &str, tag: &str) {
 
 #[test]
 fn build_claude_template() {
-    build_template("templates/Dockerfile.claude", "aspec-test-claude:latest");
+    build_template("templates/Dockerfile.claude", "amux-test-claude:latest");
 }
 
 #[test]
 fn build_codex_template() {
-    build_template("templates/Dockerfile.codex", "aspec-test-codex:latest");
+    build_template("templates/Dockerfile.codex", "amux-test-codex:latest");
 }
 
 #[test]
 fn build_opencode_template() {
-    build_template("templates/Dockerfile.opencode", "aspec-test-opencode:latest");
+    build_template("templates/Dockerfile.opencode", "amux-test-opencode:latest");
 }

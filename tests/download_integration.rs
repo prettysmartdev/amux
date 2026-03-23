@@ -3,10 +3,10 @@
 /// These tests verify that the download module correctly fetches files from GitHub,
 /// extracts tarball contents, and integrates with the init and ready commands.
 /// Tests that require network access are skipped when offline.
-use aspec::cli::Agent;
-use aspec::commands::download;
-use aspec::commands::init;
-use aspec::commands::output::OutputSink;
+use amux::cli::Agent;
+use amux::commands::download;
+use amux::commands::init;
+use amux::commands::output::OutputSink;
 use tempfile::TempDir;
 use tokio::sync::mpsc::unbounded_channel;
 
@@ -199,7 +199,7 @@ async fn init_downloads_aspec_folder_when_missing() {
 
     // Config should be written.
     assert!(
-        tmp.path().join("aspec/.aspec-cli.json").exists(),
+        tmp.path().join("aspec/.amux.json").exists(),
         "Config should be written"
     );
 

@@ -15,19 +15,19 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: aspec-linux-amd64
+            artifact: amux-linux-amd64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: aspec-linux-arm64
+            artifact: amux-linux-arm64
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: aspec-macos-amd64
+            artifact: amux-macos-amd64
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: aspec-macos-arm64
+            artifact: amux-macos-arm64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: aspec-windows-amd64.exe
+            artifact: amux-windows-amd64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -50,11 +50,11 @@ jobs:
 
       - name: Rename binary (unix)
         if: runner.os != 'Windows'
-        run: cp target/${{ matrix.target }}/release/aspec ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/amux ${{ matrix.artifact }}
 
       - name: Rename binary (windows)
         if: runner.os == 'Windows'
-        run: cp target/${{ matrix.target }}/release/aspec.exe ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/amux.exe ${{ matrix.artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

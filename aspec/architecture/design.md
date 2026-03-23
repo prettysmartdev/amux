@@ -20,7 +20,7 @@ Reasoning:
 ```mermaid
 graph TD
     subgraph "Developer Machine"
-        A[aspec CLI tool] --> B(Docker Daemon)
+        A[amux CLI tool] --> B(Docker Daemon)
         B --> C[Managed Containers]
     end
 
@@ -30,7 +30,7 @@ graph TD
 ## Major Components
 
 ### Component 1:
-Name: aspec CLI
+Name: amux CLI
 Purpose: allow user to interact efficiently with their project's aspec folder, and securely execute agentic coding tools within containers
 Description and Scope:
 - description: a CLI tool which allows for "command" execution (one-offs) or "interactive" mode (acting as a REPL)

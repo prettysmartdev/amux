@@ -1,4 +1,4 @@
-# Introducing aspec: Spec-Driven Development with Containerized AI Agents
+# Introducing amux: Spec-Driven Development with Containerized AI Agents
 
 *March 18, 2026*
 
@@ -54,14 +54,14 @@ Work items in `aspec` are more than task descriptions. They're structured docume
 - Test considerations
 - Documentation requirements
 
-Running `aspec implement 0001` provides your agent with the work item along with the full project aspec. The result is an agent that starts with context most agentic coding sessions spend the first ten minutes establishing through back-and-forth conversation and endless tool use.
+Running `amux implement 0001` provides your agent with the work item along with the full project aspec. The result is an agent that starts with context most agentic coding sessions spend the first ten minutes establishing through back-and-forth conversation and endless tool use.
 
 
 ## Containerized Agents: Why It Matters
 
 While spec-driven development can be highly opinionated, the second problem is harder to argue against once you've thought it through: **agents are unpredictable. they should never run directly on your host machine**.
 
-Every `aspec` command that launches an AI agent — `implement`, `chat`, etc. — runs that agent inside a container. The container is built from a `Dockerfile.dev` specific to your project which specifies exactly what tools the agent has access to. Your project files are mounted into the container. Your agent is automatically configured and authenticated. Nothing else is available for the agent to (mis)use.
+Every `amux` command that launches an AI agent — `implement`, `chat`, etc. — runs that agent inside a container. The container is built from a `Dockerfile.dev` specific to your project which specifies exactly what tools the agent has access to. Your project files are mounted into the container. Your agent is automatically configured and authenticated. Nothing else is available for the agent to (mis)use.
 
 When the agent finishes, the container is gone.
 
@@ -71,26 +71,26 @@ This matters for several reasons:
 
 **Reproducibility.** Every agent run uses the same base environment. The tools available to the agent are the same every time, on every machine, for every team member. There's no "works on my machine" problem with agent environments.
 
-**Visibility.** Every Docker command `aspec` runs is shown before it executes so you can see exactly what's happening. You can copy that command and run it yourself if you don't trust me.
+**Visibility.** Every Docker command `amux` runs is shown before it executes so you can see exactly what's happening. You can copy that command and run it yourself if you don't trust me.
 
-**Agent-agnostic.** The container model means `aspec` isn't tied to one agent. Today it supports Claude Code, Codex, and OpenCode. Because the agent is "just a process" running inside a container, aspec doesn't have an opinion about which agent you prefer.
+**Agent-agnostic.** The container model means `amux` isn't tied to one agent. Today it supports Claude Code, Codex, and OpenCode. Because the agent is "just a process" running inside a container, amux doesn't have an opinion about which agent you prefer.
 
 ### Your Project's Custom Environment
 
-When you run `aspec init`, it creates a `Dockerfile.dev` for your preferred agent. This file defines the container image your agent will run in. Since the idea is to co-work with your agent, aspec will automatically work with your agent to review your codebase and customize your Dockerfile to install every tool and package it will need to work with and build your code.
+When you run `amux init`, it creates a `Dockerfile.dev` for your preferred agent. This file defines the container image your agent will run in. Since the idea is to co-work with your agent, amux will automatically work with your agent to review your codebase and customize your Dockerfile to install every tool and package it will need to work with and build your code.
 
-Run `aspec ready --refresh` when your project's tooling changes and your agent will audit the codebase anew and update it automatically.
+Run `amux ready --refresh` when your project's tooling changes and your agent will audit the codebase anew and update it automatically.
 
-Every command works in two modes: **command mode** (single invocation, exits when done, great for CI) and **interactive TUI mode** (launch `aspec` with no arguments for a persistent REPL).
+Every command works in two modes: **command mode** (single invocation, exits when done, great for CI) and **interactive TUI mode** (launch `amux` with no arguments for a persistent REPL).
 
-## The aspec TUI: An Agent-First Terminal Interface
+## The amux TUI: An Agent-First Terminal Interface
 
-aspec's interactive TUI lets it operate as a purpose-built UX for agentic development.
+amux's interactive TUI lets it operate as a purpose-built UX for agentic development.
 
 When you launch your agent from the TUI, a full terminal emulator renders the agent's interactive mode, complete with spinners, colors, and cursors. The TUI shows the agent name, container ID, and live CPU and memory stats:
 
 ```
-╭─ 🔒 Claude Code (containerized) ── aspec-12345 | CPU 8% | Mem 312MB | 2m14s ──╮
+╭─ 🔒 Claude Code (containerized) ── amux-12345 | CPU 8% | Mem 312MB | 2m14s ──╮
 │                                                                               │
 │  > I've implemented the authentication middleware. Running tests now...       │
 │  cargo test running... ████████████████████ 47/47 passed                      │
@@ -100,34 +100,34 @@ When you launch your agent from the TUI, a full terminal emulator renders the ag
 
 Press **Esc** to minimize the container window. Press **c** to bring it back. Scroll to browse the agent's scrollback history. When the container exits, a summary shows average CPU, peak memory, and total runtime.
 
-## The aspec workflow commands
+## The amux workflow commands
 
-`aspec` is intentionally minimal. There are five commands, and they cover the full workflow:
+`amux` is intentionally minimal. There are five commands, and they cover the full workflow:
 
-**`aspec init`** — Bootstrap a new project. Creates the `aspec/` spec directory, writes `.aspec-cli.json`, and downloads the `Dockerfile.dev` template for your chosen agent (`--agent=claude`, `codex`, or `opencode`).
+**`amux init`** — Bootstrap a new project. Creates the `aspec/` spec directory, writes `.amux.json`, and downloads the `Dockerfile.dev` template for your chosen agent (`--agent=claude`, `codex`, or `opencode`).
 
-**`aspec ready`** — Check that your environment is set up correctly. Verifies Docker is running, `Dockerfile.dev` exists, and the dev image is built. Use `--refresh` to have an agent audit your Dockerfile and add missing tools. Use `--build` to force a rebuild after manual edits.
+**`amux ready`** — Check that your environment is set up correctly. Verifies Docker is running, `Dockerfile.dev` exists, and the dev image is built. Use `--refresh` to have an agent audit your Dockerfile and add missing tools. Use `--build` to force a rebuild after manual edits.
 
-**`aspec new`** — Create a new work item to work on with your agent. Handles templating, slug generation, and (in VS Code) opens the file for editing.
+**`amux new`** — Create a new work item to work on with your agent. Handles templating, slug generation, and (in VS Code) opens the file for editing.
 
-**`aspec implement <nnnn>`** — Launch the dev container to implement a work item. The agent receives the full work item and project aspec along with detailed instructions as its initial prompt. Use `--plan` for a read-only analysis pass before making any changes. Use `--non-interactive` for automated pipelines.
+**`amux implement <nnnn>`** — Launch the dev container to implement a work item. The agent receives the full work item and project aspec along with detailed instructions as its initial prompt. Use `--plan` for a read-only analysis pass before making any changes. Use `--non-interactive` for automated pipelines.
 
-**`aspec chat`** — Start a freeform agent session with no preconfigured prompt. Same container, same isolation, same visibility — just an empty canvas for exploration and Q&A.
+**`amux chat`** — Start a freeform agent session with no preconfigured prompt. Same container, same isolation, same visibility — just an empty canvas for exploration and Q&A.
 
 
 ## What's Next
 
-There's quite a lot more I want to do with aspec. The spec-driven workflow and containerized execution model are now solid. From here, the areas I'm most interested in exploring:
+There's quite a lot more I want to do with amux. The spec-driven workflow and containerized execution model are now solid. From here, the areas I'm most interested in exploring:
 
 - **Claw-like agents** - securely run OpenClaw/NanoClaw/ZeroClaw with the same spec-driven and security-first principles (coming soon)
 - **Multi-agent workflows** — running multiple agents in parallel on different work items, coordinated through the spec layer
-- **Github and CI/CD integration** — interact directly with Github issues and PRs using `aspec implement` as a first-class primitive
+- **Github and CI/CD integration** — interact directly with Github issues and PRs using `amux implement` as a first-class primitive
 - **Spec magic** — interview mode, auditing work items for completeness and consistency before agent runs
 
 ## Getting Started
 
-Check out the project: [github.com/cohix/aspec-cli](https://github.com/cohix/aspec-cli).
+Check out the project: [github.com/cohix/amux](https://github.com/cohix/amux).
 
-aspec is built on the idea that the best agentic coding happens when agents have clear context (specs) and hard boundaries (containers).
+amux is built on the idea that the best agentic coding happens when agents have clear context (specs) and hard boundaries (containers).
 
 I'm building this in the open, so issues, feedback, and contributions are welcome.

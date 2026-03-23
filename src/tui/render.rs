@@ -99,7 +99,7 @@ fn draw_exec_window(frame: &mut Frame, app: &App, area: Rect) {
     let inner_height = area.height.saturating_sub(2) as usize;
 
     let phase_label = match &app.phase {
-        ExecutionPhase::Idle => " aspec ".to_string(),
+        ExecutionPhase::Idle => " amux ".to_string(),
         ExecutionPhase::Running { command } => format!(" ● running: {} ", command),
         ExecutionPhase::Done { command } => format!(" ✓ done: {} ", command),
         ExecutionPhase::Error { command, exit_code } => {
@@ -121,11 +121,11 @@ fn draw_exec_window(frame: &mut Frame, app: &App, area: Rect) {
             vec![
                 Line::from(""),
                 Line::from(vec![Span::styled(
-                    "  Welcome to aspec.",
+                    "  Welcome to amux.",
                     Style::default().fg(Color::DarkGray),
                 )]),
                 Line::from(vec![Span::styled(
-                    "  Running `aspec ready` to check your environment...",
+                    "  Running `amux ready` to check your environment...",
                     Style::default().fg(Color::DarkGray),
                 )]),
             ]
@@ -597,7 +597,7 @@ fn draw_suggestions(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_dialog(frame: &mut Frame, app: &App, area: Rect) {
     let (title, body) = match &app.dialog {
         Dialog::QuitConfirm => (
-            " Quit aspec? ",
+            " Quit amux? ",
             "  Are you sure you want to quit? [y/n]  ".to_string(),
         ),
         Dialog::MountScope { git_root, cwd } => (
@@ -808,7 +808,7 @@ mod tests {
         app.phase = ExecutionPhase::Done { command: "implement 0001".into() };
         app.last_container_summary = Some(LastContainerSummary {
             agent_display_name: "Claude Code".into(),
-            container_name: "aspec-test".into(),
+            container_name: "amux-test".into(),
             avg_cpu: "5.0%".into(),
             avg_memory: "200MiB".into(),
             total_time: "12m".into(),
@@ -834,7 +834,7 @@ mod tests {
             "Summary should contain agent name. Got buffer text."
         );
         assert!(
-            all_text.contains("aspec-test"),
+            all_text.contains("amux-test"),
             "Summary should contain container name."
         );
     }
@@ -846,7 +846,7 @@ mod tests {
         app.focus = Focus::ExecutionWindow;
         // Use size matching what TestBackend(80,25) would produce.
         let (inner_cols, inner_rows) = calculate_container_inner_size(80, 25);
-        app.start_container("aspec-test".into(), "Claude Code".into(), inner_cols, inner_rows);
+        app.start_container("amux-test".into(), "Claude Code".into(), inner_cols, inner_rows);
 
         // Feed data through the vt100 parser.
         if let Some(ref mut parser) = app.vt100_parser {
@@ -882,7 +882,7 @@ mod tests {
         let mut app = App::new();
         app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
         app.focus = Focus::ExecutionWindow;
-        app.start_container("aspec-test".into(), "Claude Code".into(), 78, 18);
+        app.start_container("amux-test".into(), "Claude Code".into(), 78, 18);
         app.container_window = ContainerWindowState::Minimized;
 
         let backend = TestBackend::new(80, 20);

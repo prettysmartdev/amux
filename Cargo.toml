@@ -1,12 +1,12 @@
 [package]
-name = "aspec"
+name = "amux"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.94.0"
-description = "A CLI tool for managing predictable and secure agentic coding environments"
+description = "A containerized code and claw agent manager"
 
 [[bin]]
-name = "aspec"
+name = "amux"
 path = "src/main.rs"
 
 [dependencies]

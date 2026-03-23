@@ -214,14 +214,14 @@ fn append_entrypoint(args: &mut Vec<String>, image: &str, entrypoint: &[&str]) {
     args.extend(entrypoint.iter().map(|s| s.to_string()));
 }
 
-/// Generate a unique container name for aspec-managed containers.
+/// Generate a unique container name for amux-managed containers.
 pub fn generate_container_name() -> String {
     use std::time::SystemTime;
     let ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     let pid = std::process::id();
-    format!("aspec-{}-{}", pid, ts.subsec_nanos())
+    format!("amux-{}-{}", pid, ts.subsec_nanos())
 }
 
 /// Query Docker stats for a named container. Returns None if the container
@@ -467,13 +467,13 @@ pub fn image_exists(tag: &str) -> bool {
 
 /// Derives the project-specific image tag from the Git root folder name.
 ///
-/// E.g. `/home/user/myproject` → `aspec-myproject:latest`.
+/// E.g. `/home/user/myproject` → `amux-myproject:latest`.
 pub fn project_image_tag(git_root: &Path) -> String {
     let project_name = git_root
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("project");
-    format!("aspec-{}:latest", project_name)
+    format!("amux-{}:latest", project_name)
 }
 
 /// Runs a container and captures stdout+stderr output.
@@ -968,29 +968,29 @@ mod tests {
     #[test]
     fn project_image_tag_from_git_root() {
         let tag = project_image_tag(Path::new("/home/user/myproject"));
-        assert_eq!(tag, "aspec-myproject:latest");
+        assert_eq!(tag, "amux-myproject:latest");
     }
 
     #[test]
     fn project_image_tag_handles_root_path() {
         let tag = project_image_tag(Path::new("/"));
-        assert_eq!(tag, "aspec-project:latest");
+        assert_eq!(tag, "amux-project:latest");
     }
 
     #[test]
     fn image_exists_returns_false_for_nonexistent() {
-        assert!(!image_exists("aspec-nonexistent-test-image-xyz:latest"));
+        assert!(!image_exists("amux-nonexistent-test-image-xyz:latest"));
     }
 
     #[test]
     fn run_args_include_mount_and_workdir() {
         let args =
-            build_run_args("aspec-dev:latest", "/repo", &["claude", "--print", "go"], &[], None, false);
+            build_run_args("amux-dev:latest", "/repo", &["claude", "--print", "go"], &[], None, false);
         assert!(args.contains(&"-v".to_string()));
         assert!(args.contains(&"/repo:/workspace".to_string()));
         assert!(args.contains(&"-w".to_string()));
         assert!(args.contains(&"/workspace".to_string()));
-        assert!(args.contains(&"aspec-dev:latest".to_string()));
+        assert!(args.contains(&"amux-dev:latest".to_string()));
         assert!(args.contains(&"claude".to_string()));
     }
 
@@ -1010,9 +1010,9 @@ mod tests {
 
     #[test]
     fn pty_args_include_container_name_when_provided() {
-        let args = build_run_args_pty("img", "/repo", &[], &[], Some("aspec-test-123"), None, false);
+        let args = build_run_args_pty("img", "/repo", &[], &[], Some("amux-test-123"), None, false);
         assert!(args.contains(&"--name".to_string()));
-        assert!(args.contains(&"aspec-test-123".to_string()));
+        assert!(args.contains(&"amux-test-123".to_string()));
     }
 
     #[test]
@@ -1081,8 +1081,8 @@ mod tests {
         // Small sleep to ensure different nanos
         std::thread::sleep(std::time::Duration::from_millis(1));
         let name2 = generate_container_name();
-        assert!(name1.starts_with("aspec-"));
-        assert!(name2.starts_with("aspec-"));
+        assert!(name1.starts_with("amux-"));
+        assert!(name2.starts_with("amux-"));
         assert_ne!(name1, name2);
     }
 
@@ -1234,19 +1234,19 @@ mod tests {
 
     #[test]
     fn format_build_cmd_produces_valid_string() {
-        let cmd = format_build_cmd("aspec-test:latest", "Dockerfile.dev", "/repo");
+        let cmd = format_build_cmd("amux-test:latest", "Dockerfile.dev", "/repo");
         assert_eq!(
             cmd,
-            "docker build -t aspec-test:latest -f Dockerfile.dev /repo"
+            "docker build -t amux-test:latest -f Dockerfile.dev /repo"
         );
     }
 
     #[test]
     fn format_build_cmd_no_cache_produces_valid_string() {
-        let cmd = format_build_cmd_no_cache("aspec-test:latest", "Dockerfile.dev", "/repo");
+        let cmd = format_build_cmd_no_cache("amux-test:latest", "Dockerfile.dev", "/repo");
         assert_eq!(
             cmd,
-            "docker build --no-cache -t aspec-test:latest -f Dockerfile.dev /repo"
+            "docker build --no-cache -t amux-test:latest -f Dockerfile.dev /repo"
         );
     }
 
@@ -1267,7 +1267,7 @@ mod tests {
 
         // Use a non-existent Dockerfile to trigger a failure.
         let result = build_image_streaming(
-            "aspec-test-fail:latest",
+            "amux-test-fail:latest",
             "/nonexistent/Dockerfile",
             "/tmp",
             false,
@@ -1375,7 +1375,7 @@ mod tests {
 
     #[test]
     fn is_container_running_returns_false_for_unknown_id() {
-        assert!(!is_container_running("aspec-nonexistent-container-id-xyz"));
+        assert!(!is_container_running("amux-nonexistent-container-id-xyz"));
     }
 
     #[test]

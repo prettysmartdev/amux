@@ -30,7 +30,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::time::Duration;
 
-/// Flags passed from the root `aspec` CLI to the `ready` command run at TUI startup.
+/// Flags passed from the root `amux` CLI to the `ready` command run at TUI startup.
 #[derive(Clone, Debug, Default)]
 pub struct StartupReadyFlags {
     pub build: bool,
@@ -62,7 +62,7 @@ where
 {
     let mut app = App::new();
 
-    // Auto-run `ready` at startup, forwarding any flags passed to the root `aspec` command.
+    // Auto-run `ready` at startup, forwarding any flags passed to the root `amux` command.
     let mut startup_cmd = "ready".to_string();
     if startup_flags.refresh {
         startup_cmd.push_str(" --refresh");
@@ -317,7 +317,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
                 .map(|s| format!("  Did you mean: {}", s))
                 .unwrap_or_default();
             app.input_error = Some(format!(
-                "'{}' is not an aspec command.{}",
+                "'{}' is not an amux command.{}",
                 unknown, suggestion
             ));
         }
@@ -650,7 +650,7 @@ fn launch_ready_post_audit(app: &mut App) {
         ready::run_post_audit(&sink, &ctx, &opts, &mut summary).await?;
         print_summary(&sink, &summary);
         sink.println(String::new());
-        sink.println("aspec is ready.");
+        sink.println("amux is ready.");
         Ok(())
     });
 }

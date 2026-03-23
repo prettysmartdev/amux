@@ -2,27 +2,27 @@
 ///
 /// These tests call the shared `run_with_sink` / helper functions directly,
 /// confirming that the same code paths are exercised regardless of execution mode.
-use aspec::commands::auth::{
+use amux::commands::auth::{
     apply_auth_decision, agent_keychain_credentials, read_keychain_raw,
     AgentCredentials,
 };
-use aspec::commands::chat::{
+use amux::commands::chat::{
     chat_entrypoint, chat_entrypoint_non_interactive,
 };
-use aspec::commands::implement::{
+use amux::commands::implement::{
     agent_entrypoint, agent_entrypoint_non_interactive, find_work_item, implement_prompt,
     parse_work_item,
 };
-use aspec::commands::new::{
+use amux::commands::new::{
     apply_template, find_template, next_work_item_number, slugify, WorkItemKind,
 };
-use aspec::commands::output::OutputSink;
-use aspec::commands::ready::{
+use amux::commands::output::OutputSink;
+use amux::commands::ready::{
     audit_entrypoint, audit_entrypoint_non_interactive, ReadyOptions, ReadySummary, StepStatus,
     print_summary, print_interactive_notice,
 };
-use aspec::commands::{init, new, ready};
-use aspec::tui::input::{autocomplete_suggestions, closest_subcommand};
+use amux::commands::{init, new, ready};
+use amux::tui::input::{autocomplete_suggestions, closest_subcommand};
 use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::sync::mpsc::unbounded_channel;
@@ -36,8 +36,8 @@ async fn init_via_sink_produces_output_lines() {
     let (tx, mut rx) = unbounded_channel::<String>();
     let sink = OutputSink::Channel(tx);
 
-    // run_with_sink from inside a git repo (the aspec-cli repo itself)
-    let result = init::run_with_sink(aspec::cli::Agent::Claude, &sink).await;
+    // run_with_sink from inside a git repo (the amux repo itself)
+    let result = init::run_with_sink(amux::cli::Agent::Claude, &sink).await;
     drop(result); // may succeed or fail; we only care that the sink was used.
 
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -102,8 +102,8 @@ fn ready_audit_entrypoint_for_each_agent() {
 
 #[test]
 fn ready_uses_project_specific_image_tag() {
-    let tag = aspec::docker::project_image_tag(std::path::Path::new("/home/user/myproject"));
-    assert_eq!(tag, "aspec-myproject:latest");
+    let tag = amux::docker::project_image_tag(std::path::Path::new("/home/user/myproject"));
+    assert_eq!(tag, "amux-myproject:latest");
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +235,7 @@ fn autocomplete_implement_shows_non_interactive_flag() {
 #[test]
 fn agent_env_vars_passed_to_container() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-test".into())];
-    let args = aspec::docker::build_run_args("img", "/repo", &[], &env, None, false);
+    let args = amux::docker::build_run_args("img", "/repo", &[], &env, None, false);
     assert!(args.contains(&"-e".to_string()));
     assert!(args.contains(&"ANTHROPIC_API_KEY=sk-test".to_string()));
 }
@@ -243,7 +243,7 @@ fn agent_env_vars_passed_to_container() {
 #[test]
 fn display_args_mask_env_var_values() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-secret".into())];
-    let args = aspec::docker::build_run_args_display("img", "/repo", &[], &env, None, false);
+    let args = amux::docker::build_run_args_display("img", "/repo", &[], &env, None, false);
     assert!(
         args.contains(&"ANTHROPIC_API_KEY=***".to_string()),
         "Display args must mask env var values, got: {:?}",
@@ -264,11 +264,11 @@ fn auth_apply_decision_saves_config() {
     let tmp = TempDir::new().unwrap();
 
     apply_auth_decision(tmp.path(), "claude", true).unwrap();
-    let config = aspec::config::load_repo_config(tmp.path()).unwrap();
+    let config = amux::config::load_repo_config(tmp.path()).unwrap();
     assert_eq!(config.auto_agent_auth_accepted, Some(true));
 
     apply_auth_decision(tmp.path(), "claude", false).unwrap();
-    let config = aspec::config::load_repo_config(tmp.path()).unwrap();
+    let config = amux::config::load_repo_config(tmp.path()).unwrap();
     assert_eq!(config.auto_agent_auth_accepted, Some(false));
 }
 
@@ -593,14 +593,14 @@ fn autocomplete_new_shows_hint() {
 
 #[test]
 fn container_window_lifecycle() {
-    use aspec::tui::state::{App, ContainerWindowState, ExecutionPhase};
+    use amux::tui::state::{App, ContainerWindowState, ExecutionPhase};
 
     let mut app = App::new();
     assert_eq!(app.container_window, ContainerWindowState::Hidden);
 
     // Start a container.
     app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
-    app.start_container("aspec-test-123".into(), "Claude Code".into(), 78, 18);
+    app.start_container("amux-test-123".into(), "Claude Code".into(), 78, 18);
     assert_eq!(app.container_window, ContainerWindowState::Maximized);
 
     // Minimize.
@@ -618,7 +618,7 @@ fn container_window_lifecycle() {
     let summary = app.last_container_summary.as_ref().unwrap();
     assert_eq!(summary.exit_code, 0);
     assert_eq!(summary.agent_display_name, "Claude Code");
-    assert_eq!(summary.container_name, "aspec-test-123");
+    assert_eq!(summary.container_name, "amux-test-123");
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +627,7 @@ fn container_window_lifecycle() {
 
 #[test]
 fn container_pty_output_routing() {
-    use aspec::tui::state::{App, ExecutionPhase};
+    use amux::tui::state::{App, ExecutionPhase};
 
     let mut app = App::new();
     app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
@@ -638,7 +638,7 @@ fn container_pty_output_routing() {
     assert!(app.vt100_parser.is_none());
 
     // Activate container window: PTY data goes to vt100 parser.
-    app.start_container("aspec-test".into(), "Claude Code".into(), 80, 24);
+    app.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
     assert!(app.vt100_parser.is_some());
     // Feed data through the vt100 parser (simulating what tick() does).
     if let Some(ref mut parser) = app.vt100_parser {
@@ -656,9 +656,9 @@ fn container_pty_output_routing() {
 
 #[test]
 fn docker_stats_parsing() {
-    assert!((aspec::docker::parse_cpu_percent("5.23%") - 5.23).abs() < 0.001);
-    assert!((aspec::docker::parse_memory_mb("200MiB") - 200.0).abs() < 0.1);
-    assert!((aspec::docker::parse_memory_mb("1.5GiB") - 1536.0).abs() < 0.1);
+    assert!((amux::docker::parse_cpu_percent("5.23%") - 5.23).abs() < 0.001);
+    assert!((amux::docker::parse_memory_mb("200MiB") - 200.0).abs() < 0.1);
+    assert!((amux::docker::parse_memory_mb("1.5GiB") - 1536.0).abs() < 0.1);
 }
 
 // ---------------------------------------------------------------------------
@@ -667,8 +667,8 @@ fn docker_stats_parsing() {
 
 #[test]
 fn container_name_generation() {
-    let name = aspec::docker::generate_container_name();
-    assert!(name.starts_with("aspec-"));
+    let name = amux::docker::generate_container_name();
+    assert!(name.starts_with("amux-"));
 }
 
 // ---------------------------------------------------------------------------
@@ -677,7 +677,7 @@ fn container_name_generation() {
 
 #[test]
 fn duration_formatting() {
-    use aspec::tui::state::format_duration;
+    use amux::tui::state::format_duration;
     assert_eq!(format_duration(0), "0s");
     assert_eq!(format_duration(45), "45s");
     assert_eq!(format_duration(60), "1m");
@@ -691,7 +691,7 @@ fn duration_formatting() {
 
 #[test]
 fn agent_display_names() {
-    use aspec::tui::state::agent_display_name;
+    use amux::tui::state::agent_display_name;
     assert_eq!(agent_display_name("claude"), "Claude Code");
     assert_eq!(agent_display_name("codex"), "Codex");
     assert_eq!(agent_display_name("opencode"), "Opencode");
@@ -704,13 +704,13 @@ fn agent_display_names() {
 
 #[test]
 fn pty_args_container_name() {
-    let args = aspec::docker::build_run_args_pty(
-        "img", "/repo", &[], &[], Some("aspec-test-42"), None, false,
+    let args = amux::docker::build_run_args_pty(
+        "img", "/repo", &[], &[], Some("amux-test-42"), None, false,
     );
     assert!(args.contains(&"--name".to_string()));
-    assert!(args.contains(&"aspec-test-42".to_string()));
+    assert!(args.contains(&"amux-test-42".to_string()));
 
-    let args_no_name = aspec::docker::build_run_args_pty(
+    let args_no_name = amux::docker::build_run_args_pty(
         "img", "/repo", &[], &[], None, None, false,
     );
     assert!(!args_no_name.contains(&"--name".to_string()));
@@ -722,11 +722,11 @@ fn pty_args_container_name() {
 
 #[test]
 fn container_summary_averages_stats() {
-    use aspec::tui::state::{App, ExecutionPhase};
+    use amux::tui::state::{App, ExecutionPhase};
 
     let mut app = App::new();
     app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
-    app.start_container("aspec-test".into(), "Claude Code".into(), 78, 18);
+    app.start_container("amux-test".into(), "Claude Code".into(), 78, 18);
 
     // Simulate stats history.
     if let Some(ref mut info) = app.container_info {
@@ -751,22 +751,22 @@ fn auth_reads_project_local_config() {
     let tmp = TempDir::new().unwrap();
 
     // Initially None → prompt should be shown.
-    let config = aspec::config::load_repo_config(tmp.path()).unwrap();
+    let config = amux::config::load_repo_config(tmp.path()).unwrap();
     assert_eq!(config.auto_agent_auth_accepted, None);
 
     // Accept → saved to project-local config.
     apply_auth_decision(tmp.path(), "claude", true).unwrap();
-    let config = aspec::config::load_repo_config(tmp.path()).unwrap();
+    let config = amux::config::load_repo_config(tmp.path()).unwrap();
     assert_eq!(config.auto_agent_auth_accepted, Some(true));
 
     // Check that the config file is at the correct path.
-    let config_path = aspec::config::repo_config_path(tmp.path());
+    let config_path = amux::config::repo_config_path(tmp.path());
     assert!(config_path.exists());
-    assert!(config_path.to_str().unwrap().contains("aspec/.aspec-cli.json"));
+    assert!(config_path.to_str().unwrap().contains("aspec/.amux.json"));
 
     // Decline → saved as false.
     apply_auth_decision(tmp.path(), "claude", false).unwrap();
-    let config = aspec::config::load_repo_config(tmp.path()).unwrap();
+    let config = amux::config::load_repo_config(tmp.path()).unwrap();
     assert_eq!(config.auto_agent_auth_accepted, Some(false));
 }
 
@@ -820,7 +820,7 @@ fn agent_credentials_default_is_empty() {
 #[test]
 fn docker_args_without_settings_has_workspace_mount_only() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-ant-oat01-test".into())];
-    let args = aspec::docker::build_run_args("img", "/repo", &[], &env, None, false);
+    let args = amux::docker::build_run_args("img", "/repo", &[], &env, None, false);
     // Without host_settings or allow_docker, only the workspace mount should be present.
     let volume_mounts: Vec<&String> = args.windows(2)
         .filter(|w| w[0] == "-v")
@@ -838,7 +838,7 @@ fn docker_args_without_settings_has_workspace_mount_only() {
 #[test]
 fn docker_display_args_mask_secrets() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-ant-oat01-secret".into())];
-    let args = aspec::docker::build_run_args_display("img", "/repo", &[], &env, None, false);
+    let args = amux::docker::build_run_args_display("img", "/repo", &[], &env, None, false);
     assert!(args.contains(&"ANTHROPIC_API_KEY=***".to_string()), "API key should be masked");
     assert!(!args.iter().any(|a| a.contains("sk-ant-oat01-secret")), "Secret must not appear");
 }
@@ -928,8 +928,8 @@ fn chat_and_implement_share_docker_args() {
     let chat_ep_refs: Vec<&str> = chat_ep.iter().map(String::as_str).collect();
     let impl_ep_refs: Vec<&str> = impl_ep.iter().map(String::as_str).collect();
 
-    let chat_args = aspec::docker::build_run_args("img", "/repo", &chat_ep_refs, &[], None, false);
-    let impl_args = aspec::docker::build_run_args("img", "/repo", &impl_ep_refs, &[], None, false);
+    let chat_args = amux::docker::build_run_args("img", "/repo", &chat_ep_refs, &[], None, false);
+    let impl_args = amux::docker::build_run_args("img", "/repo", &impl_ep_refs, &[], None, false);
 
     // Both should start with the same Docker flags.
     assert_eq!(chat_args[0], impl_args[0]); // "run"
@@ -984,7 +984,7 @@ fn autocomplete_chat_shows_hints() {
 
 #[test]
 fn pending_command_chat_variant() {
-    use aspec::tui::state::PendingCommand;
+    use amux::tui::state::PendingCommand;
 
     let cmd = PendingCommand::Chat { non_interactive: false, plan: false, allow_docker: false };
     assert_eq!(cmd, PendingCommand::Chat { non_interactive: false, plan: false, allow_docker: false });
@@ -1029,7 +1029,7 @@ fn chat_entrypoint_non_interactive_has_no_prompt() {
 
 #[test]
 fn pending_command_ready_build_no_cache_fields() {
-    use aspec::tui::state::PendingCommand;
+    use amux::tui::state::PendingCommand;
 
     let cmd = PendingCommand::Ready {
         refresh: false,
@@ -1061,7 +1061,7 @@ fn pending_command_ready_build_no_cache_fields() {
 
 #[test]
 fn docker_format_build_cmd_no_cache() {
-    let cmd = aspec::docker::format_build_cmd_no_cache("img:latest", "Dockerfile.dev", "/repo");
+    let cmd = amux::docker::format_build_cmd_no_cache("img:latest", "Dockerfile.dev", "/repo");
     assert!(cmd.contains("--no-cache"), "Should contain --no-cache flag");
     assert!(cmd.contains("img:latest"), "Should contain image tag");
     assert!(cmd.contains("Dockerfile.dev"), "Should contain dockerfile");
@@ -1073,10 +1073,10 @@ fn docker_format_build_cmd_no_cache() {
 
 #[test]
 fn cli_ready_build_flag() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "ready", "--build"]);
+    let cli = Cli::parse_from(&["amux", "ready", "--build"]);
     match cli.command.unwrap() {
         Command::Ready { build, .. } => assert!(build),
         _ => panic!("expected ready"),
@@ -1085,10 +1085,10 @@ fn cli_ready_build_flag() {
 
 #[test]
 fn cli_ready_no_cache_flag() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "ready", "--no-cache"]);
+    let cli = Cli::parse_from(&["amux", "ready", "--no-cache"]);
     match cli.command.unwrap() {
         Command::Ready { no_cache, .. } => assert!(no_cache),
         _ => panic!("expected ready"),
@@ -1097,10 +1097,10 @@ fn cli_ready_no_cache_flag() {
 
 #[test]
 fn cli_ready_build_and_no_cache() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "ready", "--build", "--no-cache"]);
+    let cli = Cli::parse_from(&["amux", "ready", "--build", "--no-cache"]);
     match cli.command.unwrap() {
         Command::Ready { build, no_cache, .. } => {
             assert!(build);
@@ -1112,10 +1112,10 @@ fn cli_ready_build_and_no_cache() {
 
 #[test]
 fn cli_ready_all_flags_combined() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "ready", "--refresh", "--build", "--no-cache", "--non-interactive"]);
+    let cli = Cli::parse_from(&["amux", "ready", "--refresh", "--build", "--no-cache", "--non-interactive"]);
     match cli.command.unwrap() {
         Command::Ready { refresh, build, no_cache, non_interactive, .. } => {
             assert!(refresh);
@@ -1129,10 +1129,10 @@ fn cli_ready_all_flags_combined() {
 
 #[test]
 fn cli_ready_defaults_all_false() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "ready"]);
+    let cli = Cli::parse_from(&["amux", "ready"]);
     match cli.command.unwrap() {
         Command::Ready { refresh, build, no_cache, non_interactive, .. } => {
             assert!(!refresh);
@@ -1148,14 +1148,14 @@ fn cli_ready_defaults_all_false() {
 // Root-level flags forwarded to ready at TUI startup
 // ---------------------------------------------------------------------------
 
-/// Flags passed to `aspec` (no subcommand) are available on the Cli struct
+/// Flags passed to `amux` (no subcommand) are available on the Cli struct
 /// and should be forwarded to the `ready` command when the TUI starts.
 #[test]
 fn root_build_flag_parsed_for_tui_startup() {
-    use aspec::cli::Cli;
+    use amux::cli::Cli;
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "--build"]);
+    let cli = Cli::parse_from(&["amux", "--build"]);
     assert!(cli.command.is_none(), "no subcommand when flags are on root");
     assert!(cli.build);
     assert!(!cli.no_cache);
@@ -1164,30 +1164,30 @@ fn root_build_flag_parsed_for_tui_startup() {
 
 #[test]
 fn root_no_cache_flag_parsed_for_tui_startup() {
-    use aspec::cli::Cli;
+    use amux::cli::Cli;
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "--no-cache"]);
+    let cli = Cli::parse_from(&["amux", "--no-cache"]);
     assert!(cli.command.is_none());
     assert!(cli.no_cache);
 }
 
 #[test]
 fn root_refresh_flag_parsed_for_tui_startup() {
-    use aspec::cli::Cli;
+    use amux::cli::Cli;
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "--refresh"]);
+    let cli = Cli::parse_from(&["amux", "--refresh"]);
     assert!(cli.command.is_none());
     assert!(cli.refresh);
 }
 
 #[test]
 fn root_all_flags_parsed_for_tui_startup() {
-    use aspec::cli::Cli;
+    use amux::cli::Cli;
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "--build", "--no-cache", "--refresh"]);
+    let cli = Cli::parse_from(&["amux", "--build", "--no-cache", "--refresh"]);
     assert!(cli.command.is_none());
     assert!(cli.build);
     assert!(cli.no_cache);
@@ -1200,10 +1200,10 @@ fn root_all_flags_parsed_for_tui_startup() {
 
 #[test]
 fn cli_chat_plan_flag() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "chat", "--plan"]);
+    let cli = Cli::parse_from(&["amux", "chat", "--plan"]);
     match cli.command.unwrap() {
         Command::Chat { plan, non_interactive, .. } => {
             assert!(plan);
@@ -1215,10 +1215,10 @@ fn cli_chat_plan_flag() {
 
 #[test]
 fn cli_implement_plan_flag() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "implement", "0001", "--plan"]);
+    let cli = Cli::parse_from(&["amux", "implement", "0001", "--plan"]);
     match cli.command.unwrap() {
         Command::Implement { plan, work_item, non_interactive, .. } => {
             assert!(plan);
@@ -1231,10 +1231,10 @@ fn cli_implement_plan_flag() {
 
 #[test]
 fn cli_chat_plan_and_non_interactive() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "chat", "--plan", "--non-interactive"]);
+    let cli = Cli::parse_from(&["amux", "chat", "--plan", "--non-interactive"]);
     match cli.command.unwrap() {
         Command::Chat { plan, non_interactive, .. } => {
             assert!(plan);
@@ -1246,10 +1246,10 @@ fn cli_chat_plan_and_non_interactive() {
 
 #[test]
 fn cli_implement_plan_and_non_interactive() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::parse_from(&["aspec", "implement", "42", "--plan", "--non-interactive"]);
+    let cli = Cli::parse_from(&["amux", "implement", "42", "--plan", "--non-interactive"]);
     match cli.command.unwrap() {
         Command::Implement { plan, non_interactive, work_item, .. } => {
             assert!(plan);
@@ -1328,7 +1328,7 @@ fn plan_false_does_not_add_flags() {
 
 #[test]
 fn pending_command_chat_plan_field() {
-    use aspec::tui::state::PendingCommand;
+    use amux::tui::state::PendingCommand;
 
     let cmd = PendingCommand::Chat { non_interactive: false, plan: true, allow_docker: false };
     assert_eq!(cmd, PendingCommand::Chat { non_interactive: false, plan: true, allow_docker: false });
@@ -1337,7 +1337,7 @@ fn pending_command_chat_plan_field() {
 
 #[test]
 fn pending_command_implement_plan_field() {
-    use aspec::tui::state::PendingCommand;
+    use amux::tui::state::PendingCommand;
 
     let cmd = PendingCommand::Implement { work_item: 1, non_interactive: false, plan: true, allow_docker: false };
     assert_eq!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: true, allow_docker: false });
@@ -1374,10 +1374,10 @@ fn autocomplete_implement_shows_plan_hint() {
 
 #[test]
 fn cli_implement_allow_docker_flag() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::try_parse_from(["aspec", "implement", "0001", "--allow-docker"]).unwrap();
+    let cli = Cli::try_parse_from(["amux", "implement", "0001", "--allow-docker"]).unwrap();
     match cli.command.unwrap() {
         Command::Implement { allow_docker, work_item, .. } => {
             assert!(allow_docker, "Expected allow_docker=true");
@@ -1389,10 +1389,10 @@ fn cli_implement_allow_docker_flag() {
 
 #[test]
 fn cli_implement_no_allow_docker_by_default() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::try_parse_from(["aspec", "implement", "0001"]).unwrap();
+    let cli = Cli::try_parse_from(["amux", "implement", "0001"]).unwrap();
     match cli.command.unwrap() {
         Command::Implement { allow_docker, .. } => {
             assert!(!allow_docker, "Expected allow_docker=false by default");
@@ -1403,10 +1403,10 @@ fn cli_implement_no_allow_docker_by_default() {
 
 #[test]
 fn cli_chat_allow_docker_flag() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::try_parse_from(["aspec", "chat", "--allow-docker"]).unwrap();
+    let cli = Cli::try_parse_from(["amux", "chat", "--allow-docker"]).unwrap();
     match cli.command.unwrap() {
         Command::Chat { allow_docker, .. } => {
             assert!(allow_docker, "Expected allow_docker=true");
@@ -1417,10 +1417,10 @@ fn cli_chat_allow_docker_flag() {
 
 #[test]
 fn cli_chat_no_allow_docker_by_default() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::try_parse_from(["aspec", "chat"]).unwrap();
+    let cli = Cli::try_parse_from(["amux", "chat"]).unwrap();
     match cli.command.unwrap() {
         Command::Chat { allow_docker, .. } => {
             assert!(!allow_docker, "Expected allow_docker=false by default");
@@ -1431,10 +1431,10 @@ fn cli_chat_no_allow_docker_by_default() {
 
 #[test]
 fn cli_ready_allow_docker_flag() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::try_parse_from(["aspec", "ready", "--allow-docker"]).unwrap();
+    let cli = Cli::try_parse_from(["amux", "ready", "--allow-docker"]).unwrap();
     match cli.command.unwrap() {
         Command::Ready { allow_docker, .. } => {
             assert!(allow_docker, "Expected allow_docker=true");
@@ -1445,10 +1445,10 @@ fn cli_ready_allow_docker_flag() {
 
 #[test]
 fn cli_ready_no_allow_docker_by_default() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::try_parse_from(["aspec", "ready"]).unwrap();
+    let cli = Cli::try_parse_from(["amux", "ready"]).unwrap();
     match cli.command.unwrap() {
         Command::Ready { allow_docker, .. } => {
             assert!(!allow_docker, "Expected allow_docker=false by default");
@@ -1459,10 +1459,10 @@ fn cli_ready_no_allow_docker_by_default() {
 
 #[test]
 fn cli_implement_allow_docker_with_plan() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::try_parse_from(["aspec", "implement", "0042", "--allow-docker", "--plan"]).unwrap();
+    let cli = Cli::try_parse_from(["amux", "implement", "0042", "--allow-docker", "--plan"]).unwrap();
     match cli.command.unwrap() {
         Command::Implement { allow_docker, plan, work_item, .. } => {
             assert!(allow_docker);
@@ -1475,10 +1475,10 @@ fn cli_implement_allow_docker_with_plan() {
 
 #[test]
 fn cli_chat_allow_docker_with_plan() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::try_parse_from(["aspec", "chat", "--allow-docker", "--plan"]).unwrap();
+    let cli = Cli::try_parse_from(["amux", "chat", "--allow-docker", "--plan"]).unwrap();
     match cli.command.unwrap() {
         Command::Chat { allow_docker, plan, .. } => {
             assert!(allow_docker);
@@ -1490,10 +1490,10 @@ fn cli_chat_allow_docker_with_plan() {
 
 #[test]
 fn cli_ready_allow_docker_with_refresh() {
-    use aspec::cli::{Cli, Command};
+    use amux::cli::{Cli, Command};
     use clap::Parser;
 
-    let cli = Cli::try_parse_from(["aspec", "ready", "--allow-docker", "--refresh"]).unwrap();
+    let cli = Cli::try_parse_from(["amux", "ready", "--allow-docker", "--refresh"]).unwrap();
     match cli.command.unwrap() {
         Command::Ready { allow_docker, refresh, .. } => {
             assert!(allow_docker);
@@ -1509,7 +1509,7 @@ fn cli_ready_allow_docker_with_refresh() {
 
 #[test]
 fn pending_command_chat_allow_docker_field() {
-    use aspec::tui::state::PendingCommand;
+    use amux::tui::state::PendingCommand;
 
     let cmd = PendingCommand::Chat { non_interactive: false, plan: false, allow_docker: true };
     assert_eq!(cmd, PendingCommand::Chat { non_interactive: false, plan: false, allow_docker: true });
@@ -1518,7 +1518,7 @@ fn pending_command_chat_allow_docker_field() {
 
 #[test]
 fn pending_command_implement_allow_docker_field() {
-    use aspec::tui::state::PendingCommand;
+    use amux::tui::state::PendingCommand;
 
     let cmd = PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: true };
     assert_eq!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: true });
@@ -1527,7 +1527,7 @@ fn pending_command_implement_allow_docker_field() {
 
 #[test]
 fn pending_command_ready_allow_docker_field() {
-    use aspec::tui::state::PendingCommand;
+    use amux::tui::state::PendingCommand;
 
     let cmd = PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: true };
     assert_eq!(cmd, PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: true });
@@ -1540,9 +1540,9 @@ fn pending_command_ready_allow_docker_field() {
 
 #[test]
 fn allow_docker_adds_socket_mount_to_implement_run_args() {
-    use aspec::docker::build_run_args;
+    use amux::docker::build_run_args;
 
-    let socket_path = aspec::docker::docker_socket_path();
+    let socket_path = amux::docker::docker_socket_path();
     let socket_str = socket_path.to_string_lossy().to_string();
 
     let args = build_run_args(
@@ -1568,9 +1568,9 @@ fn allow_docker_adds_socket_mount_to_implement_run_args() {
 
 #[test]
 fn no_allow_docker_omits_socket_mount_from_implement_run_args() {
-    use aspec::docker::build_run_args;
+    use amux::docker::build_run_args;
 
-    let socket_path = aspec::docker::docker_socket_path();
+    let socket_path = amux::docker::docker_socket_path();
     let socket_str = socket_path.to_string_lossy().to_string();
 
     let args = build_run_args(

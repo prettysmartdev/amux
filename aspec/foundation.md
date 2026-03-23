@@ -1,8 +1,8 @@
 # Project Foundation
 
-Name: aspec-cli
+Name: amux
 Type: CLI
-Purpose: A CLI tool specifically designed to manage predictable and secure agentic coding environments.
+Purpose: A containerized code and claw agent manager.
 
 # Technical Foundation
 
@@ -12,8 +12,8 @@ Purpose: A CLI tool specifically designed to manage predictable and secure agent
 Language: Rust
 Frameworks: Ratatui
 Guidance:
-- The `aspec` CLI should compile to a single, statically linked binary for macOS, Linux, and Windows.
-- Every function of the CLI should be accessible either in "interactive" mode (i.e. running `aspec` with no arguments launches a TUI to interact with its features) or "command" mode, where `aspec` is run with one or more arguments, executes a single function, and then exits, printing its output to stdout and stderr.
+- The `amux` CLI should compile to a single, statically linked binary for macOS, Linux, and Windows.
+- Every function of the CLI should be accessible either in "interactive" mode (i.e. running `amux` with no arguments launches a TUI to interact with its features) or "command" mode, where `amux` is run with one or more arguments, executes a single function, and then exits, printing its output to stdout and stderr.
 - Idiomatic, async Rust code
 - Small, easily understood modules and crates
 - Prefer simplicity (understandable by an intermediate Rust programmer) over complex code that is concise.
@@ -27,10 +27,10 @@ Guidance:
 
 ### Persona 1:
 Name: user
-Purpose: user of the `aspec` CLI tool in their macOS, linux, or Windows terminal.
+Purpose: user of the `amux` CLI tool in their macOS, linux, or Windows terminal.
 Use-cases:
-- executing `aspec` interactive mode for ongoing sessions
-- executing `aspec <>` command mode for single-use commands
+- executing `amux` interactive mode for ongoing sessions
+- executing `amux <>` command mode for single-use commands
 RBAC:
 - allowed: all
 - disallowed: none

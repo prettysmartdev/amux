@@ -8,7 +8,7 @@ use crate::docker;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-/// Command-mode entry point for `aspec chat`.
+/// Command-mode entry point for `amux chat`.
 pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;

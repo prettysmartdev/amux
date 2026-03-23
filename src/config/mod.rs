@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Per-repository configuration stored at `GITROOT/aspec/.aspec-cli.json`.
+/// Per-repository configuration stored at `GITROOT/aspec/.amux.json`.
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct RepoConfig {
     pub agent: Option<String>,
@@ -12,20 +12,20 @@ pub struct RepoConfig {
     pub auto_agent_auth_accepted: Option<bool>,
 }
 
-/// Global configuration stored at `$HOME/.aspec/config.json`.
+/// Global configuration stored at `$HOME/.amux/config.json`.
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct GlobalConfig {
     pub default_agent: Option<String>,
 }
 
 pub fn repo_config_path(git_root: &Path) -> PathBuf {
-    git_root.join("aspec").join(".aspec-cli.json")
+    git_root.join("aspec").join(".amux.json")
 }
 
 #[allow(dead_code)]
 pub fn global_config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Cannot determine home directory")?;
-    Ok(home.join(".aspec").join("config.json"))
+    Ok(home.join(".amux").join("config.json"))
 }
 
 pub fn load_repo_config(git_root: &Path) -> Result<RepoConfig> {
@@ -81,13 +81,13 @@ mod tests {
     fn repo_config_path_is_correct() {
         let root = PathBuf::from("/some/repo");
         let path = repo_config_path(&root);
-        assert_eq!(path, PathBuf::from("/some/repo/aspec/.aspec-cli.json"));
+        assert_eq!(path, PathBuf::from("/some/repo/aspec/.amux.json"));
     }
 
     #[test]
     fn global_config_path_is_under_home() {
         let path = global_config_path().unwrap();
-        assert!(path.ends_with(".aspec/config.json"));
+        assert!(path.ends_with(".amux/config.json"));
     }
 
     #[test]

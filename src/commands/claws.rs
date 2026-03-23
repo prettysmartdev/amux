@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-pub const NANOCLAW_IMAGE_TAG: &str = "aspec-nanoclaw:latest";
+pub const NANOCLAW_IMAGE_TAG: &str = "amux-nanoclaw:latest";
 const NANOCLAW_REPO_FULL_NAME: &str = "qwibitai/nanoclaw";
 /// Git config flag that auto-accepts new SSH host fingerprints without prompting.
 const GIT_SSH_ACCEPT_NEW: &str = "core.sshCommand=ssh -o StrictHostKeyChecking=accept-new";
@@ -71,7 +71,7 @@ fn stream_child_output(mut child: std::process::Child, out: &OutputSink) -> Resu
 /// using `sudo chmod`.
 ///
 /// Called after a successful clone (especially a sudo clone where the directory is
-/// owned by root) so that future operations — writing `.aspec.json`, Dockerfile.dev,
+/// owned by root) so that future operations — writing `.amux.json`, Dockerfile.dev,
 /// etc. — do not require elevated privileges.
 pub fn chmod_nanoclaw_permissive(out: &OutputSink) {
     let path = nanoclaw_path_str();
@@ -92,7 +92,7 @@ pub fn chmod_nanoclaw_permissive(out: &OutputSink) {
     }
 }
 
-/// Per-installation nanoclaw config stored at `$HOME/.nanoclaw/.aspec.json`.
+/// Per-installation nanoclaw config stored at `$HOME/.nanoclaw/.amux.json`.
 #[derive(Serialize, Deserialize, Default)]
 pub struct NanoclawConfig {
     #[serde(rename = "nanoclawContainerID")]
@@ -100,7 +100,7 @@ pub struct NanoclawConfig {
 }
 
 pub fn load_nanoclaw_config() -> Result<NanoclawConfig> {
-    let config_path = nanoclaw_path().join(".aspec.json");
+    let config_path = nanoclaw_path().join(".amux.json");
     if !config_path.exists() {
         return Ok(NanoclawConfig::default());
     }
@@ -110,7 +110,7 @@ pub fn load_nanoclaw_config() -> Result<NanoclawConfig> {
 }
 
 pub fn save_nanoclaw_config(config: &NanoclawConfig) -> Result<()> {
-    let config_path = nanoclaw_path().join(".aspec.json");
+    let config_path = nanoclaw_path().join(".amux.json");
     let content = serde_json::to_string_pretty(config)
         .context("Failed to serialize nanoclaw config")?;
     std::fs::write(&config_path, content).context("Failed to write nanoclaw config")?;
@@ -166,7 +166,7 @@ pub async fn run(action: ClawsAction) -> Result<()> {
     }
 }
 
-/// Core logic for `aspec claws ready` — shared between CLI and TUI.
+/// Core logic for `amux claws ready` — shared between CLI and TUI.
 pub async fn run_claws_ready(out: &OutputSink) -> Result<()> {
     let nanoclaw_dir = nanoclaw_path();
     let mut summary = ClawsSummary::default();
@@ -710,7 +710,7 @@ async fn run_first_time_wizard(out: &OutputSink, summary: &mut ClawsSummary) -> 
         if !use_gh {
             bail!(
                 "Please fork nanoclaw at https://github.com/{} and run \
-                 'aspec claws ready' again.",
+                 'amux claws ready' again.",
                 NANOCLAW_REPO_FULL_NAME
             );
         }

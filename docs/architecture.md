@@ -1,4 +1,4 @@
-# aspec Architecture
+# amux Architecture
 
 ## High-level Overview
 
@@ -6,7 +6,7 @@
 User
  │
  ▼
-aspec binary ──► command mode  ──► commands/{init,ready,implement,chat,new}
+amux binary ──► command mode  ──► commands/{init,ready,implement,chat,new}
      │                                       │
      └──────► interactive mode (TUI)         │
                     │                        ▼
@@ -37,20 +37,20 @@ src/
                            Used by both implement and chat
     download.rs            GitHub downloads: Dockerfile templates (raw files)
                            and aspec folder (tarball extraction)
-    init.rs                `aspec init` — run() + run_with_sink()
+    init.rs                `amux init` — run() + run_with_sink()
                            Downloads aspec/ folder and Dockerfile templates
                            from GitHub, falls back to embedded templates
-    new.rs                 `aspec new` — run() + run_with_sink()
+    new.rs                 `amux new` — run() + run_with_sink()
                            WorkItemKind, slugify, apply_template,
                            find_template, next_work_item_number
                            Auto-downloads aspec/ if template is missing
-    ready.rs               `aspec ready` — run() + run_with_sink()
+    ready.rs               `amux ready` — run() + run_with_sink()
                            ReadyOptions, ReadySummary, print_summary,
                            print_interactive_notice,
                            audit_entrypoint, audit_entrypoint_non_interactive
-    implement.rs           `aspec implement` — run() + run_with_sink()
+    implement.rs           `amux implement` — run() + run_with_sink()
                            agent_entrypoint, agent_entrypoint_non_interactive
-    chat.rs                `aspec chat` — run() + run_with_sink()
+    chat.rs                `amux chat` — run() + run_with_sink()
                            chat_entrypoint, chat_entrypoint_non_interactive
   docker/
     mod.rs                 is_daemon_running, image_exists, project_image_tag,
@@ -379,7 +379,7 @@ Without `--refresh`, only phase 1 runs, followed by the summary table.
 In TUI mode, `ReadyPhase` tracks which phase is active. When a phase completes,
 `check_ready_continuation()` automatically launches the next phase.
 
-Image tags are project-specific (`aspec-{projectname}:latest`) derived from the
+Image tags are project-specific (`amux-{projectname}:latest`) derived from the
 Git root folder name via `docker::project_image_tag()`.
 
 ### Agent Credential Passing
@@ -520,7 +520,7 @@ computing averages and peaks when the container exits.
 
 ### Container Naming
 
-`generate_container_name()` produces a deterministic name (`aspec-{pid}-{nanos}`)
+`generate_container_name()` produces a deterministic name (`amux-{pid}-{nanos}`)
 passed to `docker run --name`. This allows `query_container_stats()` to query
 stats for the specific container by name.
 

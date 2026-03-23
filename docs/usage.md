@@ -1,8 +1,8 @@
-# aspec Usage Guide
+# amux Usage Guide
 
 ## Overview
 
-`aspec` is a CLI tool for managing predictable, secure agentic coding environments.
+`amux` is a containerized code and claw agent manager.
 Every agent action runs inside a Docker container — never directly on your machine.
 
 ---
@@ -10,7 +10,7 @@ Every agent action runs inside a Docker container — never directly on your mac
 ## Installation
 
 ```sh
-make install          # builds and installs to /usr/local/bin/aspec
+make install          # builds and installs to /usr/local/bin/amux
 # or specify a different path:
 INSTALL_PATH=~/bin make install
 ```
@@ -21,10 +21,10 @@ INSTALL_PATH=~/bin make install
 
 ### Interactive Mode (TUI)
 
-Running `aspec` with no arguments opens the interactive REPL:
+Running `amux` with no arguments opens the interactive REPL:
 
 ```sh
-aspec
+amux
 ```
 
 The TUI displays a persistent command input box at the bottom of the screen.
@@ -32,34 +32,34 @@ Type any subcommand and press **Enter** to run it. Suggestions appear as you typ
 
 ### Command Mode
 
-Running `aspec` with a subcommand executes it and exits immediately:
+Running `amux` with a subcommand executes it and exits immediately:
 
 ```sh
-aspec init
-aspec ready
-aspec ready --refresh
-aspec ready --build
-aspec ready --build --no-cache
-aspec implement 0001
-aspec implement 0001 --plan
-aspec implement 0001 --allow-docker
-aspec chat
-aspec chat --plan
-aspec chat --allow-docker
-aspec new
-aspec claws ready
+amux init
+amux ready
+amux ready --refresh
+amux ready --build
+amux ready --build --no-cache
+amux implement 0001
+amux implement 0001 --plan
+amux implement 0001 --allow-docker
+amux chat
+amux chat --plan
+amux chat --allow-docker
+amux new
+amux claws ready
 ```
 
 ---
 
 ## Subcommands
 
-### `aspec init [--agent=<name>]`
+### `amux init [--agent=<name>]`
 
-Initialises the current Git repository for use with `aspec`.
+Initialises the current Git repository for use with `amux`.
 
 - Detects the Git root directory
-- Writes `aspec/.aspec-cli.json` (repository config)
+- Writes `aspec/.amux.json` (repository config)
 - Downloads the `aspec/` folder from GitHub (`github.com/cohix/aspec`) if it does
   not already exist in the Git root. This provides the project specification
   templates, work item template, and architecture documents.
@@ -77,12 +77,12 @@ Initialises the current Git repository for use with `aspec`.
 **Example**
 
 ```sh
-aspec init --agent=claude
+amux init --agent=claude
 ```
 
 ---
 
-### `aspec ready [--refresh] [--build] [--no-cache] [--non-interactive] [--allow-docker]`
+### `amux ready [--refresh] [--build] [--no-cache] [--non-interactive] [--allow-docker]`
 
 Checks that your environment is ready for agentic development.
 
@@ -90,7 +90,7 @@ Checks that your environment is ready for agentic development.
 2. Checks that `Dockerfile.dev` exists — if missing, initialises it from the
    agent template (same as `init`) and **always rebuilds the image** (even if
    one with the correct name already exists)
-3. Checks for an existing `aspec-{projectname}:latest` image — builds one if
+3. Checks for an existing `amux-{projectname}:latest` image — builds one if
    it does not exist yet (with streaming output)
 4. Presents a summary table showing the status of each step
 
@@ -112,7 +112,7 @@ forcing Docker to rebuild every layer from scratch. This flag applies to all
 build operations — whether triggered by `--build`, `--refresh`, or a missing
 image. Combine with `--build` to get a completely fresh image.
 
-The image tag is derived from the Git root folder name (e.g. `aspec-myapp:latest`).
+The image tag is derived from the Git root folder name (e.g. `amux-myapp:latest`).
 
 Before launching the audit container, `ready` applies the same mount scope and
 agent authentication flow as `implement` (see [Agent Auth](#agent-authentication)).
@@ -160,24 +160,24 @@ of each step:
 **Examples**
 
 ```sh
-aspec ready                                # quick check — skips audit
-aspec ready --refresh                      # full check with Dockerfile audit
-aspec ready --refresh --non-interactive    # audit in non-interactive mode
-aspec ready --build                        # rebuild image from current Dockerfile.dev
-aspec ready --build --no-cache             # full rebuild without Docker cache
-aspec ready --refresh --no-cache           # audit + rebuild without cache
-aspec ready --refresh --allow-docker       # audit with Docker daemon access in container
+amux ready                                # quick check — skips audit
+amux ready --refresh                      # full check with Dockerfile audit
+amux ready --refresh --non-interactive    # audit in non-interactive mode
+amux ready --build                        # rebuild image from current Dockerfile.dev
+amux ready --build --no-cache             # full rebuild without Docker cache
+amux ready --refresh --no-cache           # audit + rebuild without cache
+amux ready --refresh --allow-docker       # audit with Docker daemon access in container
 ```
 
 ---
 
-### `aspec implement <NNNN> [--non-interactive] [--plan] [--allow-docker]`
+### `amux implement <NNNN> [--non-interactive] [--plan] [--allow-docker]`
 
 Launches the dev container to implement a work item.
 
 ```sh
-aspec implement 0001    # implements aspec/work-items/0001-*.md
-aspec implement 0003    # implements aspec/work-items/0003-*.md
+amux implement 0001    # implements aspec/work-items/0001-*.md
+amux implement 0003    # implements aspec/work-items/0003-*.md
 ```
 
 The work item number is a 4-digit identifier (e.g. `0001`). Both `0001` and
@@ -242,7 +242,7 @@ depends on the agent:
 
 ---
 
-### `aspec chat [--non-interactive] [--plan] [--allow-docker]`
+### `amux chat [--non-interactive] [--plan] [--allow-docker]`
 
 Starts a freeform chat session with the configured agent in a container.
 
@@ -250,10 +250,10 @@ Unlike `implement`, which sends an initial prompt to the agent, `chat` launches
 the agent with no pre-configured prompt — giving you a clean interactive session.
 
 ```sh
-aspec chat                      # start interactive chat
-aspec chat --non-interactive    # start in non-interactive mode
-aspec chat --plan               # start in plan mode (read-only)
-aspec chat --allow-docker       # start with Docker daemon access in container
+amux chat                      # start interactive chat
+amux chat --non-interactive    # start in non-interactive mode
+amux chat --plan               # start in plan mode (read-only)
+amux chat --allow-docker       # start with Docker daemon access in container
 ```
 
 - Prompts to confirm the Docker mount scope (Git root vs CWD) if needed
@@ -286,7 +286,7 @@ the agent reads from stdin in non-interactive mode.
 
 **Plan Mode (`--plan`)**
 
-Same as `implement --plan` — see the [implement](#aspec-implement-nnnn---non-interactive---plan)
+Same as `implement --plan` — see the [implement](#amux-implement-nnnn---non-interactive---plan)
 section for details on how each agent's plan mode is activated.
 
 **Shared Implementation**
@@ -298,7 +298,7 @@ section for details on how each agent's plan mode is activated.
 
 ---
 
-### `aspec claws ready`
+### `amux claws ready`
 
 Sets up and manages a persistent nanoclaw agent container — a machine-global
 installation of [nanoclaw](https://github.com/qwibitai/nanoclaw) that runs a
@@ -306,11 +306,11 @@ background agent accessible from anywhere on the machine.
 
 Unlike `implement` and `chat` (per-project, ephemeral containers), the nanoclaw
 container is persistent and machine-global. It lives at `/usr/local/nanoclaw`
-and survives across `aspec` sessions.
+and survives across `amux` sessions.
 
 #### First-run wizard
 
-On the first run, `aspec claws ready` guides you through:
+On the first run, `amux claws ready` guides you through:
 
 1. **Fork check** — asks whether you have already forked nanoclaw on GitHub.
    - **Yes** — prompts for your GitHub username and clones
@@ -319,17 +319,17 @@ On the first run, `aspec claws ready` guides you through:
      If you decline, provides manual instructions.
 2. **Docker daemon** — verifies the Docker daemon is running.
 3. **Dockerfile setup** — writes or verifies `Dockerfile.dev` inside the
-   nanoclaw repo and builds the `aspec-nanoclaw:latest` image.
+   nanoclaw repo and builds the `amux-nanoclaw:latest` image.
 4. **Docker socket warning** — explains (and requires explicit acceptance) that
    the nanoclaw container will be mounted to the host Docker socket, granting
    elevated access identical to `--allow-docker`.
 5. **`/setup` explanation** — reminds you to run `/setup` inside the agent
    after launching, and requires explicit acceptance before proceeding.
-6. **Container launch** — creates a Docker named volume (`aspec-nanoclaw-vol`),
+6. **Container launch** — creates a Docker named volume (`amux-nanoclaw-vol`),
    starts the container in the background, waits for it to reach running state,
    and saves the container ID to `/usr/local/nanoclaw/.aspec.json`.
 7. **Attach** — attaches to the running container and launches the configured
-   code agent interactively (identical to `aspec chat`).
+   code agent interactively (identical to `amux chat`).
 
 #### Subsequent runs
 
@@ -342,7 +342,7 @@ running:
 
 #### Agent session behavior
 
-Once attached, the experience is identical to `aspec chat`:
+Once attached, the experience is identical to `amux chat`:
 
 - In **command mode**, stdin/stdout/stderr are fully connected.
 - In **TUI mode**, the container window opens with full keyboard passthrough.
@@ -373,13 +373,13 @@ The container ID is stored at `/usr/local/nanoclaw/.aspec.json`:
 #### Examples
 
 ```sh
-aspec claws ready    # first run: full wizard
-aspec claws ready    # subsequent run: check status or re-attach
+amux claws ready    # first run: full wizard
+amux claws ready    # subsequent run: check status or re-attach
 ```
 
 ---
 
-### `aspec new`
+### `amux new`
 
 Creates a new work item from the template (`aspec/work-items/0000-template.md`).
 
@@ -396,14 +396,14 @@ stdin prompts.
 **Filename generation**: The title is lowercased, spaces are replaced with
 hyphens, and all non-alphanumeric characters (except hyphens) are removed.
 
-**Edge case**: If no template is found in the current Git root, `aspec` will
+**Edge case**: If no template is found in the current Git root, `amux` will
 automatically download the `aspec/` folder from GitHub (`github.com/cohix/aspec`)
 to provide the template. If the download also fails, an error message is displayed.
 
 **Example**
 
 ```sh
-aspec new
+amux new
 # Select work item type:
 #   1) Feature
 #   2) Bug
@@ -429,7 +429,7 @@ The TUI has two types of windows:
 
 ```
 ┌─── ● running: implement 0001 ────────────────────────────┐
-│ $ docker run --rm -it --name aspec-12345 ...               │
+│ $ docker run --rm -it --name amux-12345 ...               │
 │ ╔══════════════════════════════════════════════════╗        │
 │ ║  Agent 'claude' is launching in INTERACTIVE mode ║        │
 │ ╚══════════════════════════════════════════════════╝        │
@@ -449,7 +449,7 @@ The TUI has two types of windows:
 
 ### Container Window
 
-Whenever `aspec` launches a Docker container to run a coding agent (via
+Whenever `amux` launches a Docker container to run a coding agent (via
 `implement` or `ready --refresh`), a **container window** appears overlaying
 95% of the outer window's width and height, centered. This window is dedicated
 to the interactive agent session.
@@ -555,7 +555,7 @@ When the window is **unselected** (grey or red border):
 
 ### Autocomplete
 
-As you type, aspec shows suggestions below the command box:
+As you type, amux shows suggestions below the command box:
 
 ```
 ready
@@ -577,11 +577,11 @@ chat --
 
 ### Unknown Commands
 
-If you type a command that is not an aspec subcommand, the error message
+If you type a command that is not an amux subcommand, the error message
 includes the closest known subcommand:
 
 ```
-'implemnt' is not an aspec command.  Did you mean: implement
+'implemnt' is not an amux command.  Did you mean: implement
 ```
 
 ### Quit Confirmation
@@ -589,7 +589,7 @@ includes the closest known subcommand:
 Press **q** or **Ctrl+C** when the command box is focused to open the confirmation dialog:
 
 ```
-╭─── Quit aspec? ──────────────────╮
+╭─── Quit amux? ──────────────────╮
 │  Are you sure you want to quit?   │
 │  [y/n]                            │
 ╰───────────────────────────────────╯
@@ -601,7 +601,7 @@ Press **y** to quit, **n** or **Esc** to cancel.
 
 ## Agent Authentication
 
-When running `implement` or `ready`, aspec can pass your agent's credentials
+When running `implement` or `ready`, amux can pass your agent's credentials
 into the container so the agent is pre-authenticated — you won't have to log in
 manually each time.
 
@@ -611,8 +611,8 @@ There are two ways to provide credentials:
 
 **1. System keychain (default)**
 
-By default, aspec reads the agent's OAuth access token directly from the
-system keychain. On first use per repository, aspec asks for your permission:
+By default, amux reads the agent's OAuth access token directly from the
+system keychain. On first use per repository, amux asks for your permission:
 
 ```
 Pass agent credentials (from system keychain) into container?
@@ -620,7 +620,7 @@ This will be saved for this repo. [y/n]
 ```
 
 - **y** — the OAuth token is extracted from the keychain and passed into
-  the container; the decision is saved in `aspec/.aspec-cli.json`
+  the container; the decision is saved in `aspec/.amux.json`
   (`"autoAgentAuthAccepted": true`)
 - **n** — no credentials passed; you will need to authenticate inside
   the container manually
@@ -629,7 +629,7 @@ The decision is stored per Git repository and only asked once.
 
 ### How credentials are passed
 
-When keychain auth is accepted, aspec:
+When keychain auth is accepted, amux:
 
 1. Reads the OAuth credentials JSON from the macOS Keychain
    (service: `Claude Code-credentials`)
@@ -663,7 +663,7 @@ filesystem files. The keychain extraction is required for authentication.
 
 ## Host Settings
 
-When launching containers for Claude, aspec mounts sanitized copies of your
+When launching containers for Claude, amux mounts sanitized copies of your
 host-machine Claude Code settings so the agent starts in a "set up" state
 (correct model, plugins, onboarding completed) without manual configuration.
 
@@ -676,7 +676,7 @@ host-machine Claude Code settings so the agent starts in a "set up" state
 
 ### How it works
 
-1. Before each container launch, aspec copies the relevant files to a temporary
+1. Before each container launch, amux copies the relevant files to a temporary
    directory on the host
 2. The `oauthAccount` field is stripped from `.claude.json` (this field causes
    Claude Code to enter a broken OAuth state when tokens aren't accessible
@@ -694,7 +694,7 @@ sessions, backups, and other large files (~50MB) are not included.
 ## Interactive Agent Notice
 
 Whenever an interactive code agent is about to launch (in `ready --refresh` or
-`implement`), aspec displays a large ASCII-art decorated notice:
+`implement`), amux displays a large ASCII-art decorated notice:
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
@@ -717,7 +717,7 @@ This notice is **not** shown when `--non-interactive` is used.
 ## Docker Socket Access
 
 The `--allow-docker` flag is available on `implement`, `chat`, and `ready`. When
-passed, aspec mounts the host Docker daemon socket into the agent container,
+passed, amux mounts the host Docker daemon socket into the agent container,
 giving the agent the ability to build and run Docker images itself.
 
 ### When to use it
@@ -730,7 +730,7 @@ Use `--allow-docker` when your work item or chat session requires the agent to:
 
 ### What happens
 
-Before launching the container, aspec:
+Before launching the container, amux:
 
 1. Verifies the Docker socket exists and is accessible (fails with a clear
    error if the daemon is not running)
@@ -751,38 +751,38 @@ WARNING: --allow-docker: mounting host Docker socket into container
 Mounting the Docker socket grants the agent the ability to run arbitrary
 containers on the host. Only use `--allow-docker` when you trust the agent and
 the work item requires it. This is an intentional capability escalation —
-`aspec` will never mount the Docker socket without this explicit flag.
+`amux` will never mount the Docker socket without this explicit flag.
 
 ### Examples
 
 ```sh
-aspec implement 0005 --allow-docker    # implement a work item that needs Docker
-aspec chat --allow-docker              # start a chat session with Docker access
-aspec ready --refresh --allow-docker   # run audit with Docker access in container
+amux implement 0005 --allow-docker    # implement a work item that needs Docker
+amux chat --allow-docker              # start a chat session with Docker access
+amux ready --refresh --allow-docker   # run audit with Docker access in container
 ```
 
 ---
 
 ## Docker Command Visibility
 
-Every time aspec runs a Docker command (`docker build` or `docker run`), the
+Every time amux runs a Docker command (`docker build` or `docker run`), the
 full CLI command is displayed:
 
 - **Command mode**: printed to stdout before the command runs
 - **TUI mode**: included as the first line in the execution window output
 
-This lets you see exactly what Docker invocation aspec is making, e.g.:
+This lets you see exactly what Docker invocation amux is making, e.g.:
 
 ```
-$ docker build -t aspec-myapp:latest -f Dockerfile.dev /path/to/repo
-$ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_OAUTH_TOKEN=*** aspec-myapp:latest claude "Implement work item 0001..."
+$ docker build -t amux-myapp:latest -f Dockerfile.dev /path/to/repo
+$ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_OAUTH_TOKEN=*** amux-myapp:latest claude "Implement work item 0001..."
 ```
 
 ---
 
 ## Configuration
 
-### Per-repository: `GITROOT/aspec/.aspec-cli.json`
+### Per-repository: `GITROOT/aspec/.amux.json`
 
 ```json
 {
@@ -791,7 +791,7 @@ $ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_O
 }
 ```
 
-### Global: `$HOME/.aspec/config.json`
+### Global: `$HOME/.amux/config.json`
 
 ```json
 {
@@ -817,7 +817,7 @@ make release VERSION=v1.0.0   # create and publish a release (see below)
 
 1. Switches to `main`, pulls latest, and verifies a clean working tree
 2. Creates `docs/releases/vx.y.z.md` with a release notes template
-3. Launches `aspec chat` so you can prompt the agent to write release notes
+3. Launches `amux chat` so you can prompt the agent to write release notes
 4. Runs all tests locally
 5. Commits the release notes and tags the commit with the version
 6. Pushes the commit and tag to `main`

@@ -877,12 +877,12 @@ mod tests {
     #[test]
     fn start_container_activates_window() {
         let mut app = App::new();
-        app.start_container("aspec-test".into(), "Claude Code".into(), 78, 18);
+        app.start_container("amux-test".into(), "Claude Code".into(), 78, 18);
         assert_eq!(app.container_window, ContainerWindowState::Maximized);
         assert!(app.container_info.is_some());
         assert!(app.vt100_parser.is_some());
         let info = app.container_info.as_ref().unwrap();
-        assert_eq!(info.container_name, "aspec-test");
+        assert_eq!(info.container_name, "amux-test");
         assert_eq!(info.agent_display_name, "Claude Code");
     }
 
@@ -890,7 +890,7 @@ mod tests {
     fn pty_data_routes_to_vt100_when_container_active() {
         let mut app = App::new();
         app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
-        app.start_container("aspec-test".into(), "Claude Code".into(), 80, 24);
+        app.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
 
         // Feed data through the vt100 parser (simulating what tick() does).
         if let Some(ref mut parser) = app.vt100_parser {
@@ -924,7 +924,7 @@ mod tests {
     fn finish_command_closes_container_and_creates_summary() {
         let mut app = App::new();
         app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
-        app.start_container("aspec-test".into(), "Claude Code".into(), 78, 18);
+        app.start_container("amux-test".into(), "Claude Code".into(), 78, 18);
 
         app.finish_command(0);
 
@@ -933,7 +933,7 @@ mod tests {
         assert!(app.vt100_parser.is_none());
         assert!(app.last_container_summary.is_some());
         let summary = app.last_container_summary.as_ref().unwrap();
-        assert_eq!(summary.container_name, "aspec-test");
+        assert_eq!(summary.container_name, "amux-test");
         assert_eq!(summary.agent_display_name, "Claude Code");
         assert_eq!(summary.exit_code, 0);
     }
@@ -942,7 +942,7 @@ mod tests {
     fn finish_command_with_error_records_exit_code() {
         let mut app = App::new();
         app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
-        app.start_container("aspec-test".into(), "Claude Code".into(), 78, 18);
+        app.start_container("amux-test".into(), "Claude Code".into(), 78, 18);
 
         app.finish_command(1);
 
@@ -962,7 +962,7 @@ mod tests {
             exit_code: 0,
         });
 
-        app.start_container("aspec-new".into(), "Claude Code".into(), 78, 18);
+        app.start_container("amux-new".into(), "Claude Code".into(), 78, 18);
         assert!(app.last_container_summary.is_none());
     }
 
@@ -1002,7 +1002,7 @@ mod tests {
     fn container_stats_history_used_for_averages() {
         let mut app = App::new();
         app.phase = ExecutionPhase::Running { command: "implement 0001".into() };
-        app.start_container("aspec-test".into(), "Claude Code".into(), 78, 18);
+        app.start_container("amux-test".into(), "Claude Code".into(), 78, 18);
 
         // Simulate stats arriving
         if let Some(ref mut info) = app.container_info {

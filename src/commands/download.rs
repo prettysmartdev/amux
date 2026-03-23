@@ -79,7 +79,7 @@ pub async fn download_aspec_folder(
 /// Download a URL and return the response body as text.
 async fn download_text(url: &str) -> Result<String> {
     let client = reqwest::Client::builder()
-        .user_agent("aspec-cli")
+        .user_agent("amux")
         .build()?;
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
@@ -95,7 +95,7 @@ async fn download_text(url: &str) -> Result<String> {
 /// Download a URL and return the response body as bytes.
 async fn download_bytes(url: &str) -> Result<Vec<u8>> {
     let client = reqwest::Client::builder()
-        .user_agent("aspec-cli")
+        .user_agent("amux")
         .build()?;
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {

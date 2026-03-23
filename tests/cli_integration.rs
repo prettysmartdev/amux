@@ -1,43 +1,43 @@
-/// Integration tests for the aspec CLI binary.
+/// Integration tests for the amux CLI binary.
 ///
 /// These tests invoke the compiled binary to validate end-to-end behaviour
 /// across multiple components.
 use std::process::Command;
 
-fn aspec() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_aspec"))
+fn amux() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_amux"))
 }
 
 #[test]
 fn help_exits_successfully() {
-    let output = aspec().arg("--help").output().expect("failed to run aspec");
+    let output = amux().arg("--help").output().expect("failed to run amux");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("aspec"));
+    assert!(stdout.contains("amux"));
 }
 
 #[test]
 fn version_exits_successfully() {
-    let output = aspec().arg("--version").output().expect("failed to run aspec");
+    let output = amux().arg("--version").output().expect("failed to run amux");
     assert!(output.status.success());
 }
 
 #[test]
 fn implement_missing_work_item_prints_error() {
-    let output = aspec()
+    let output = amux()
         .args(["implement", "9999"])
         .output()
-        .expect("failed to run aspec");
+        .expect("failed to run amux");
     // Should fail (non-zero exit) because work item 9999 does not exist.
     assert!(!output.status.success());
 }
 
 #[test]
 fn implement_accepts_four_digit_work_item() {
-    let output = aspec()
+    let output = amux()
         .args(["implement", "0099"])
         .output()
-        .expect("failed to run aspec");
+        .expect("failed to run amux");
     // Should fail because work item 0099 doesn't exist, but the input should be accepted.
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -51,10 +51,10 @@ fn implement_accepts_four_digit_work_item() {
 
 #[test]
 fn ready_help_shows_refresh_flag() {
-    let output = aspec()
+    let output = amux()
         .args(["ready", "--help"])
         .output()
-        .expect("failed to run aspec");
+        .expect("failed to run amux");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -65,10 +65,10 @@ fn ready_help_shows_refresh_flag() {
 
 #[test]
 fn ready_help_shows_non_interactive_flag() {
-    let output = aspec()
+    let output = amux()
         .args(["ready", "--help"])
         .output()
-        .expect("failed to run aspec");
+        .expect("failed to run amux");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -79,10 +79,10 @@ fn ready_help_shows_non_interactive_flag() {
 
 #[test]
 fn implement_help_shows_non_interactive_flag() {
-    let output = aspec()
+    let output = amux()
         .args(["implement", "--help"])
         .output()
-        .expect("failed to run aspec");
+        .expect("failed to run amux");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -93,10 +93,10 @@ fn implement_help_shows_non_interactive_flag() {
 
 #[test]
 fn new_help_shows_subcommand() {
-    let output = aspec()
+    let output = amux()
         .args(["--help"])
         .output()
-        .expect("failed to run aspec");
+        .expect("failed to run amux");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -107,10 +107,10 @@ fn new_help_shows_subcommand() {
 
 #[test]
 fn chat_help_shows_subcommand() {
-    let output = aspec()
+    let output = amux()
         .args(["--help"])
         .output()
-        .expect("failed to run aspec");
+        .expect("failed to run amux");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -121,10 +121,10 @@ fn chat_help_shows_subcommand() {
 
 #[test]
 fn chat_help_shows_non_interactive_flag() {
-    let output = aspec()
+    let output = amux()
         .args(["chat", "--help"])
         .output()
-        .expect("failed to run aspec");
+        .expect("failed to run amux");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

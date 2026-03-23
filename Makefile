@@ -1,4 +1,4 @@
-BINARY     := aspec
+BINARY     := amux
 INSTALL_PATH ?= /usr/local/bin
 
 .PHONY: all build install test clean release
@@ -39,7 +39,7 @@ release:
 	@echo "" >> docs/releases/$(VERSION).md
 	@echo "_Write release notes here._" >> docs/releases/$(VERSION).md
 	@echo "==> Created docs/releases/$(VERSION).md"
-	@echo "==> Launching aspec chat to write release notes..."
+	@echo "==> Launching amux chat to write release notes..."
 	$(BINARY) chat
 	@echo "==> Running tests..."
 	cargo test

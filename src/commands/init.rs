@@ -26,7 +26,7 @@ pub async fn run_with_sink(agent: Agent, out: &OutputSink) -> Result<()> {
     save_repo_config(&git_root, &config)?;
     out.println(format!(
         "Config written to: {}",
-        git_root.join("aspec/.aspec-cli.json").display()
+        git_root.join("aspec/.amux.json").display()
     ));
 
     // Download aspec folder from GitHub if it doesn't already exist.

@@ -207,11 +207,11 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
 
     if !opts.refresh {
         out.println(String::new());
-        out.println("Tip: use `aspec ready --refresh` to run the Dockerfile audit agent.");
+        out.println("Tip: use `amux ready --refresh` to run the Dockerfile audit agent.");
     }
 
     out.println(String::new());
-    out.println("aspec is ready.");
+    out.println("amux is ready.");
 
     Ok(())
 }
@@ -439,11 +439,11 @@ pub async fn run_with_sink(
 
     if !opts.refresh {
         out.println(String::new());
-        out.println("Tip: use `aspec ready --refresh` to run the Dockerfile audit agent.");
+        out.println("Tip: use `amux ready --refresh` to run the Dockerfile audit agent.");
     }
 
     out.println(String::new());
-    out.println("aspec is ready.");
+    out.println("amux is ready.");
     Ok(summary)
 }
 
