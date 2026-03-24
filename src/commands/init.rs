@@ -32,7 +32,8 @@ impl Default for InitSummary {
 
 /// Command-mode entry point: prompts interactively then runs init.
 pub async fn run(agent: Agent, aspec: bool) -> Result<()> {
-    let git_root = find_git_root().context("Not inside a Git repository")?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let git_root = find_git_root_from(&cwd).context("Not inside a Git repository")?;
 
     // When --aspec is set and the folder already exists, ask before replacing.
     let aspec_dir = git_root.join("aspec");
@@ -66,7 +67,7 @@ pub async fn run(agent: Agent, aspec: bool) -> Result<()> {
         ask_yes_no_stdin("Run the agent audit container after creating Dockerfile.dev?")
     };
 
-    run_with_sink(agent, aspec, replace_aspec, run_audit, &OutputSink::Stdout).await
+    run_with_sink(agent, aspec, replace_aspec, run_audit, &OutputSink::Stdout, &cwd).await
 }
 
 /// Core logic shared between command mode and TUI mode.
@@ -75,14 +76,17 @@ pub async fn run(agent: Agent, aspec: bool) -> Result<()> {
 /// - `aspec`: when true, download aspec templates from GitHub.
 /// - `replace_aspec`: when true (and `aspec` is true), overwrite an existing aspec folder.
 /// - `run_audit`: when true, run the agent audit container and rebuild the image.
+/// - `cwd`: the working directory to search upward from for the Git root. In CLI mode this is
+///   `std::env::current_dir()`; in TUI mode this is the active tab's `cwd`.
 pub async fn run_with_sink(
     agent: Agent,
     aspec: bool,
     replace_aspec: bool,
     run_audit: bool,
     out: &OutputSink,
+    cwd: &std::path::Path,
 ) -> Result<()> {
-    let git_root = find_git_root().context("Not inside a Git repository")?;
+    let git_root = find_git_root_from(cwd).context("Not inside a Git repository")?;
     let mut summary = InitSummary::default();
 
     out.println(format!("Initializing amux in: {}", git_root.display()));
@@ -477,7 +481,8 @@ mod tests {
 
         // We don't run the real init (it would write files) but we verify the function
         // signature and that it calls the sink. Run from within the project's git root.
-        let result = run_with_sink(Agent::Claude, false, false, false, &sink).await;
+        let cwd = std::env::current_dir().unwrap();
+        let result = run_with_sink(Agent::Claude, false, false, false, &sink, &cwd).await;
         // May succeed or fail depending on environment; we just verify sink received calls.
         drop(result);
         // Should have received at least one message via the channel.
@@ -608,8 +613,9 @@ mod tests {
         // Run from within the project repo (no CWD change needed — workspace is a git repo).
         let (tx, mut rx) = unbounded_channel();
         let sink = OutputSink::Channel(tx);
+        let cwd = std::env::current_dir().unwrap();
         // aspec=false means the aspec folder download is skipped.
-        let result = run_with_sink(Agent::Claude, false, false, false, &sink).await;
+        let result = run_with_sink(Agent::Claude, false, false, false, &sink, &cwd).await;
         drop(result);
 
         let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -625,7 +631,7 @@ mod tests {
 
     #[test]
     fn run_with_sink_accepts_all_params() {
-        // run_with_sink takes (Agent, bool, bool, &OutputSink).
+        // run_with_sink takes (Agent, bool, bool, bool, &OutputSink, &Path).
         // The fact that this module compiles with its current signature is the check.
         // Verify the parameter names correspond to aspec and run_audit.
         let opts: (bool, bool) = (false, false);

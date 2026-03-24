@@ -109,6 +109,29 @@ In TUI mode, `execute_command()` passes `OutputSink::Channel(app.output_tx.clone
 
 ---
 
+## Working Directory Contract
+
+All `run_with_sink` functions accept an explicit `cwd: &Path` parameter that
+determines where the Git root is searched from. This ensures correctness for
+both execution modes:
+
+| Mode | `cwd` value | Behaviour |
+|------|-------------|-----------|
+| CLI (command mode) | `std::env::current_dir()` | Uses the directory where `amux` was launched |
+| TUI (interactive mode) | `app.active_tab().cwd` | Uses the tab's working directory |
+
+**Rule:** No command implementation may call `find_git_root()` (which reads the
+process CWD). All callers must use `find_git_root_from(cwd)` with an explicitly
+provided `cwd`. This prevents TUI tabs from accidentally operating on the wrong
+repository when a tab's working directory differs from the process's launch
+directory.
+
+The `find_git_root()` helper (which reads `std::env::current_dir()`) exists only
+for the CLI `run()` entry points, which call it once to determine the `cwd` to
+pass down.
+
+---
+
 ## TUI State Machine
 
 The TUI state is split across three orthogonal enums plus the `App` struct:
@@ -566,7 +589,7 @@ automatically (no opt-in dialog needed).
 | Unit — agent | `commands::agent::tests` | Shared agent launching |
 | Unit — new | `commands::new::tests` | Slugify, numbering, template, find_template, kind parsing, run_with_sink |
 | Integration — CLI | `tests/cli_integration.rs` | Binary-level: help, version, flags, work items |
-| Integration — parity | `tests/command_tui_parity.rs` | Shared logic between command/TUI modes, container lifecycle |
+| Integration — parity | `tests/command_tui_parity.rs` | Shared logic between command/TUI modes, container lifecycle, tab-cwd correctness |
 | Unit — download | `commands::download::tests` | Tarball extraction, file counting, empty tarball error |
 | Integration — download | `tests/download_integration.rs` | GitHub template downloads, aspec folder download, init integration, fallback |
 | Integration — Docker | `tests/dockerfile_build.rs` | Builds each agent template Dockerfile to verify validity |

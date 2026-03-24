@@ -298,8 +298,9 @@ async fn execute_command(app: &mut App, cmd: &str) {
             app.active_tab_mut().exit_rx = Some(exit_rx);
             let tx = app.active_tab().output_tx.clone();
             let aspec = parts.iter().any(|p| *p == "--aspec");
+            let tab_cwd = app.active_tab().cwd.clone();
             spawn_text_command(tx, exit_tx, move |sink| async move {
-                init::run_with_sink(agent, aspec, false, false, &sink).await
+                init::run_with_sink(agent, aspec, false, false, &sink, &tab_cwd).await
             });
         }
 
@@ -1293,8 +1294,9 @@ async fn launch_new(app: &mut App, kind: WorkItemKind, title: String) {
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     app.active_tab_mut().exit_rx = Some(exit_rx);
     let tx = app.active_tab().output_tx.clone();
+    let tab_cwd = app.active_tab().cwd.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
-        new::run_with_sink(&sink, Some(kind), Some(title)).await
+        new::run_with_sink(&sink, Some(kind), Some(title), &tab_cwd).await
     });
 }
 

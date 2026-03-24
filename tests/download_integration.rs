@@ -7,20 +7,8 @@ use amux::cli::Agent;
 use amux::commands::download;
 use amux::commands::init;
 use amux::commands::output::OutputSink;
-use std::sync::OnceLock;
 use tempfile::TempDir;
 use tokio::sync::mpsc::unbounded_channel;
-use tokio::sync::Mutex;
-
-/// Mutex that serializes all tests that mutate the process-wide CWD via
-/// `std::env::set_current_dir`.  Without this, parallel test threads can
-/// capture one another's TempDir as `original_dir`, which then gets deleted
-/// before the restore step runs, causing an ENOENT panic.
-static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn cwd_lock() -> &'static Mutex<()> {
-    CWD_LOCK.get_or_init(|| Mutex::new(()))
-}
 
 /// Check whether we have network connectivity to GitHub.
 fn has_network() -> bool {
@@ -189,17 +177,8 @@ async fn init_downloads_aspec_folder_when_missing() {
     let (tx, mut rx) = unbounded_channel();
     let out = OutputSink::Channel(tx);
 
-    // Change CWD to the temp dir for find_git_root to work.
-    // Hold the lock for the entire CWD mutation to prevent races with other tests.
-    let _cwd_guard = cwd_lock().lock().await;
-    let original_dir = std::env::current_dir().unwrap();
-    std::env::set_current_dir(tmp.path()).unwrap();
-
     // Pass aspec=true so the aspec folder is downloaded.
-    let result = init::run_with_sink(Agent::Claude, true, false, false, &out).await;
-
-    std::env::set_current_dir(original_dir).unwrap();
-    drop(_cwd_guard);
+    let result = init::run_with_sink(Agent::Claude, true, false, false, &out, tmp.path()).await;
 
     assert!(result.is_ok(), "Init failed: {:?}", result.err());
 
@@ -237,15 +216,8 @@ async fn init_skips_aspec_download_when_folder_exists() {
     let (tx, mut rx) = unbounded_channel();
     let out = OutputSink::Channel(tx);
 
-    let _cwd_guard = cwd_lock().lock().await;
-    let original_dir = std::env::current_dir().unwrap();
-    std::env::set_current_dir(tmp.path()).unwrap();
-
     // Pass aspec=true so init tries to download, but the folder already exists.
-    let result = init::run_with_sink(Agent::Claude, true, false, false, &out).await;
-
-    std::env::set_current_dir(original_dir).unwrap();
-    drop(_cwd_guard);
+    let result = init::run_with_sink(Agent::Claude, true, false, false, &out, tmp.path()).await;
 
     assert!(result.is_ok(), "Init failed: {:?}", result.err());
 

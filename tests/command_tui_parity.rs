@@ -39,7 +39,8 @@ async fn init_via_sink_produces_output_lines() {
 
     // run_with_sink from inside a git repo (the amux repo itself)
     // aspec=false to avoid downloading; run_audit=false to skip Docker.
-    let result = init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink).await;
+    let cwd = std::env::current_dir().unwrap();
+    let result = init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink, &cwd).await;
     drop(result); // may succeed or fail; we only care that the sink was used.
 
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -199,7 +200,8 @@ fn init_via_sink_includes_whats_next() {
 
     // Run init without aspec, without audit (no Docker needed).
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let _ = rt.block_on(init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink));
+    let cwd = std::env::current_dir().unwrap();
+    let _ = rt.block_on(init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink, &cwd));
 
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let all = messages.join("\n");
@@ -632,17 +634,13 @@ async fn new_via_sink_creates_work_item() {
     let (tx, mut rx) = unbounded_channel();
     let sink = OutputSink::Channel(tx);
 
-    let original_dir = std::env::current_dir().unwrap();
-    std::env::set_current_dir(root).unwrap();
-
     let result = new::run_with_sink(
         &sink,
         Some(WorkItemKind::Task),
         Some("My New Task".to_string()),
+        root,
     )
     .await;
-
-    std::env::set_current_dir(original_dir).unwrap();
 
     assert!(result.is_ok(), "run_with_sink failed: {:?}", result.err());
 
@@ -1715,5 +1713,148 @@ fn autocomplete_ready_shows_allow_docker_hint() {
         sug.iter().any(|s| s.contains("--allow-docker")),
         "Expected --allow-docker hint for 'ready' command, got: {:?}",
         sug
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tab working directory: init and new use the explicit cwd, not process CWD
+// ---------------------------------------------------------------------------
+
+/// init::run_with_sink uses the provided `cwd` to find the git root.
+/// It should succeed when `cwd` points at a git repo and fail (or report
+/// "Not inside a Git repository") when `cwd` does NOT — regardless of where
+/// the process was launched.
+#[tokio::test]
+async fn init_uses_explicit_cwd_not_process_cwd() {
+    // Create two temp directories: one is a valid git repo, one is not.
+    let git_repo = TempDir::new().unwrap();
+    std::fs::create_dir(git_repo.path().join(".git")).unwrap();
+
+    let no_repo = TempDir::new().unwrap();
+
+    let (tx1, mut rx1) = unbounded_channel::<String>();
+    let sink1 = OutputSink::Channel(tx1);
+
+    // Run init pointing at the git repo — should succeed.
+    let result_ok =
+        init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink1, git_repo.path())
+            .await;
+    assert!(
+        result_ok.is_ok(),
+        "init should succeed when cwd is inside a git repo, got: {:?}",
+        result_ok.err()
+    );
+
+    // The sink should have received the "Initializing amux in:" message for
+    // the git_repo path, not for the process CWD.
+    let messages: Vec<String> = std::iter::from_fn(|| rx1.try_recv().ok()).collect();
+    let all = messages.join("\n");
+    assert!(
+        all.contains(git_repo.path().to_str().unwrap()),
+        "Output should reference the provided cwd, not process CWD. Got:\n{}",
+        all
+    );
+
+    let (tx2, _rx2) = unbounded_channel::<String>();
+    let sink2 = OutputSink::Channel(tx2);
+
+    // Run init pointing at a directory without a git repo — should fail.
+    let result_err =
+        init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink2, no_repo.path())
+            .await;
+    assert!(
+        result_err.is_err(),
+        "init should fail when cwd is not inside a git repo"
+    );
+    let msg = result_err.unwrap_err().to_string();
+    assert!(
+        msg.contains("Git repository") || msg.contains("git"),
+        "Error should mention git repo, got: {}",
+        msg
+    );
+}
+
+/// new::run_with_sink uses the provided `cwd` to find the git root and
+/// work-items directory — independent of the process working directory.
+#[tokio::test]
+async fn new_uses_explicit_cwd_not_process_cwd() {
+    // Create a temp dir that acts as a git repo with the template in place.
+    let tab_dir = TempDir::new().unwrap();
+    let root = tab_dir.path();
+    std::fs::create_dir(root.join(".git")).unwrap();
+    let wi = root.join("aspec/work-items");
+    std::fs::create_dir_all(&wi).unwrap();
+    std::fs::write(
+        wi.join("0000-template.md"),
+        "# Work Item: [Feature | Bug | Task]\n\nTitle: title\nIssue: issuelink\n",
+    )
+    .unwrap();
+
+    let (tx, mut rx) = unbounded_channel::<String>();
+    let sink = OutputSink::Channel(tx);
+
+    // Run new, passing the tab's directory explicitly.
+    // The process CWD is the amux workspace — a different git repo.
+    let result = new::run_with_sink(
+        &sink,
+        Some(WorkItemKind::Bug),
+        Some("Tab Dir Bug".to_string()),
+        root,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "new should succeed when the explicit cwd points at a git repo with a template, got: {:?}",
+        result.err()
+    );
+
+    // The work item should have been created in the tab's directory, not in
+    // the process CWD (amux workspace).
+    let created = wi.join("0001-tab-dir-bug.md");
+    assert!(
+        created.exists(),
+        "Work item should be created in the tab's cwd, not in process CWD"
+    );
+    let content = std::fs::read_to_string(&created).unwrap();
+    assert!(content.contains("# Work Item: Bug"));
+    assert!(content.contains("Title: Tab Dir Bug"));
+
+    // Verify the output message references the correct path.
+    let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("Created work item")),
+        "Expected 'Created work item' message, got: {:?}",
+        messages
+    );
+}
+
+/// When `new::run_with_sink` is given a cwd that is not inside any git repo,
+/// it should return an error — not accidentally succeed by falling back to
+/// the process CWD.
+#[tokio::test]
+async fn new_fails_when_explicit_cwd_has_no_git_repo() {
+    let no_repo = TempDir::new().unwrap();
+
+    let (tx, _rx) = unbounded_channel::<String>();
+    let sink = OutputSink::Channel(tx);
+
+    let result = new::run_with_sink(
+        &sink,
+        Some(WorkItemKind::Task),
+        Some("Should Fail".to_string()),
+        no_repo.path(),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "new should fail when the explicit cwd is not inside a git repo"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("Git repository") || msg.contains("git"),
+        "Error should mention git repo, got: {}",
+        msg
     );
 }

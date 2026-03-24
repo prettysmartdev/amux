@@ -1,24 +1,29 @@
 use crate::commands::download;
-use crate::commands::init::find_git_root;
+use crate::commands::init::find_git_root_from;
 use crate::commands::output::OutputSink;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Command-mode entry point: runs `new` interactively via stdin/stdout.
 pub async fn run() -> Result<()> {
-    run_with_sink(&OutputSink::Stdout, None, None).await
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    run_with_sink(&OutputSink::Stdout, None, None, &cwd).await
 }
 
 /// Core logic shared between command mode and TUI mode.
 ///
 /// When `kind` or `title` are `None`, the user is prompted interactively
 /// (stdin for command mode, or pre-supplied for TUI mode).
+///
+/// `cwd` is the working directory to search upward from for the Git root. In CLI mode this is
+/// `std::env::current_dir()`; in TUI mode this is the active tab's `cwd`.
 pub async fn run_with_sink(
     out: &OutputSink,
     kind: Option<WorkItemKind>,
     title: Option<String>,
+    cwd: &std::path::Path,
 ) -> Result<()> {
-    let git_root = find_git_root().context("Not inside a Git repository")?;
+    let git_root = find_git_root_from(cwd).context("Not inside a Git repository")?;
 
     // Locate or download the template.
     let template_path = match find_template(&git_root) {
@@ -369,18 +374,13 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let sink = OutputSink::Channel(tx);
 
-        // We need to temporarily change CWD for find_git_root.
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(root).unwrap();
-
         let result = run_with_sink(
             &sink,
             Some(WorkItemKind::Feature),
             Some("My New Feature".to_string()),
+            root,
         )
         .await;
-
-        std::env::set_current_dir(original_dir).unwrap();
 
         assert!(result.is_ok(), "run_with_sink failed: {:?}", result.err());
 
