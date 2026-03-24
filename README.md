@@ -1,9 +1,9 @@
 <p align="center">
-  <strong>Secure multi-agent TUI for code and claw agents.</strong> <br>
-  Run and manage agents in parallel. <br>
+  <strong>Multi-agent manager for secure code and claw agents.</strong> <br>
+  Run and coordinate agents in parallel from your terminal. <br>
   Keep your machine safe with containers.<br>
   <br>
-  <img src="./docs/amux_logo_v3.svg" width="420" alt="AMUX">
+  <img src="./docs/amux_logo_v3.svg" width="320" alt="AMUX">
 </p>
 
 <p align="center">
@@ -14,13 +14,15 @@
 
 `amux` is a terminal multiplexer for AI code and claw agents. It gives you an interactive TUI where you can launch, monitor, and coordinate multiple agent sessions at the same time — each running safely inside its own container, isolated from your host machine.
 
-Think of it like tmux for agents: tabs, live output, scrollback, container stats, and stuck-session detection, all in your terminal.
+Think of it like tmux, but agents: tabs, terminal emulator, multiple parallel sessions, container stats, and stuck-agent detection, all in your terminal.
+
+![amux TUI](./docs/blog/images/tui-screenshot.png)
 
 ---
 
 ## Why `amux`?
 
-Running agents one at a time is slow. Running them directly on your machine is risky. `amux` solves both:
+Running agents one at a time is a waste. Running them directly on your machine is risky. `amux` solves both:
 
 - **Parallel sessions** — open multiple tabs, each running a different agent against the same or different projects simultaneously
 - **Hard isolation** — every agent runs in a container; your filesystem, credentials, and environment are never exposed to agent-generated code execution
@@ -28,33 +30,6 @@ Running agents one at a time is slow. Running them directly on your machine is r
 - **Agent-agnostic** — supports Claude Code, Nanoclaw, Codex, and OpenCode out of the box
 
 ---
-
-## The TUI
-
-Running `amux` with no arguments opens the interactive TUI:
-
-```sh
-amux
-```
-
-```
-┌── amux · implement 0001 ─┐ ┌── api · chat ─────────┐ ┌── +
-│➡ implement 0001          │ │  chat                  │
-└──────────────────────────┘ └────────────────────────┘
-
-┌─── ● running: implement 0001 ───────────────────────────────┐
-│ $ docker run --rm -it --name amux-12345 ...                  │
-│ ╭─ 🔒 Claude Code (containerized) ── amux-12345 | 5% | 200mb ─╮│
-│ │                                                              ││
-│ │  [Agent output here...]                                      ││
-│ │                                                              ││
-│ ╰──────────────────────────────────────────────────────────────╯│
-└──────────────────────────────────────────────────────────────────┘
-┌─── command ──────────────────────────────────────────────────────┐
-│ > _                                                              │
-└──────────────────────────────────────────────────────────────────┘
-  init  ·  ready  ·  implement  ·  chat  ·  new
-```
 
 ### Multi-tab agent coordination
 
@@ -71,7 +46,7 @@ Tab colors reflect live state:
 | Red | Exited with error |
 | Yellow | stuck agent detected |
 
-Stuck tab detection: amux detects when an agent is stuck and needs help, it will alert you with a yellow tab so you can intervene.
+Stuck agent detection: amux detects when an agent is stuck and needs help, it will alert you with a yellow tab so you can intervene.
 
 ### Interactive container terminal
 
@@ -125,7 +100,7 @@ amux
 chat
 ```
 
-See the [Getting Started Guide](docs/getting-started.md) for a full walkthrough.
+See the [Getting Started Guide](docs/getting-started.md) for a full walkthrough. All commands are available directly via the CLI in addition to the TUI.
 
 ---
 

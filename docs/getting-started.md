@@ -152,14 +152,12 @@ When minimized, the container collapses to a 1-line status bar showing agent nam
 
 ## Agent authentication
 
-On first use per repository, amux asks whether to pass your agent's credentials from the system keychain into the container:
+If your host agent is installed and authenticated, amux automatically and
+transparently passes its credentials into the container — your account and
+global settings are maintained without any prompting or manual configuration.
 
-```
-Pass agent credentials (from system keychain) into container?
-This will be saved for this repo. [y/n]
-```
-
-Accept once; the decision is saved. Credentials are passed as environment variables only — never as mounted files. API key values are masked in all displayed Docker commands.
+Credentials are passed as environment variables only — never as mounted files.
+API key values are masked in all displayed Docker commands.
 
 ---
 

@@ -150,8 +150,8 @@ image. Combine with `--build` to get a completely fresh image.
 
 The image tag is derived from the Git root folder name (e.g. `amux-myapp:latest`).
 
-Before launching the audit container, `ready` applies the same mount scope and
-agent authentication flow as `implement` (see [Agent Auth](#agent-authentication)).
+Before launching the audit container, `ready` uses the same mount scope and
+passes host agent credentials into the container automatically (see [Agent Auth](#agent-authentication)).
 
 **Local Agent Check**
 
@@ -248,7 +248,7 @@ The work item number is a 4-digit identifier (e.g. `0001`). Both `0001` and
 
 - Finds the matching work item file in `aspec/work-items/`
 - Prompts to confirm the Docker mount scope (Git root vs CWD) on first run
-- Optionally passes agent credentials via environment variable (see [Agent Auth](#agent-authentication))
+- Passes host agent credentials into the container automatically (see [Agent Auth](#agent-authentication))
 - Launches a container with the configured agent
 
 **Flags**
@@ -710,35 +710,17 @@ Press **y** to quit, **n** or **Esc** to cancel.
 
 ## Agent Authentication
 
-When running `implement` or `ready`, amux can pass your agent's credentials
-into the container so the agent is pre-authenticated — you won't have to log in
-manually each time.
+When running `implement`, `chat`, or `ready`, amux automatically passes your
+agent's credentials into the container so it is pre-authenticated — you won't
+have to log in manually each time.
 
-### Authentication methods
-
-There are two ways to provide credentials:
-
-**1. System keychain (default)**
-
-By default, amux reads the agent's OAuth access token directly from the
-system keychain. On first use per repository, amux asks for your permission:
-
-```
-Pass agent credentials (from system keychain) into container?
-This will be saved for this repo. [y/n]
-```
-
-- **y** — the OAuth token is extracted from the keychain and passed into
-  the container; the decision is saved in `aspec/.amux.json`
-  (`"autoAgentAuthAccepted": true`)
-- **n** — no credentials passed; you will need to authenticate inside
-  the container manually
-
-The decision is stored per Git repository and only asked once.
+If your host agent is installed and authenticated, its credentials are
+securely and transparently passed into the container so your account and global
+settings are maintained. No prompting or configuration is required.
 
 ### How credentials are passed
 
-When keychain auth is accepted, amux:
+amux:
 
 1. Reads the OAuth credentials JSON from the macOS Keychain
    (service: `Claude Code-credentials`)
@@ -895,8 +877,7 @@ $ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_O
 
 ```json
 {
-  "agent": "claude",
-  "autoAgentAuthAccepted": true
+  "agent": "claude"
 }
 ```
 

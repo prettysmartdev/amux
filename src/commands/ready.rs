@@ -72,12 +72,11 @@ pub const GREETINGS: [&str; 50] = [
 
 /// Select a greeting at random using the current time as a seed.
 pub fn select_random_greeting() -> &'static str {
-    let idx = std::time::SystemTime::now()
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .subsec_nanos() as usize
-        % GREETINGS.len();
-    GREETINGS[idx]
+        .as_nanos();
+    GREETINGS[(nanos % GREETINGS.len() as u128) as usize]
 }
 
 /// Context produced by the pre-audit phase, needed by the audit and post-audit phases.

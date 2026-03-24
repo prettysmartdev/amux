@@ -165,7 +165,6 @@ and capturing keyboard input.
 ```
 None ──[q / Ctrl+C]──────────────────────────► QuitConfirm ──[y]──► quit
      ──[ready|implement|chat, cwd ≠ root]──► MountScope   ──[r/c]──► resume
-     ──[ready|implement|chat, auth=None]───► AgentAuth    ──[y/n]──► resume
      ──[new]───────────────────────────────► NewKindSelect ──[1/2/3]──► NewTitleInput ──[Enter]──► create
 ```
 
@@ -552,21 +551,16 @@ stats for the specific container by name.
 ## Agent Auth Flow
 
 ```
-ready/implement submitted
+ready/implement/chat submitted
         │
         ▼
-  autoAgentAuthAccepted in config?
-        │
-   ┌────┴──────────────────┐
-  None                  Some(v)
-   │                       │
-   ▼                  ┌────┴────┐
-Auto-passthrough:
    read_keychain_raw() → extract OAuth JSON → CLAUDE_CODE_OAUTH_TOKEN env var
 ```
 
-Credentials are always sourced from the macOS system keychain and passed
-automatically (no opt-in dialog needed).
+If the host agent is installed and authenticated, credentials are sourced from
+the macOS system keychain and passed automatically into the container — no
+prompting required. If credentials are unavailable, the container launches
+without them.
 
 ---
 

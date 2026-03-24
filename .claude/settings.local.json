@@ -6,7 +6,10 @@
       "Bash(target/release/amux --version)",
       "Bash(grep \"\\\\.rs$\")",
       "Bash(xargs cat:*)",
-      "Bash(wait)"
+      "Bash(wait)",
+      "Bash(cd:*)",
+      "Bash(xxd)",
+      "Bash(python3:*)"
     ]
   }
 }
