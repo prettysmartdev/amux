@@ -125,13 +125,15 @@ A practical workflow: open one tab to `implement` a work item, open another to `
 
 ## Claw agent management
 
-`amux claws ready` sets up a persistent [nanoclaw](https://github.com/qwibitai/nanoclaw) container — a long-lived, machine-global background agent with Docker socket access.
+The `claws` commands manage a persistent [nanoclaw](https://github.com/qwibitai/nanoclaw) container — a long-lived, machine-global background agent with Docker socket access.
 
 ```sh
-amux claws ready    # first run: guided setup (fork, clone, build, launch)
+amux claws init     # first-time setup: fork, clone, build, and launch
+amux claws ready    # check status; start the container if it's stopped
+amux claws chat     # attach to a running nanoclaw container
 ```
 
-Unlike `chat` and `implement` sessions (ephemeral, per-project), the nanoclaw container persists across `amux` sessions. It's designed for longer-running or cross-project work where you want a continuously available agent. Press **Ctrl+C** to detach — the container keeps running; `claws ready` re-attaches next time.
+Unlike `chat` and `implement` sessions (ephemeral, per-project), the nanoclaw container persists across `amux` sessions. It's designed for longer-running or cross-project work where you want a continuously available agent. Press **Ctrl+C** to detach — the container keeps running; run `claws chat` again to re-attach.
 
 In the TUI, the nanoclaw tab is shown in purple.
 
