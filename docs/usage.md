@@ -389,11 +389,18 @@ Runs the first-time setup wizard to install and launch nanoclaw.
 2. **Docker daemon** — verifies the Docker daemon is running.
 3. **Dockerfile setup** — writes or verifies `Dockerfile.dev` inside the
    nanoclaw repo and builds the `amux-nanoclaw:latest` image.
-4. **Agent audit** — runs the Dockerfile.dev audit agent in a foreground,
-   interactive, prompted container (no Docker socket) to configure nanoclaw's
-   toolchain. The container is named with an `amux-` prefix and runs `--rm -it`.
-   In the **TUI**, the audit opens in the tab's container window exactly like
-   `chat` or `implement`. In **command mode**, it inherits stdin/stdout.
+4. **Agent audit** — runs a nanoclaw-specific audit agent in a foreground,
+   interactive, prompted container (no Docker socket). The agent receives a
+   specialized prompt that covers two tasks: (a) updating `Dockerfile.dev` with
+   all tools needed to build, run, and test nanoclaw at their newest compatible
+   versions; and (b) modifying the nanoclaw codebase to replace any
+   `host.docker.internal` references with container-to-container networking so
+   that the controller, onecli, and workers communicate directly over the Docker
+   network. This prompt is distinct from the standard audit prompt used by
+   `amux init` and `amux ready --refresh`. The container is named with an
+   `amux-` prefix and runs `--rm -it`. In the **TUI**, the audit opens in the
+   tab's container window exactly like `chat` or `implement`. In **command
+   mode**, it inherits stdin/stdout.
 5. **Docker socket warning** — explains (and requires explicit acceptance) that
    the nanoclaw container will be mounted to the host Docker socket, granting
    elevated access identical to `--allow-docker`.

@@ -60,10 +60,19 @@ pub enum Dialog {
     ClawsReadyUsernameInput { username: String },
     /// Claws wizard: confirm Docker socket access warning.
     ClawsReadyDockerSocketWarning,
-    /// Claws wizard: confirm /setup explanation before launching.
-    ClawsReadySetupExplain,
+    /// Claws wizard: confirm launching the audit agent (shown when Dockerfile.dev matches template).
+    ClawsAuditConfirm,
+    /// Claws subsequent run: offer to restart a found stopped container.
+    /// Shows container details and a y/n prompt.
+    ClawsReadyOfferRestartStopped {
+        container_id: String,
+        name: String,
+        created: String,
+    },
     /// Claws subsequent run: offer to start the stopped container.
     ClawsReadyOfferStart,
+    /// Claws subsequent run: container restart failed — offer to delete and start fresh.
+    ClawsRestartFailedOfferFresh { container_id: String },
     /// Claws wizard: clone failed with permission denied; collect sudo password for retry.
     ClawsReadySudoConfirm {
         /// The sudo password being entered (displayed as '*').
@@ -103,11 +112,9 @@ pub enum ClawsPhase {
     Inactive,
     /// Container start-only task is running (used by `claws ready` when container stopped).
     Setup,
-    /// Initial image build (pre-audit) text task is running.
+    /// Initial image build text task is running (downloads Dockerfile.nanoclaw + builds image).
     PreAudit,
-    /// Audit agent PTY container window is open.
-    Audit,
-    /// Post-audit image rebuild + container launch text task is running.
+    /// Post-build: /setup dialog + docker socket dialog + container launch + detached audit exec.
     PostAudit,
 }
 
@@ -297,6 +304,12 @@ pub struct TabState {
     pub claws_audit_ctx: Option<ClawsAuditCtx>,
     /// Receives the audit context from the pre-audit background task.
     pub claws_audit_ctx_rx: Option<tokio::sync::oneshot::Receiver<ClawsAuditCtx>>,
+    /// When true, attach to the nanoclaw container after it is started.
+    /// Set by `claws chat` when the container is not running.
+    pub claws_attach_after_start: bool,
+    /// Container ID of a stopped container that we tried (and failed) to restart.
+    /// Stored so the error-recovery dialog can offer to delete it and start fresh.
+    pub claws_restarting_container_id: Option<String>,
 }
 
 impl TabState {
@@ -345,6 +358,8 @@ impl TabState {
             claws_docker_accept_response_tx: None,
             claws_audit_ctx: None,
             claws_audit_ctx_rx: None,
+            claws_attach_after_start: false,
+            claws_restarting_container_id: None,
             last_output_time: None,
         }
     }

@@ -718,17 +718,42 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
                 username
             ),
         ),
+        Dialog::ClawsAuditConfirm => (
+            " Claws Init — Agent Audit ",
+            "  amux will launch your code agent inside the container to configure\n  \
+nanoclaw for containerized networking.\n\n  \
+Allow the agent to work (could take up to 15m). When it finishes,\n  \
+run /setup in the same agent session — no need to reattach.\n  \
+The container continues running after you close the session.\n\n  \
+Press y or 1 to accept and launch the agent,\n  \
+or n or 2 (or Esc) to cancel.  ".to_string(),
+        ),
         Dialog::ClawsReadyDockerSocketWarning => (
             " Claws Ready — Docker Socket Warning ",
             "  The nanoclaw container will be mounted to the host\n  Docker socket (like --allow-docker).\n  This grants elevated access to Docker.\n\n  Accept Docker socket access? [1=yes/2=no]  ".to_string(),
         ),
-        Dialog::ClawsReadySetupExplain => (
-            " Claws Ready — /setup Required ",
-            "  After the agent launches, run /setup and follow the\n  prompts to configure nanoclaw.\n  Required on first launch.\n\n  Accept and continue? [1=yes/2=no]  ".to_string(),
+        Dialog::ClawsReadyOfferRestartStopped { container_id, name, created } => (
+            " Claws Ready — Restart Stopped Container ",
+            format!(
+                "  Found a stopped nanoclaw container:\n\n  Name:    {}\n  ID:      {}\n  Created: {}\n\n  Start this stopped container? [1=yes/2=no]  ",
+                name,
+                &container_id[..container_id.len().min(12)],
+                created,
+            ),
+        ),
+        Dialog::ClawsRestartFailedOfferFresh { container_id } => (
+            " Claws Ready — Restart Failed ",
+            format!(
+                "  Failed to start container {}.\n  The bind-mount sources (e.g. claude.json) may have been\n  cleaned up since the container was created.\n\n  Delete this container and start a fresh one? [1=yes/2=no]  ",
+                &container_id[..container_id.len().min(12)],
+            ),
         ),
         Dialog::ClawsReadyOfferStart => (
-            " Claws Ready — Start Container ",
-            "  The nanoclaw container is not running.\n  You may need to run /setup again inside the agent.\n\n  Start the nanoclaw container? [1=yes/2=no]  ".to_string(),
+            " Claws Ready — Run Fresh Container ",
+            format!(
+                "  Run a fresh '{}' container? [1=yes/2=no]  ",
+                crate::commands::claws::NANOCLAW_CONTROLLER_NAME,
+            ),
         ),
         Dialog::ClawsReadySudoConfirm { password } => (
             " Claws Ready — Sudo Password ",
@@ -741,7 +766,7 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
         Dialog::None => return,
     };
 
-    let popup_width = 64u16.min(area.width.saturating_sub(4));
+    let popup_width = 72u16.min(area.width.saturating_sub(4));
     // Height = line count + 2 border rows, capped to terminal height.
     let line_count = body.chars().filter(|&c| c == '\n').count() as u16 + 1;
     let popup_height = (line_count + 2).max(5).min(area.height.saturating_sub(4));

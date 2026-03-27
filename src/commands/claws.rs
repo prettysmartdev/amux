@@ -1,8 +1,7 @@
-use crate::cli::{Agent, ClawsAction};
+use crate::cli::ClawsAction;
 use crate::commands::auth::agent_keychain_credentials;
 use crate::commands::chat::chat_entrypoint;
-use crate::commands::ready::audit_entrypoint;
-use crate::commands::init::write_dockerfile;
+use crate::commands::download;
 use crate::commands::output::OutputSink;
 use crate::commands::ready::StepStatus;
 use crate::config::load_repo_config;
@@ -13,9 +12,64 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 pub const NANOCLAW_IMAGE_TAG: &str = "amux-nanoclaw:latest";
+/// Fixed Docker container name for the nanoclaw controller.
+///
+/// Using a stable, predictable name (rather than a random `amux-` name) lets
+/// `claws init`, `claws ready`, and `claws chat` all reference the same
+/// container by name, and allows the TUI stats poller to attach to it
+/// consistently across commands.
+pub const NANOCLAW_CONTROLLER_NAME: &str = "amux-claws-controller";
 const NANOCLAW_REPO_FULL_NAME: &str = "qwibitai/nanoclaw";
 /// Git config flag that auto-accepts new SSH host fingerprints without prompting.
 const GIT_SSH_ACCEPT_NEW: &str = "core.sshCommand=ssh -o StrictHostKeyChecking=accept-new";
+
+/// Prompt sent to the audit agent during `claws init`.
+///
+/// This is distinct from the standard `AUDIT_PROMPT` used by `amux init` and
+/// `amux ready --refresh`.  The nanoclaw-specific prompt covers container-to-container
+/// network configuration and OneCLI cert handling — Dockerfile.dev is pre-configured
+/// via `Dockerfile.nanoclaw` and does not require agent modification.
+const CLAWS_INIT_AUDIT_PROMPT: &str = "\
+You have two jobs that can be performed in parallel: \n\
+/n/
+First, evaluate the nanoclaw source code to determine how containers communicate with each other \
+over the network. Modify the codebase so that all network traffic gets configured to be \
+container-to-container rather than container-to-host. The `host.docker.internal` route should \
+never be used, since nanoclaw, onecli, and all workers will be running within containers, and so \
+communication with the host machine will never be needed. The nanoclaw controller should \
+communicate with onecli over a container-to-container connection. When worker containers are \
+launched, they should be configured to communicate with onecli and the nanoclaw controller over \
+a container-to-container connection. Nanoclaw should use the Docker CLI and container ports to determine how to \
+perform all network communication. Modify the codebase comprehensively, looking for any place \
+where network traffic is configured, including addresses and ports for the controller onecli, \
+and workers. Think hard to ensure no container-to-host communication will happen after your \
+changes are complete. Do not attempt to use Docker yourself, as you do not have access. \n\
+\n\
+Second, change the nanoclaw codebase to detect `/tmp/onecli-*` volume mounts that the OneCLI SDK adds, \
+and automatically copy those cert files to `data/certs/` (which is on the actual host filesystem via mount) \
+Also rewrite the container mount args to use those host-accessible paths. Ensure the agent container gets the \
+CA cert correctly so Node.js can trust the OneCLI proxy's certificate.
+";
+
+/// Build the entrypoint command for the `claws init` audit agent (foreground interactive mode).
+///
+/// Uses [`CLAWS_INIT_AUDIT_PROMPT`] as the initial message. No tool restrictions are applied
+/// so the same agent session can also handle `/setup` after the audit completes.
+pub fn claws_init_audit_entrypoint(agent: &str) -> Vec<String> {
+    match agent {
+        "claude" => vec![
+            "claude".into(),
+            CLAWS_INIT_AUDIT_PROMPT.into(),
+        ],
+        "codex" => vec!["codex".into(), CLAWS_INIT_AUDIT_PROMPT.into()],
+        "opencode" => vec![
+            "opencode".into(),
+            "run".into(),
+            CLAWS_INIT_AUDIT_PROMPT.into(),
+        ],
+        _ => vec![agent.into(), CLAWS_INIT_AUDIT_PROMPT.into()],
+    }
+}
 
 /// Returns the nanoclaw installation path: `$HOME/.nanoclaw`.
 ///
@@ -33,6 +87,19 @@ pub fn nanoclaw_path() -> PathBuf {
 /// Returns the nanoclaw installation path as a `String` (for Docker CLI args).
 pub fn nanoclaw_path_str() -> String {
     nanoclaw_path().to_string_lossy().into_owned()
+}
+
+/// Returns the stable directory for nanoclaw host settings: `$HOME/.amux/nanoclaw-settings/`.
+///
+/// Using a stable (non-temporary) directory ensures that the bind-mount sources for
+/// `claude.json` and `.claude/` survive process restarts. Docker stores the original
+/// mount paths in the container config, so if a temp directory is cleaned up the
+/// container cannot be restarted.
+pub fn nanoclaw_settings_dir() -> PathBuf {
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/root"));
+    home.join(".amux").join("nanoclaw-settings")
 }
 
 /// Spawn a subprocess with piped stdout/stderr, stream each line through `out`,
@@ -197,8 +264,9 @@ pub async fn run_claws_ready(out: &OutputSink) -> Result<()> {
 
 /// Entry point for `amux claws chat` — attaches to the running nanoclaw container.
 ///
-/// The nanoclaw container must already be running (started via `claws init` or
-/// `claws ready`). Attaches interactively with a freeform agent chat session.
+/// If the container is not running, first checks for a stopped container and
+/// offers to restart it; if none exists (or the user declines), offers to run
+/// a fresh container. Then attaches to whichever container is now running.
 pub async fn run_claws_chat() -> Result<()> {
     let nanoclaw_dir = nanoclaw_path();
 
@@ -208,12 +276,82 @@ pub async fn run_claws_chat() -> Result<()> {
 
     let config = load_nanoclaw_config().unwrap_or_default();
     let container_id = match config.nanoclaw_container_id {
-        Some(id) if docker::is_container_running(&id) => id,
+        Some(ref id) if docker::is_container_running(id) => id.clone(),
         _ => {
-            bail!(
-                "nanoclaw container is not running. \
-                 Run 'amux claws ready' to start it."
-            );
+            // Container not running — check for a stopped one first.
+            if let Some(stopped) = docker::find_stopped_container(NANOCLAW_CONTROLLER_NAME, NANOCLAW_IMAGE_TAG) {
+                println!(
+                    "\nFound stopped container: ID={}, Name={}, Created={}",
+                    &stopped.id[..stopped.id.len().min(12)],
+                    stopped.name,
+                    stopped.created,
+                );
+                println!();
+                let restart = ask_yes_no_stdin(&format!(
+                    "Start stopped container '{}' (ID: {}, created: {})? [1=yes/2=no]: ",
+                    stopped.name,
+                    &stopped.id[..stopped.id.len().min(12)],
+                    stopped.created,
+                ))?;
+                if restart {
+                    print!("Starting stopped container... ");
+                    use std::io::Write;
+                    std::io::stdout().flush().ok();
+                    let final_container_id = match docker::start_container(&stopped.id) {
+                        Ok(()) => {
+                            if !wait_for_container(&stopped.id, 5) {
+                                bail!("Container did not start within 5 seconds.");
+                            }
+                            println!("OK");
+                            stopped.id.clone()
+                        }
+                        Err(e) => {
+                            println!("FAILED");
+                            println!();
+                            println!("Docker error: {}", e);
+                            println!();
+                            let delete_and_fresh = ask_yes_no_stdin(
+                                "Delete the stopped container and start a fresh one? [1=yes/2=no]: ",
+                            )?;
+                            if !delete_and_fresh {
+                                bail!("Container restart failed. Run 'amux claws ready' to try again.");
+                            }
+                            print!("Deleting stopped container {}... ", &stopped.id[..stopped.id.len().min(12)]);
+                            std::io::stdout().flush().ok();
+                            docker::remove_container(&stopped.id)?;
+                            println!("OK");
+                            start_fresh_nanoclaw_container_cli()?
+                        }
+                    };
+                    let mut new_config = load_nanoclaw_config().unwrap_or_default();
+                    new_config.nanoclaw_container_id = Some(final_container_id.clone());
+                    save_nanoclaw_config(&new_config)?;
+                    final_container_id
+                } else {
+                    // User declined stopped container — offer a fresh one.
+                    println!();
+                    let run_fresh = ask_yes_no_stdin(&format!(
+                        "Run a fresh '{}' container? [1=yes/2=no]: ",
+                        NANOCLAW_CONTROLLER_NAME,
+                    ))?;
+                    if !run_fresh {
+                        bail!("No container started. Run 'amux claws ready' to start the nanoclaw container.");
+                    }
+                    start_fresh_nanoclaw_container_cli()?
+                }
+            } else {
+                // No stopped container — offer a fresh one.
+                println!("\nnanoclaw container is not running.");
+                println!();
+                let run_fresh = ask_yes_no_stdin(&format!(
+                    "Run a fresh '{}' container? [1=yes/2=no]: ",
+                    NANOCLAW_CONTROLLER_NAME,
+                ))?;
+                if !run_fresh {
+                    bail!("No container started. Run 'amux claws ready' to start the nanoclaw container.");
+                }
+                start_fresh_nanoclaw_container_cli()?
+            }
         }
     };
 
@@ -225,6 +363,43 @@ pub async fn run_claws_chat() -> Result<()> {
 
     attach_to_nanoclaw(&container_id, &agent_name, &credentials.env_vars)?;
     Ok(())
+}
+
+/// Start a fresh nanoclaw controller container and return its ID (CLI helper).
+fn start_fresh_nanoclaw_container_cli() -> Result<String> {
+    let nanoclaw_str = nanoclaw_path_str();
+    let cfg = load_repo_config(&nanoclaw_path()).unwrap_or_default();
+    let agent_name = cfg.agent.unwrap_or_else(|| "claude".to_string());
+    let credentials = agent_keychain_credentials(&agent_name);
+    let settings_dir = nanoclaw_settings_dir();
+    let host_settings = docker::HostSettings::prepare_to_dir(&agent_name, &settings_dir);
+
+    println!("Starting nanoclaw controller container {}...", NANOCLAW_CONTROLLER_NAME);
+    let container_id = docker::run_container_detached(
+        NANOCLAW_IMAGE_TAG,
+        &nanoclaw_str,
+        &nanoclaw_str,
+        &nanoclaw_str,
+        Some(NANOCLAW_CONTROLLER_NAME),
+        &credentials.env_vars,
+        true,
+        host_settings.as_ref(),
+    )
+    .context("Failed to start nanoclaw background container")?;
+
+    print!("Waiting for container to start... ");
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+    if !wait_for_container(&container_id, 5) {
+        bail!("Container did not start within 5 seconds.");
+    }
+    println!("OK");
+
+    let mut new_config = load_nanoclaw_config().unwrap_or_default();
+    new_config.nanoclaw_container_id = Some(container_id.clone());
+    save_nanoclaw_config(&new_config)?;
+
+    Ok(container_id)
 }
 
 /// Result of a clone or move operation that may require elevated privileges.
@@ -500,7 +675,7 @@ fn is_nanoclaw_parent_permission_denied() -> bool {
     }
 }
 
-/// Context produced by the pre-audit phase, needed by the audit and post-audit phases.
+/// Context produced by the pre-audit phase, needed by the post-audit container launch.
 #[derive(Clone)]
 pub struct ClawsAuditCtx {
     pub nanoclaw_str: String,
@@ -511,11 +686,12 @@ pub struct ClawsAuditCtx {
     pub dockerfile_str: String,
 }
 
-/// Phase 1 of the first-run setup: Docker check, Dockerfile.dev init, initial image build.
+/// Phase 1 of the first-run setup: Docker check, Dockerfile.nanoclaw download,
+/// and a single image build.
 ///
-/// Does NOT run the audit agent. Returns a `ClawsAuditCtx` the caller uses to launch
-/// the audit (interactively in CLI mode, via PTY container window in TUI mode) and then
-/// call `rebuild_nanoclaw_post_audit`.
+/// Downloads `Dockerfile.nanoclaw` from the amux templates directory and writes it
+/// as `Dockerfile.dev` in the nanoclaw repo, then builds the image once.
+/// No post-audit rebuild is needed — the Dockerfile is pre-configured.
 pub async fn build_nanoclaw_pre_audit(
     out: &OutputSink,
     env_vars: Vec<(String, String)>,
@@ -538,13 +714,15 @@ pub async fn build_nanoclaw_pre_audit(
     // Determine agent name from nanoclaw repo config (default to claude).
     let config = load_repo_config(&nanoclaw_dir).unwrap_or_default();
     let agent_name = config.agent.unwrap_or_else(|| "claude".to_string());
-    let agent = agent_from_str(&agent_name);
 
-    // Ensure Dockerfile.dev exists in the nanoclaw repo.
-    out.print("Checking Dockerfile.dev in nanoclaw... ");
-    write_dockerfile(&nanoclaw_dir, &agent, out).await?;
+    // Download Dockerfile.nanoclaw and write as Dockerfile.dev.
+    let dockerfile_path = nanoclaw_dir.join("Dockerfile.dev");
+    let content = download::download_nanoclaw_dockerfile(out).await?;
+    std::fs::write(&dockerfile_path, &content)
+        .with_context(|| format!("Failed to write {}", dockerfile_path.display()))?;
+    out.println(format!("Dockerfile.dev written to: {}", dockerfile_path.display()));
 
-    // Build the initial nanoclaw image.
+    // Build the nanoclaw image once (no post-audit rebuild).
     let dockerfile_str = format!("{}/Dockerfile.dev", nanoclaw_str);
     out.println(format!("Building image {}...", NANOCLAW_IMAGE_TAG));
     let out_clone = out.clone();
@@ -557,73 +735,76 @@ pub async fn build_nanoclaw_pre_audit(
     )
     .context("Failed to build nanoclaw Docker image")?;
     out.println(format!("Image {} built successfully.", NANOCLAW_IMAGE_TAG));
+    summary.nanoclaw_image = StepStatus::Ok("built".into());
 
-    let _ = host_settings; // not needed for initial build; caller passes to audit container
+    let _ = host_settings;
     Ok(ClawsAuditCtx { nanoclaw_str, agent_name, env_vars, dockerfile_str })
 }
 
-/// Phase 3 of the first-run setup: rebuild the nanoclaw image after the audit agent has
-/// updated Dockerfile.dev.
-pub async fn rebuild_nanoclaw_post_audit(
-    out: &OutputSink,
-    ctx: &ClawsAuditCtx,
-    summary: &mut ClawsSummary,
-) -> Result<()> {
-    out.println(format!(
-        "Rebuilding image {} with updated Dockerfile.dev...",
-        NANOCLAW_IMAGE_TAG
-    ));
-    let out_clone = out.clone();
-    let nanoclaw_str = ctx.nanoclaw_str.clone();
-    let dockerfile_str = ctx.dockerfile_str.clone();
-    docker::build_image_streaming(
-        NANOCLAW_IMAGE_TAG,
-        &dockerfile_str,
-        &nanoclaw_str,
-        false,
-        |line| { out_clone.println(line); },
-    )
-    .context("Failed to rebuild nanoclaw Docker image after audit")?;
-    out.println(format!("Image {} rebuilt successfully.", NANOCLAW_IMAGE_TAG));
-    summary.nanoclaw_image = StepStatus::Ok("built".into());
-    Ok(())
-}
-
-/// Phase 1+2+3 combined for CLI mode: build initial image, run audit interactively
-/// (inherited stdio, foreground, with an `amux-` container name), then rebuild.
+/// CLI convenience wrapper: downloads Dockerfile.nanoclaw, builds the image once,
+/// and shows the audit explanation dialog.
 ///
-/// The caller is responsible for showing the docker-socket warning and obtaining user
-/// acceptance before calling `launch_nanoclaw_container`.
+/// Returns the `ClawsAuditCtx` so the caller can pass it to
+/// `exec_audit_foreground` after launching the container.
 pub async fn build_nanoclaw_image(
     out: &OutputSink,
     env_vars: &[(String, String)],
     summary: &mut ClawsSummary,
     host_settings: Option<&docker::HostSettings>,
-) -> Result<()> {
+) -> Result<ClawsAuditCtx> {
     let ctx = build_nanoclaw_pre_audit(out, env_vars.to_vec(), summary, host_settings).await?;
 
-    // Run the Dockerfile.dev audit agent in the foreground (CLI: inherited stdio).
-    // The audit container does NOT need docker socket access — it only reads and
-    // modifies Dockerfile.dev. Host path and container path are identical so that
-    // file references inside the agent match the host filesystem.
-    let container_name = docker::generate_container_name();
-    let entrypoint = audit_entrypoint(&ctx.agent_name);
+    // Explain the audit + setup flow.
+    out.println(String::new());
+    out.println(
+        "amux will now launch your code agent inside the container to configure nanoclaw \
+         for containerized networking.",
+    );
+    out.println(
+        "Allow the agent to work (could take up to 15m). When the audit finishes, \
+         run /setup in the same agent session to complete nanoclaw configuration.",
+    );
+    out.println(
+        "The container continues running after you close the agent session.",
+    );
+    out.println(String::new());
+    out.println("Type 1 or y to accept and launch the agent, or 2 or n to cancel.");
+    out.println(String::new());
+    let accept = ask_yes_no_stdin("Accept and continue? [1=yes/2=no]: ")?;
+    if !accept {
+        bail!("Audit cancelled.");
+    }
+
+    Ok(ctx)
+}
+
+/// Exec into a running nanoclaw container with the audit prompt in foreground/interactive mode.
+///
+/// Uses `docker exec -it` so the user can watch the agent configure nanoclaw, then
+/// run `/setup` in the same agent session without detaching or reattaching.
+/// The container keeps running after the agent session ends.
+pub fn exec_audit_foreground(container_id: &str, ctx: &ClawsAuditCtx) -> Result<()> {
+    let entrypoint = claws_init_audit_entrypoint(&ctx.agent_name);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
-    out.println("Running Dockerfile.dev audit agent...");
-    docker::run_container_at_path(
-        NANOCLAW_IMAGE_TAG,
-        &ctx.nanoclaw_str,
-        &ctx.nanoclaw_str,
+    let exec_args = docker::build_exec_args_pty(
+        container_id,
         &ctx.nanoclaw_str,
         &entrypoint_refs,
         &ctx.env_vars,
-        host_settings,
-        false, // audit container: no docker socket access
-        Some(&container_name),
-    )
-    .context("Nanoclaw Dockerfile.dev audit container failed")?;
-
-    rebuild_nanoclaw_post_audit(out, &ctx, summary).await
+    );
+    let exec_str_refs: Vec<&str> = exec_args.iter().map(String::as_str).collect();
+    let status = std::process::Command::new("docker")
+        .args(&exec_str_refs)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to exec into nanoclaw container")?;
+    println!(
+        "\nAgent session ended (exit code: {}). nanoclaw container continues to run in the background.",
+        status.code().unwrap_or(-1)
+    );
+    Ok(())
 }
 
 /// Phase 2 of the first-run setup: launch the nanoclaw background container.
@@ -641,17 +822,16 @@ pub async fn launch_nanoclaw_container(
 ) -> Result<String> {
     let nanoclaw_str = nanoclaw_path_str();
 
-    let container_name = docker::generate_container_name();
-    out.println(format!("Starting nanoclaw container {}...", container_name));
+    out.println(format!("Starting nanoclaw controller container {}...", NANOCLAW_CONTROLLER_NAME));
 
     let container_id = docker::run_container_detached(
         NANOCLAW_IMAGE_TAG,
         &nanoclaw_str,
         &nanoclaw_str,
         &nanoclaw_str,
-        Some(&container_name),
+        Some(NANOCLAW_CONTROLLER_NAME),
         env_vars,
-        true, // nanoclaw setup container: mount Docker socket
+        true, // nanoclaw controller container: mount Docker socket
         host_settings,
     )
     .context("Failed to start nanoclaw background container")?;
@@ -717,95 +897,107 @@ pub fn wait_for_container(container_id: &str, timeout_secs: u64) -> bool {
 async fn run_first_time_wizard(out: &OutputSink, summary: &mut ClawsSummary) -> Result<()> {
     let dest_str = nanoclaw_path_str();
     out.println("claws ready — first-time setup for nanoclaw");
-    out.println(format!("nanoclaw will be installed at {}.", dest_str));
     out.println(String::new());
 
-    let already_forked =
-        ask_yes_no_stdin("Have you already forked nanoclaw on GitHub? [1=yes/2=no]: ")?;
-
-    if already_forked {
-        let username = ask_text_stdin("GitHub username (fork owner): ")?;
-        let confirm = ask_yes_no_stdin(&format!(
-            "Clone {}/nanoclaw to {}? [1=yes/2=no]: ",
-            username.trim(), dest_str
-        ))?;
-        if !confirm {
-            bail!("Clone cancelled.");
-        }
-
-        match clone_nanoclaw(username.trim(), out)? {
-            CloneOutcome::Success => {
-                chmod_nanoclaw_permissive(out);
-            }
-            CloneOutcome::PermissionDenied => {
-                out.println(format!(
-                    "\x1b[31mClone failed: permission denied writing to {}.\x1b[0m",
-                    dest_str
-                ));
-                let use_sudo = ask_yes_no_stdin(
-                    "Retry the clone with sudo? [1=yes/2=no]: ",
-                )?;
-                if !use_sudo {
-                    bail!("Clone cancelled: permission denied.");
-                }
-                clone_nanoclaw_sudo(username.trim(), out, None)?;
-                chmod_nanoclaw_permissive(out);
-            }
-        }
+    // Detect if nanoclaw is already installed; if so, skip the fork/clone steps.
+    if nanoclaw_path().exists() {
+        out.println(format!(
+            "Existing nanoclaw installation found at {}. Using existing installation, \
+             skipping fork/clone.",
+            dest_str
+        ));
+        summary.nanoclaw_cloned = StepStatus::Ok("existing".into());
     } else {
-        out.println("You can fork nanoclaw using the GitHub CLI (gh):");
-        out.println(format!(
-            "  gh repo fork {} --clone --remote-name origin",
-            NANOCLAW_REPO_FULL_NAME
-        ));
-        out.println(format!(
-            "Alternatively, visit https://github.com/{} and click Fork.",
-            NANOCLAW_REPO_FULL_NAME
-        ));
+        out.println(format!("nanoclaw will be installed at {}.", dest_str));
         out.println(String::new());
 
-        let use_gh = ask_yes_no_stdin(
-            "Use the gh CLI to fork and clone nanoclaw now? [1=yes/2=no]: ",
-        )?;
-        if !use_gh {
-            bail!(
-                "Please fork nanoclaw at https://github.com/{} and run \
-                 'amux claws ready' again.",
-                NANOCLAW_REPO_FULL_NAME
-            );
-        }
+        let already_forked =
+            ask_yes_no_stdin("Have you already forked nanoclaw on GitHub? [1=yes/2=no]: ")?;
 
-        let confirm = ask_yes_no_stdin(&format!(
-            "This will fork qwibitai/nanoclaw to your GitHub account and clone it \
-             to {}. Continue? [1=yes/2=no]: ",
-            dest_str
-        ))?;
-        if !confirm {
-            bail!("Fork cancelled.");
-        }
-
-        match fork_and_clone_nanoclaw(out)? {
-            CloneOutcome::Success => {
-                chmod_nanoclaw_permissive(out);
+        if already_forked {
+            let username = ask_text_stdin("GitHub username (fork owner): ")?;
+            let confirm = ask_yes_no_stdin(&format!(
+                "Clone {}/nanoclaw to {}? [1=yes/2=no]: ",
+                username.trim(), dest_str
+            ))?;
+            if !confirm {
+                bail!("Clone cancelled.");
             }
-            CloneOutcome::PermissionDenied => {
-                out.println(format!(
-                    "\x1b[31mMove failed: permission denied writing to {}.\x1b[0m",
-                    dest_str
-                ));
-                let use_sudo = ask_yes_no_stdin(
-                    "Retry with sudo? [1=yes/2=no]: ",
-                )?;
-                if !use_sudo {
-                    bail!("Fork cancelled: permission denied.");
+
+            match clone_nanoclaw(username.trim(), out)? {
+                CloneOutcome::Success => {
+                    chmod_nanoclaw_permissive(out);
                 }
-                fork_and_clone_nanoclaw_sudo(out)?;
-                chmod_nanoclaw_permissive(out);
+                CloneOutcome::PermissionDenied => {
+                    out.println(format!(
+                        "\x1b[31mClone failed: permission denied writing to {}.\x1b[0m",
+                        dest_str
+                    ));
+                    let use_sudo = ask_yes_no_stdin(
+                        "Retry the clone with sudo? [1=yes/2=no]: ",
+                    )?;
+                    if !use_sudo {
+                        bail!("Clone cancelled: permission denied.");
+                    }
+                    clone_nanoclaw_sudo(username.trim(), out, None)?;
+                    chmod_nanoclaw_permissive(out);
+                }
+            }
+        } else {
+            out.println("You can fork nanoclaw using the GitHub CLI (gh):");
+            out.println(format!(
+                "  gh repo fork {} --clone --remote-name origin",
+                NANOCLAW_REPO_FULL_NAME
+            ));
+            out.println(format!(
+                "Alternatively, visit https://github.com/{} and click Fork.",
+                NANOCLAW_REPO_FULL_NAME
+            ));
+            out.println(String::new());
+
+            let use_gh = ask_yes_no_stdin(
+                "Use the gh CLI to fork and clone nanoclaw now? [1=yes/2=no]: ",
+            )?;
+            if !use_gh {
+                bail!(
+                    "Please fork nanoclaw at https://github.com/{} and run \
+                     'amux claws ready' again.",
+                    NANOCLAW_REPO_FULL_NAME
+                );
+            }
+
+            let confirm = ask_yes_no_stdin(&format!(
+                "This will fork qwibitai/nanoclaw to your GitHub account and clone it \
+                 to {}. Continue? [1=yes/2=no]: ",
+                dest_str
+            ))?;
+            if !confirm {
+                bail!("Fork cancelled.");
+            }
+
+            match fork_and_clone_nanoclaw(out)? {
+                CloneOutcome::Success => {
+                    chmod_nanoclaw_permissive(out);
+                }
+                CloneOutcome::PermissionDenied => {
+                    out.println(format!(
+                        "\x1b[31mMove failed: permission denied writing to {}.\x1b[0m",
+                        dest_str
+                    ));
+                    let use_sudo = ask_yes_no_stdin(
+                        "Retry with sudo? [1=yes/2=no]: ",
+                    )?;
+                    if !use_sudo {
+                        bail!("Fork cancelled: permission denied.");
+                    }
+                    fork_and_clone_nanoclaw_sudo(out)?;
+                    chmod_nanoclaw_permissive(out);
+                }
             }
         }
-    }
 
-    summary.nanoclaw_cloned = StepStatus::Ok("cloned".into());
+        summary.nanoclaw_cloned = StepStatus::Ok("cloned".into());
+    }
 
     // Resolve agent credentials using the same auto-passthrough as other containers.
     let agent_name = {
@@ -813,27 +1005,13 @@ async fn run_first_time_wizard(out: &OutputSink, summary: &mut ClawsSummary) -> 
         cfg.agent.unwrap_or_else(|| "claude".to_string())
     };
     let credentials = agent_keychain_credentials(&agent_name);
-    // Prepare sanitized host config (same as `chat`/`implement` auto-configuration).
-    // Kept alive through `attach_to_nanoclaw` so bind-mount source paths remain valid.
+    // Prepare sanitized host config kept alive for the full duration of the wizard.
     let host_settings = docker::HostSettings::prepare(&agent_name);
 
-    // /setup explanation — shown before anything launches.
-    out.println(String::new());
-    out.println("IMPORTANT: Once your code agent launches inside the container, run the");
-    out.println("/setup command and follow the prompts to configure nanoclaw.");
-    out.println("This is required on first launch.");
-    out.println(String::new());
+    // Download Dockerfile.nanoclaw, build image once, show audit explanation dialog.
+    let ctx = build_nanoclaw_image(out, &credentials.env_vars, summary, host_settings.as_ref()).await?;
 
-    let accept_setup = ask_yes_no_stdin("Accept and continue? [1=yes/2=no]: ")?;
-    if !accept_setup {
-        bail!("Setup cancelled.");
-    }
-
-    // Phase 1: build image + run audit agent (no docker socket).
-    build_nanoclaw_image(out, &credentials.env_vars, summary, host_settings.as_ref()).await?;
-
-    // Docker socket warning — shown AFTER the image is rebuilt, before the setup container
-    // is launched. Only the setup container (phase 2) needs docker socket access.
+    // Docker socket warning — the nanoclaw container needs Docker socket access.
     out.println(String::new());
     out.println("WARNING: The nanoclaw container will be mounted to the host Docker socket,");
     out.println("just like passing --allow-docker to 'chat' or 'implement'.");
@@ -846,11 +1024,18 @@ async fn run_first_time_wizard(out: &OutputSink, summary: &mut ClawsSummary) -> 
         bail!("Docker socket access declined. Cannot launch nanoclaw container.");
     }
 
-    // Phase 2: launch background container with docker socket, then attach.
+    // Launch background container with docker socket (sleep loop keeps it alive).
     let container_id =
         launch_nanoclaw_container(out, &credentials.env_vars, summary, host_settings.as_ref()).await?;
 
-    attach_to_nanoclaw(&container_id, &agent_name, &credentials.env_vars)?;
+    // Exec into the container foreground/interactive with the audit prompt.
+    // The user watches the audit, then runs /setup in the same session.
+    // The container keeps running after the agent exits.
+    out.println(String::new());
+    out.println("Launching agent inside container. The audit will begin automatically.");
+    out.println("When the audit finishes, run /setup to complete configuration.");
+    out.println(String::new());
+    exec_audit_foreground(&container_id, &ctx)?;
 
     Ok(())
 }
@@ -886,7 +1071,100 @@ async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary) -> R
     }
     summary.docker_daemon = StepStatus::Ok("running".into());
 
-    let start = ask_yes_no_stdin("Start the nanoclaw container? [1=yes/2=no]: ")?;
+    // Check for a stopped container before offering to run a fresh one.
+    if let Some(stopped) = docker::find_stopped_container(NANOCLAW_CONTROLLER_NAME, NANOCLAW_IMAGE_TAG) {
+        out.println(format!(
+            "Found stopped container: ID={}, Name={}, Created={}",
+            &stopped.id[..stopped.id.len().min(12)],
+            stopped.name,
+            stopped.created,
+        ));
+        out.println(String::new());
+        let restart = ask_yes_no_stdin(&format!(
+            "Start stopped container '{}' (ID: {}, created: {})? [1=yes/2=no]: ",
+            stopped.name,
+            &stopped.id[..stopped.id.len().min(12)],
+            stopped.created,
+        ))?;
+        if restart {
+            out.print("Starting stopped container... ");
+            match docker::start_container(&stopped.id) {
+                Ok(()) => {}
+                Err(e) => {
+                    out.println("FAILED");
+                    out.println(String::new());
+                    out.println(format!("Docker error: {}", e));
+                    out.println(String::new());
+                    let delete_and_fresh = ask_yes_no_stdin(
+                        "Delete the stopped container and start a fresh one? [1=yes/2=no]: ",
+                    )?;
+                    if !delete_and_fresh {
+                        bail!("Container restart failed. Run 'amux claws ready' to try again.");
+                    }
+                    out.print(format!(
+                        "Deleting stopped container {}... ",
+                        &stopped.id[..stopped.id.len().min(12)],
+                    ));
+                    docker::remove_container(&stopped.id)
+                        .context("Failed to delete stopped container")?;
+                    out.println("OK");
+                    // Fall through to fresh-start logic below.
+                    let start_fresh = true;
+                    if start_fresh {
+                        let nanoclaw_str = nanoclaw_path_str();
+                        let cfg = load_repo_config(&nanoclaw_path()).unwrap_or_default();
+                        let agent_name_owned = cfg.agent.unwrap_or_else(|| "claude".to_string());
+                        let agent_name = agent_name_owned.as_str();
+                        let credentials = agent_keychain_credentials(agent_name);
+                        let settings_dir = nanoclaw_settings_dir();
+                        let host_settings = docker::HostSettings::prepare_to_dir(agent_name, &settings_dir);
+                        out.println(format!("Starting nanoclaw controller container {}...", NANOCLAW_CONTROLLER_NAME));
+                        let container_id = docker::run_container_detached(
+                            NANOCLAW_IMAGE_TAG,
+                            &nanoclaw_str,
+                            &nanoclaw_str,
+                            &nanoclaw_str,
+                            Some(NANOCLAW_CONTROLLER_NAME),
+                            &credentials.env_vars,
+                            true,
+                            host_settings.as_ref(),
+                        )
+                        .context("Failed to start nanoclaw background container")?;
+                        out.print("Waiting for container to start... ");
+                        if !wait_for_container(&container_id, 5) {
+                            out.println("TIMEOUT");
+                            bail!("Container did not start within 5 seconds.");
+                        }
+                        out.println("OK");
+                        summary.nanoclaw_container = StepStatus::Ok("running".into());
+                        let mut new_config = load_nanoclaw_config().unwrap_or_default();
+                        new_config.nanoclaw_container_id = Some(container_id.clone());
+                        save_nanoclaw_config(&new_config)?;
+                        return Ok(());
+                    }
+                }
+            }
+            if !wait_for_container(&stopped.id, 5) {
+                out.println("TIMEOUT");
+                bail!("Container did not start within 5 seconds.");
+            }
+            out.println("OK");
+            summary.nanoclaw_container = StepStatus::Ok("running".into());
+
+            let mut new_config = load_nanoclaw_config().unwrap_or_default();
+            new_config.nanoclaw_container_id = Some(stopped.id.clone());
+            save_nanoclaw_config(&new_config)?;
+
+            return Ok(());
+        }
+        out.println(String::new());
+    }
+
+    // No stopped container (or user declined to restart it) — offer to run fresh.
+    let start = ask_yes_no_stdin(&format!(
+        "Run a fresh '{}' container? [1=yes/2=no]: ",
+        NANOCLAW_CONTROLLER_NAME,
+    ))?;
     if !start {
         summary.nanoclaw_container = StepStatus::Skipped("not started".into());
         return Ok(());
@@ -899,18 +1177,18 @@ async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary) -> R
     let agent_name = agent_name_owned.as_str();
     let credentials = agent_keychain_credentials(agent_name);
     // Prepare sanitized host config (same as `chat`/`implement` auto-configuration).
-    let host_settings = docker::HostSettings::prepare(agent_name);
+    let settings_dir = nanoclaw_settings_dir();
+    let host_settings = docker::HostSettings::prepare_to_dir(agent_name, &settings_dir);
 
-    // Launch container.
-    let container_name = docker::generate_container_name();
-    out.println(format!("Starting nanoclaw container {}...", container_name));
+    // Launch controller container.
+    out.println(format!("Starting nanoclaw controller container {}...", NANOCLAW_CONTROLLER_NAME));
 
     let container_id = docker::run_container_detached(
         NANOCLAW_IMAGE_TAG,
         &nanoclaw_str,
         &nanoclaw_str,
         &nanoclaw_str,
-        Some(&container_name),
+        Some(NANOCLAW_CONTROLLER_NAME),
         &credentials.env_vars,
         true,
         host_settings.as_ref(),
@@ -967,14 +1245,6 @@ pub fn ask_text_stdin(prompt: &str) -> Result<String> {
         .context("Failed to read stdin")?
         .unwrap_or_default();
     Ok(line.trim().to_string())
-}
-
-fn agent_from_str(name: &str) -> Agent {
-    match name {
-        "codex" => Agent::Codex,
-        "opencode" => Agent::Opencode,
-        _ => Agent::Claude,
-    }
 }
 
 #[cfg(test)]
@@ -1086,6 +1356,77 @@ mod tests {
             !chat.iter().any(|a| a.contains("scan this project")),
             "chat_entrypoint should not contain audit prompt: {:?}",
             chat
+        );
+    }
+
+    // ── claws_init_audit_entrypoint tests ────────────────────────────────────
+
+    #[test]
+    fn claws_init_audit_entrypoint_claude_structure() {
+        let args = claws_init_audit_entrypoint("claude");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "claude");
+        assert!(
+            args[1].contains("host.docker.internal"),
+            "prompt should mention host.docker.internal"
+        );
+        assert!(
+            args[1].contains("container-to-container"),
+            "prompt should mention container-to-container networking"
+        );
+    }
+
+    #[test]
+    fn claws_init_audit_entrypoint_codex_structure() {
+        let args = claws_init_audit_entrypoint("codex");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "codex");
+        assert!(args[1].contains("container-to-container"));
+    }
+
+    #[test]
+    fn claws_init_audit_entrypoint_opencode_structure() {
+        let args = claws_init_audit_entrypoint("opencode");
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "opencode");
+        assert_eq!(args[1], "run");
+        assert!(args[2].contains("container-to-container"));
+    }
+
+    #[test]
+    fn claws_init_audit_entrypoint_unknown_agent() {
+        let args = claws_init_audit_entrypoint("myagent");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "myagent");
+        assert!(args[1].contains("container-to-container"));
+    }
+
+    /// The `claws init` prompt must be distinct from the standard audit prompt so
+    /// that it does not accidentally get used (or omitted) in the wrong context.
+    #[test]
+    fn claws_init_prompt_differs_from_standard_audit_prompt() {
+        use crate::commands::ready::AUDIT_PROMPT;
+        assert_ne!(
+            CLAWS_INIT_AUDIT_PROMPT, AUDIT_PROMPT,
+            "claws init prompt must be different from the standard audit prompt"
+        );
+    }
+
+    /// The `claws init` prompt must cover the nanoclaw networking concern that is
+    /// absent from the standard audit prompt.
+    #[test]
+    fn claws_init_prompt_covers_networking() {
+        assert!(
+            CLAWS_INIT_AUDIT_PROMPT.contains("host.docker.internal"),
+            "prompt must reference host.docker.internal"
+        );
+        assert!(
+            CLAWS_INIT_AUDIT_PROMPT.contains("container-to-container"),
+            "prompt must require container-to-container communication"
+        );
+        assert!(
+            CLAWS_INIT_AUDIT_PROMPT.contains("onecli"),
+            "prompt must mention onecli"
         );
     }
 }

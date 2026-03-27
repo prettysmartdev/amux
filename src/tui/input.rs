@@ -28,6 +28,14 @@ pub enum Action {
     ClawsReadyProceed,
     /// Claws subsequent run: start the stopped container.
     ClawsReadyStartContainer,
+    /// Claws subsequent run: restart the specific stopped container by ID.
+    ClawsReadyRestartStopped { container_id: String },
+    /// Claws subsequent run: restart failed — delete the stopped container and start fresh.
+    ClawsReadyDeleteAndStartFresh { container_id: String },
+    /// Claws audit confirmation accepted: launch the audit agent.
+    ClawsAuditConfirmAccept,
+    /// Claws audit confirmation declined: cancel the audit (and setup).
+    ClawsAuditConfirmDecline,
     // Tab management actions:
     CreateTab,
     SwitchTabLeft,
@@ -58,6 +66,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         Dialog::NewTabDirectory { input } => {
             return handle_new_tab_directory(app.active_tab_mut(), key, input)
         }
+        Dialog::ClawsAuditConfirm => return handle_claws_audit_confirm(app.active_tab_mut(), key),
         Dialog::ClawsReadyHasForked => return handle_claws_has_forked(app.active_tab_mut(), key),
         Dialog::ClawsReadyUsernameInput { username } => {
             return handle_claws_username_input(app.active_tab_mut(), key, username)
@@ -65,8 +74,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         Dialog::ClawsReadyDockerSocketWarning => {
             return handle_claws_docker_socket_warning(app.active_tab_mut(), key)
         }
-        Dialog::ClawsReadySetupExplain => return handle_claws_setup_explain(app.active_tab_mut(), key),
+        Dialog::ClawsReadyOfferRestartStopped { container_id, .. } => {
+            return handle_claws_offer_restart_stopped(app.active_tab_mut(), key, container_id)
+        }
         Dialog::ClawsReadyOfferStart => return handle_claws_offer_start(app.active_tab_mut(), key),
+        Dialog::ClawsRestartFailedOfferFresh { container_id } => {
+            return handle_claws_restart_failed_offer_fresh(app.active_tab_mut(), key, container_id)
+        }
         Dialog::ClawsReadySudoConfirm { password } => {
             return handle_claws_sudo_confirm(app.active_tab_mut(), key, password)
         }
@@ -471,7 +485,8 @@ fn handle_claws_username_input(tab: &mut TabState, key: KeyEvent, mut username: 
                 return Action::None;
             }
             tab.claws_wizard_username = Some(trimmed);
-            tab.dialog = Dialog::ClawsReadySetupExplain;
+            tab.dialog = Dialog::None;
+            return Action::ClawsReadyProceed;
         }
         KeyCode::Esc => {
             tab.dialog = Dialog::None;
@@ -509,15 +524,15 @@ fn handle_claws_docker_socket_warning(tab: &mut TabState, key: KeyEvent) -> Acti
     Action::None
 }
 
-fn handle_claws_setup_explain(tab: &mut TabState, key: KeyEvent) -> Action {
+fn handle_claws_audit_confirm(tab: &mut TabState, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
             tab.dialog = Dialog::None;
-            return Action::ClawsReadyProceed;
+            return Action::ClawsAuditConfirmAccept;
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => {
             tab.dialog = Dialog::None;
-            tab.input_error = Some("Setup cancelled.".into());
+            return Action::ClawsAuditConfirmDecline;
         }
         _ => {}
     }
@@ -532,7 +547,45 @@ fn handle_claws_offer_start(tab: &mut TabState, key: KeyEvent) -> Action {
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => {
             tab.dialog = Dialog::None;
+            tab.claws_attach_after_start = false;
             tab.input_error = Some("Container not started.".into());
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_claws_offer_restart_stopped(
+    tab: &mut TabState,
+    key: KeyEvent,
+    container_id: String,
+) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+            tab.dialog = Dialog::None;
+            return Action::ClawsReadyRestartStopped { container_id };
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => {
+            // User declined to restart stopped container — offer fresh start instead.
+            tab.dialog = Dialog::ClawsReadyOfferStart;
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_claws_restart_failed_offer_fresh(
+    tab: &mut TabState,
+    key: KeyEvent,
+    container_id: String,
+) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+            tab.dialog = Dialog::None;
+            return Action::ClawsReadyDeleteAndStartFresh { container_id };
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2') | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
         }
         _ => {}
     }

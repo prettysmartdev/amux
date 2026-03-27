@@ -5,11 +5,11 @@ use std::path::Path;
 
 /// Base URL for raw file downloads from GitHub.
 const ASPEC_CLI_RAW_BASE: &str =
-    "https://raw.githubusercontent.com/cohix/aspec-cli/main/templates";
+    "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates";
 
 /// URL for downloading the aspec repo tarball.
 const ASPEC_REPO_TARBALL: &str =
-    "https://api.github.com/repos/cohix/aspec/tarball/main";
+    "https://api.github.com/repos/prettysmartdev/amux/tarball/main";
 
 /// Download a Dockerfile template for the given agent from GitHub.
 ///
@@ -37,6 +37,20 @@ pub async fn download_dockerfile_template(
         content.len()
     ));
 
+    Ok(content)
+}
+
+/// Download `Dockerfile.nanoclaw` from the amux templates directory on GitHub.
+///
+/// This pre-configured Dockerfile is written as `Dockerfile.dev` in the nanoclaw
+/// repo during `claws init`, replacing the per-agent template download used by
+/// `amux init`. Returns the file content as a string.
+pub async fn download_nanoclaw_dockerfile(out: &OutputSink) -> Result<String> {
+    let url = format!("{}/Dockerfile.nanoclaw", ASPEC_CLI_RAW_BASE);
+    out.println(format!("Downloading Dockerfile.nanoclaw from {}", url));
+    let content = download_text(&url).await
+        .with_context(|| format!("Failed to download {}", url))?;
+    out.println(format!("Downloaded Dockerfile.nanoclaw ({} bytes)", content.len()));
     Ok(content)
 }
 
@@ -110,7 +124,7 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>> {
 
 /// Extract the `aspec/` directory from a gzipped tarball into `dest`.
 ///
-/// The tarball from GitHub has a top-level directory like `cohix-aspec-<sha>/`.
+/// The tarball from GitHub has a top-level directory like `prettysmartdev-amux-<sha>/`.
 /// We look for entries under `<top>/aspec/` and strip that prefix.
 pub fn extract_aspec_from_tarball(tarball_bytes: &[u8], dest: &Path) -> Result<()> {
     use flate2::read::GzDecoder;
@@ -128,6 +142,7 @@ pub fn extract_aspec_from_tarball(tarball_bytes: &[u8], dest: &Path) -> Result<(
         let path_str = path.to_string_lossy().to_string();
 
         // GitHub tarballs have format: <owner>-<repo>-<sha>/aspec/...
+        // e.g. prettysmartdev-amux-abc123/aspec/foundation.md
         // Find the first `/` to get the top-level dir, then look for /aspec/ after it.
         let components: Vec<&str> = path_str.split('/').collect();
         if components.len() < 2 {

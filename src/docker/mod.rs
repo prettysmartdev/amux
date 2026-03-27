@@ -102,6 +102,57 @@ impl HostSettings {
         })
     }
 
+    /// Prepares host agent settings into a caller-supplied stable directory.
+    ///
+    /// Identical to `prepare` but writes into `dir` instead of a temp directory,
+    /// so the bind-mount sources survive process restarts and container stops.
+    /// Use this when the container may be stopped and restarted later.
+    pub fn prepare_to_dir(agent: &str, dir: &Path) -> Option<Self> {
+        if agent != "claude" {
+            return None;
+        }
+
+        let home = dirs::home_dir()?;
+        let host_config_file = home.join(".claude.json");
+        if !host_config_file.exists() {
+            return None;
+        }
+
+        std::fs::create_dir_all(dir).ok()?;
+
+        let raw = std::fs::read_to_string(&host_config_file).ok()?;
+        let mut parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        if let Some(obj) = parsed.as_object_mut() {
+            obj.remove("oauthAccount");
+            let projects = obj
+                .entry("projects")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(projects_obj) = projects.as_object_mut() {
+                projects_obj.insert(
+                    "/workspace".to_string(),
+                    serde_json::json!({"hasTrustDialogAccepted": true}),
+                );
+            }
+        }
+        let config_json = serde_json::to_string(&parsed).ok()?;
+        let config_path = dir.join("claude.json");
+        std::fs::write(&config_path, &config_json).ok()?;
+
+        let claude_dir_path = dir.join("dot-claude");
+        let host_claude_dir = home.join(".claude");
+        if host_claude_dir.is_dir() {
+            copy_dir_filtered(&host_claude_dir, &claude_dir_path, CLAUDE_DIR_DENYLIST).ok()?;
+        } else {
+            std::fs::create_dir_all(&claude_dir_path).ok()?;
+        }
+
+        Some(HostSettings {
+            _temp_dir: None,
+            config_path,
+            claude_dir_path,
+        })
+    }
+
     /// Creates a `HostSettings` pointing to existing files without owning a temp directory.
     ///
     /// Used when the backing directory is owned elsewhere (e.g. stored in `App::host_settings`
@@ -903,6 +954,107 @@ pub fn build_run_args_pty_at_path(
     append_env_args(&mut args, env_vars);
     append_entrypoint(&mut args, image, entrypoint);
     args
+}
+
+/// Info about a stopped (non-running) Docker container.
+#[derive(Debug, Clone)]
+pub struct StoppedContainerInfo {
+    pub id: String,
+    pub name: String,
+    pub created: String,
+}
+
+/// Find a stopped container matching `name` exactly and created from `image`.
+///
+/// Queries `docker ps -a` and returns the first container whose name matches
+/// exactly, whose image matches, and which is not currently running.
+/// Returns `None` if Docker is unreachable or no matching container exists.
+pub fn find_stopped_container(name: &str, image: &str) -> Option<StoppedContainerInfo> {
+    let output = Command::new("docker")
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            &format!("name={}", name),
+            "--format",
+            "{{.ID}}\t{{.Names}}\t{{.CreatedAt}}\t{{.Image}}\t{{.Status}}",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(5, '\t').collect();
+        if parts.len() < 5 {
+            continue;
+        }
+        let (id, container_name, created, container_image, status) =
+            (parts[0], parts[1], parts[2], parts[3], parts[4]);
+        // Exact name match (docker --filter name= is prefix/regex, not exact).
+        if container_name != name {
+            continue;
+        }
+        // Image match.
+        if container_image != image {
+            continue;
+        }
+        // Exclude running containers.
+        if status.starts_with("Up ") {
+            continue;
+        }
+        return Some(StoppedContainerInfo {
+            id: id.to_string(),
+            name: container_name.to_string(),
+            created: created.to_string(),
+        });
+    }
+    None
+}
+
+/// Start a stopped container by ID or name using `docker start`.
+///
+/// On failure, the full Docker error message is included in the returned error.
+pub fn start_container(container_id: &str) -> anyhow::Result<()> {
+    let output = Command::new("docker")
+        .args(["start", container_id])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("Failed to invoke `docker start`")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            bail!("Failed to start container {}", container_id);
+        }
+        bail!("Failed to start container {}: {}", container_id, stderr);
+    }
+    Ok(())
+}
+
+/// Remove (delete) a container by ID or name using `docker rm -f`.
+///
+/// Uses `-f` to force-remove even if the container is running.
+pub fn remove_container(container_id: &str) -> anyhow::Result<()> {
+    let output = Command::new("docker")
+        .args(["rm", "-f", container_id])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("Failed to invoke `docker rm`")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            bail!("Failed to remove container {}", container_id);
+        }
+        bail!("Failed to remove container {}: {}", container_id, stderr);
+    }
+    Ok(())
 }
 
 /// Returns true if the container with the given ID is in the running state.

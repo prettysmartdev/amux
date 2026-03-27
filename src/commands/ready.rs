@@ -71,12 +71,18 @@ pub const GREETINGS: [&str; 50] = [
 ];
 
 /// Select a greeting at random using the current time as a seed.
+///
+/// Uses seconds since epoch rather than nanoseconds: on most platforms the
+/// system clock has millisecond or microsecond resolution, meaning the raw
+/// nanosecond count is always a multiple of 50 (since 10^3, 10^6, and 10^9
+/// are all divisible by 50), which would pin the result to GREETINGS[0].
+/// Seconds are not multiples of 50 in general, so this produces varied output.
 pub fn select_random_greeting() -> &'static str {
-    let nanos = std::time::SystemTime::now()
+    let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_nanos();
-    GREETINGS[(nanos % GREETINGS.len() as u128) as usize]
+        .as_secs();
+    GREETINGS[(secs % GREETINGS.len() as u64) as usize]
 }
 
 /// Context produced by the pre-audit phase, needed by the audit and post-audit phases.
