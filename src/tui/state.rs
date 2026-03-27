@@ -310,6 +310,13 @@ pub struct TabState {
     /// Container ID of a stopped container that we tried (and failed) to restart.
     /// Stored so the error-recovery dialog can offer to delete it and start fresh.
     pub claws_restarting_container_id: Option<String>,
+
+    /// Cancels a running `status --watch` loop in the TUI.
+    ///
+    /// `start_command` sends on this channel (if present) before starting any new
+    /// command, stopping the background watch task so stale status output does not
+    /// overwrite the new command's output.
+    pub status_watch_cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl TabState {
@@ -360,6 +367,7 @@ impl TabState {
             claws_audit_ctx_rx: None,
             claws_attach_after_start: false,
             claws_restarting_container_id: None,
+            status_watch_cancel_tx: None,
             last_output_time: None,
         }
     }
@@ -375,6 +383,11 @@ impl TabState {
 
     /// Clear output and reset state for a fresh command execution.
     pub fn start_command(&mut self, command: String) {
+        // Cancel any running status --watch loop so it doesn't overwrite the
+        // new command's output.
+        if let Some(tx) = self.status_watch_cancel_tx.take() {
+            let _ = tx.send(());
+        }
         self.output_lines.clear();
         self.scroll_offset = 0;
         self.pty_line_buffer.clear();
@@ -705,6 +718,15 @@ impl TabState {
     pub fn tick(&mut self) {
         // Drain text command output.
         while let Ok(line) = self.output_rx.try_recv() {
+            // Special marker sent by `status --watch` to clear the window before
+            // rendering an updated snapshot. This makes the tables appear to update
+            // in place even though the outer execution window does not support ANSI
+            // cursor movement.
+            if line == crate::commands::status::CLEAR_MARKER {
+                self.output_lines.clear();
+                self.scroll_offset = 0;
+                continue;
+            }
             // Split on newlines in case a single send contains multiple lines.
             for part in line.split('\n') {
                 self.push_output(part.to_string());

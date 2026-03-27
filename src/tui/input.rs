@@ -158,6 +158,14 @@ fn handle_window_key(tab: &mut TabState, key: KeyEvent) -> Action {
                 tab.focus = Focus::CommandBox;
                 return Action::None;
             }
+            // Ctrl-C cancels a running `status --watch` loop.
+            // Only intercept if status_watch_cancel_tx is set; otherwise fall through
+            // so the byte is forwarded to any active PTY (e.g. an agent container).
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if tab.status_watch_cancel_tx.take().is_some() {
+                    return Action::None;
+                }
+            }
             // Forward all other keys to the PTY.
             if let Some(bytes) = key_to_bytes(&key) {
                 return Action::ForwardToPty(bytes);
@@ -621,7 +629,7 @@ fn handle_claws_sudo_confirm(tab: &mut TabState, key: KeyEvent, mut password: St
 
 // --- Autocomplete ---
 
-const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "new", "claws"];
+const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "new", "claws", "status"];
 
 /// Return suggestions for the current input string.
 pub fn autocomplete_suggestions(input: &str) -> Vec<String> {
@@ -683,6 +691,10 @@ fn flag_suggestions_for(cmd: &str, _typed: &str) -> Vec<String> {
             "claws init   (first-time setup: clone, build image, launch container)".into(),
             "claws ready  (check status; start container if stopped)".into(),
             "claws chat   (attach to running nanoclaw container)".into(),
+        ],
+        "status" => vec![
+            "status         (show all running agents and nanoclaw containers)".into(),
+            "status --watch (refresh every 3 seconds)".into(),
         ],
         _ => vec![],
     }

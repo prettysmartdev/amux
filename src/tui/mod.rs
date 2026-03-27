@@ -11,7 +11,7 @@ use crate::commands::implement::{
 };
 use crate::commands::init::find_git_root_from;
 use crate::commands::new::WorkItemKind;
-use crate::commands::{claws, init, new, ready};
+use crate::commands::{claws, init, new, ready, status};
 use crate::commands::ready::{ReadyOptions, print_interactive_notice, print_summary};
 use crate::config::load_repo_config;
 use crate::docker;
@@ -61,19 +61,25 @@ where
     <B as ratatui::backend::Backend>::Error: Send + Sync + 'static,
 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let mut app = App::new(cwd);
+    let mut app = App::new(cwd.clone());
 
-    // Auto-run `ready` at startup, forwarding any flags passed to the root `amux` command.
-    let mut startup_cmd = "ready".to_string();
-    if startup_flags.refresh {
-        startup_cmd.push_str(" --refresh");
-    }
-    if startup_flags.build {
-        startup_cmd.push_str(" --build");
-    }
-    if startup_flags.no_cache {
-        startup_cmd.push_str(" --no-cache");
-    }
+    // At startup: if we are inside a Git repo, run `ready` as usual.
+    // If not, run `status --watch` so the user can see the global agent universe.
+    let startup_cmd = if find_git_root_from(&cwd).is_some() {
+        let mut cmd = "ready".to_string();
+        if startup_flags.refresh {
+            cmd.push_str(" --refresh");
+        }
+        if startup_flags.build {
+            cmd.push_str(" --build");
+        }
+        if startup_flags.no_cache {
+            cmd.push_str(" --no-cache");
+        }
+        cmd
+    } else {
+        "status --watch".to_string()
+    };
     execute_command(&mut app, &startup_cmd).await;
 
     loop {
@@ -389,6 +395,26 @@ async fn execute_command(app: &mut App, cmd: &str) {
                     app.active_tab_mut().input_error =
                         Some("Usage: claws <init|ready|chat>".into());
                 }
+            }
+        }
+
+        "status" => {
+            let watch = parts.iter().any(|p| *p == "--watch");
+            app.active_tab_mut().start_command(cmd.to_string());
+            let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+            app.active_tab_mut().exit_rx = Some(exit_rx);
+            let tx = app.active_tab().output_tx.clone();
+            if watch {
+                // Create a cancel channel so that running a new command stops the loop.
+                let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+                app.active_tab_mut().status_watch_cancel_tx = Some(cancel_tx);
+                spawn_text_command(tx, exit_tx, move |sink| async move {
+                    status::run_with_sink(true, &sink, Some(cancel_rx)).await
+                });
+            } else {
+                spawn_text_command(tx, exit_tx, move |sink| async move {
+                    status::run_with_sink(false, &sink, None).await
+                });
             }
         }
 

@@ -1103,6 +1103,58 @@ pub fn build_exec_args_pty(
     args
 }
 
+/// List the names of all currently running containers whose name starts with `prefix`.
+///
+/// Uses `docker ps --filter name=<prefix>`. Note that Docker's `name` filter matches
+/// substrings, so we additionally filter the results to keep only names that start
+/// with the prefix exactly.
+///
+/// Returns an empty Vec if Docker is unreachable or no containers match.
+pub fn list_running_containers_by_prefix(prefix: &str) -> Vec<String> {
+    let output = Command::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            &format!("name={}", prefix),
+            "--format",
+            "{{.Names}}",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.is_empty() && l.starts_with(prefix))
+            .map(|l| l.to_string())
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Return the host source path of the `/workspace` bind-mount for `container_name`.
+///
+/// Returns `None` if Docker is unreachable, the container does not exist, or
+/// the container has no `/workspace` mount.
+pub fn get_container_workspace_mount(container_name: &str) -> Option<String> {
+    let format_str =
+        "{{range .Mounts}}{{if eq .Destination \"/workspace\"}}{{.Source}}{{end}}{{end}}";
+    let output = Command::new("docker")
+        .args(["inspect", "--format", format_str, container_name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let src = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if src.is_empty() { None } else { Some(src) }
+}
+
 /// Runs a container in detached (`-d`) mode and returns the container ID.
 ///
 /// Mounts `host_path` to `container_path` inside the container using a direct
@@ -1189,6 +1241,34 @@ mod tests {
     #[test]
     fn image_exists_returns_false_for_nonexistent() {
         assert!(!image_exists("amux-nonexistent-test-image-xyz:latest"));
+    }
+
+    #[test]
+    fn list_running_containers_by_prefix_returns_empty_for_nonexistent_prefix() {
+        // There should be no containers with this highly unlikely prefix.
+        let names = list_running_containers_by_prefix("amux-test-nonexistent-xyz-12345-");
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn list_running_containers_by_prefix_filters_by_exact_prefix() {
+        // This is a unit test for the filtering logic using simulated output.
+        // We parse a mock docker ps output directly via the same filter logic.
+        let mock_output = "amux-123-456\namux-claws-controller\namux-789-012\nnot-amux-at-all\n";
+        let prefix = "amux-";
+        let result: Vec<String> = mock_output
+            .lines()
+            .filter(|l| !l.is_empty() && l.starts_with(prefix))
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(result, vec!["amux-123-456", "amux-claws-controller", "amux-789-012"]);
+    }
+
+    #[test]
+    fn get_container_workspace_mount_returns_none_for_nonexistent() {
+        // A container that doesn't exist should return None.
+        let result = get_container_workspace_mount("amux-test-nonexistent-xyz-12345");
+        assert!(result.is_none());
     }
 
     #[test]

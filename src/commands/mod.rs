@@ -8,6 +8,7 @@ pub mod init;
 pub mod new;
 pub mod output;
 pub mod ready;
+pub mod status;
 
 use crate::cli::Command;
 use anyhow::Result;
@@ -33,5 +34,6 @@ pub async fn run(command: Command) -> Result<()> {
         }
         Command::New => new::run().await,
         Command::Claws { action } => claws::run(action).await,
+        Command::Status { watch } => status::run(watch).await,
     }
 }

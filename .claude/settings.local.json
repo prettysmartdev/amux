@@ -9,7 +9,8 @@
       "Bash(wait)",
       "Bash(cd:*)",
       "Bash(xxd)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(chmod:*)"
     ]
   }
 }

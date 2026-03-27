@@ -50,6 +50,8 @@ amux new
 amux claws init
 amux claws ready
 amux claws chat
+amux status
+amux status --watch
 ```
 
 ---
@@ -492,6 +494,63 @@ The container ID is stored at `$HOME/.nanoclaw/.amux.json`:
 
 ---
 
+### `amux status [--watch]`
+
+Shows the status of all running code-agent and nanoclaw containers in two tables.
+
+**CODE AGENTS** — every running container with an `amux-` name prefix (excluding nanoclaw system containers). For each container the table shows:
+
+- **Project** — the host Git repository mounted into the container (`/workspace` bind-mount source)
+- **Agent** — the configured agent name (read from `GITROOT/aspec/.amux.json`)
+- **CPU** — live CPU usage percentage from `docker stats`
+- **Memory** — live memory usage from `docker stats`
+
+**NANOCLAW** — the `amux-claws-controller` container and any container whose name contains `nanoclaw`. Shows Container name, CPU, and Memory.
+
+When no containers are running in a section, an empty-state message is shown with the command needed to start that type of agent.
+
+**Flags**
+
+| Flag | Description |
+|------|-------------|
+| `--watch` | Refresh the output every 3 seconds |
+
+**Watch mode behaviour**
+
+| Context | Behaviour |
+|---------|-----------|
+| Command mode (CLI) | Uses ANSI cursor-up + clear-to-end to overwrite in place |
+| TUI mode | Clears the execution window content before each refresh so tables appear to update in place |
+
+**TUI startup**: If `amux` is launched outside of any Git repository, `status --watch` runs automatically instead of `ready`.
+
+**Examples**
+
+```sh
+amux status              # one-shot snapshot
+amux status --watch      # auto-refreshing dashboard
+```
+
+**Example output**
+
+```
+CODE AGENTS
+┌────────────────────────────┬────────┬───────┬─────────┐
+│ Project                    │ Agent  │ CPU   │ Memory  │
+├────────────────────────────┼────────┼───────┼─────────┤
+│ /home/user/myproject       │ claude │ 5.23% │ 210MiB  │
+└────────────────────────────┴────────┴───────┴─────────┘
+
+NANOCLAW
+┌──────────────────────────┬───────┬─────────┐
+│ Container                │ CPU   │ Memory  │
+├──────────────────────────┼───────┼─────────┤
+│ amux-claws-controller    │ 2.10% │ 150MiB  │
+└──────────────────────────┴───────┴─────────┘
+```
+
+---
+
 ### `amux new`
 
 Creates a new work item from the template (`aspec/work-items/0000-template.md`).
@@ -719,7 +778,7 @@ As you type, amux shows suggestions below the command box:
 ```
 ready
   ready
-  init  ·  ready  ·  implement  ·  chat  ·  new
+  init  ·  ready  ·  implement  ·  chat  ·  new  ·  claws  ·  status
 
 init --
   init --agent=claude  ·  init --agent=codex  ·  init --agent=opencode
@@ -732,6 +791,10 @@ implement --
 
 chat --
   chat  (start a freeform agent session)  ·  chat --non-interactive  ·  chat --plan  ·  chat --allow-docker
+
+status --
+  status         (show all running agents and nanoclaw containers)
+  status --watch (refresh every 3 seconds)
 ```
 
 ### Unknown Commands

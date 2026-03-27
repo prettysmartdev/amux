@@ -38,6 +38,21 @@ impl OutputSink {
             }
         }
     }
+
+    /// Send a line, returning `true` on success.
+    ///
+    /// For `Stdout`, always succeeds. For `Channel`, returns `false` when the
+    /// receiver has been dropped (e.g. the TUI tab was replaced by a new command).
+    /// Callers can use this to detect channel closure and terminate watch loops.
+    pub fn try_println(&self, s: impl Into<String>) -> bool {
+        match self {
+            OutputSink::Stdout => {
+                println!("{}", s.into());
+                true
+            }
+            OutputSink::Channel(tx) => tx.send(s.into()).is_ok(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -53,5 +68,21 @@ mod tests {
         sink.println("world");
         assert_eq!(rx.try_recv().unwrap(), "hello");
         assert_eq!(rx.try_recv().unwrap(), "world");
+    }
+
+    #[test]
+    fn try_println_returns_true_for_open_channel() {
+        let (tx, mut rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+        assert!(sink.try_println("msg"));
+        assert_eq!(rx.try_recv().unwrap(), "msg");
+    }
+
+    #[test]
+    fn try_println_returns_false_for_dropped_receiver() {
+        let (tx, rx) = unbounded_channel::<String>();
+        drop(rx);
+        let sink = OutputSink::Channel(tx);
+        assert!(!sink.try_println("msg"));
     }
 }

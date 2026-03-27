@@ -96,6 +96,13 @@ pub enum Command {
         #[command(subcommand)]
         action: ClawsAction,
     },
+
+    /// Show the status of all running code-agent and nanoclaw containers.
+    Status {
+        /// Continuously refresh the output every 3 seconds.
+        #[arg(long)]
+        watch: bool,
+    },
 }
 
 /// Subcommands for `amux claws`.
@@ -445,6 +452,30 @@ mod tests {
         assert!(!cli.build);
         assert!(!cli.no_cache);
         assert!(!cli.refresh);
+    }
+
+    #[test]
+    fn status_subcommand_parsed() {
+        let cli = parse(&["amux", "status"]);
+        assert!(matches!(cli.command.unwrap(), Command::Status { .. }));
+    }
+
+    #[test]
+    fn status_defaults_no_watch() {
+        let cli = parse(&["amux", "status"]);
+        match cli.command.unwrap() {
+            Command::Status { watch } => assert!(!watch),
+            _ => panic!("expected status"),
+        }
+    }
+
+    #[test]
+    fn status_watch_flag() {
+        let cli = parse(&["amux", "status", "--watch"]);
+        match cli.command.unwrap() {
+            Command::Status { watch } => assert!(watch),
+            _ => panic!("expected status"),
+        }
     }
 
     // --- --allow-docker flag tests ---
