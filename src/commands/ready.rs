@@ -151,9 +151,9 @@ impl Default for ReadySummary {
 /// Prints the summary table to the output sink.
 pub fn print_summary(out: &OutputSink, summary: &ReadySummary) {
     out.println(String::new());
-    out.println("┌──────────────────────────────────────────────────┐");
-    out.println("│                  Ready Summary                   │");
-    out.println("├───────────────────┬──────────────────────────────┤");
+    out.println("┌───────────────────────────────────────────────────┐");
+    out.println("│                   Ready Summary                   │");
+    out.println("├───────────────────┬───────────────────────────────┤");
     print_summary_row(out, "Docker daemon", &summary.docker_daemon);
     print_summary_row(out, "Dockerfile.dev", &summary.dockerfile);
     print_summary_row(out, "aspec folder", &summary.aspec_folder);
@@ -161,7 +161,7 @@ pub fn print_summary(out: &OutputSink, summary: &ReadySummary) {
     print_summary_row(out, "Dev image", &summary.dev_image);
     print_summary_row(out, "Refresh (audit)", &summary.refresh);
     print_summary_row(out, "Image rebuild", &summary.image_rebuild);
-    out.println("└───────────────────┴──────────────────────────────┘");
+    out.println("└───────────────────┴───────────────────────────────┘");
 }
 
 fn print_summary_row(out: &OutputSink, label: &str, status: &StepStatus) {
@@ -230,7 +230,7 @@ pub async fn check_local_agent(agent_name: &str) -> (StepStatus, String, String)
         Ok(output) if output.status.success() => {
             let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
             (
-                StepStatus::Ok(format!("{}: installed & authenticated", agent_name)),
+                StepStatus::Ok(format!("{}: ready", agent_name)),
                 greeting.to_string(),
                 response,
             )
