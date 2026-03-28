@@ -10,7 +10,8 @@
       "Bash(cd:*)",
       "Bash(xxd)",
       "Bash(python3:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(echo \"EXIT: $?\")"
     ]
   }
 }

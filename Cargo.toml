@@ -24,6 +24,7 @@ tempfile = "3"
 vt100 = "0.15"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+unicode-width = "0.2"
 flate2 = "1"
 tar = "0.4"
 

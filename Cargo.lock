@@ -42,6 +42,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "unicode-width 0.2.2",
  "vt100",
 ]
 

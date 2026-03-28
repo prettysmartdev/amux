@@ -404,16 +404,18 @@ async fn execute_command(app: &mut App, cmd: &str) {
             let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
             app.active_tab_mut().exit_rx = Some(exit_rx);
             let tx = app.active_tab().output_tx.clone();
+            // Pass the shared Arc so the background task reads live state on every refresh.
+            let tui_tabs = app.tui_tabs_shared.clone();
             if watch {
                 // Create a cancel channel so that running a new command stops the loop.
                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
                 app.active_tab_mut().status_watch_cancel_tx = Some(cancel_tx);
                 spawn_text_command(tx, exit_tx, move |sink| async move {
-                    status::run_with_sink(true, &sink, Some(cancel_rx)).await
+                    status::run_with_sink(true, &sink, Some(cancel_rx), tui_tabs).await
                 });
             } else {
                 spawn_text_command(tx, exit_tx, move |sink| async move {
-                    status::run_with_sink(false, &sink, None).await
+                    status::run_with_sink(false, &sink, None, tui_tabs).await
                 });
             }
         }

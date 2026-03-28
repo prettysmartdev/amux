@@ -1,15 +1,17 @@
 use crate::commands::claws::ClawsAuditCtx;
 use crate::commands::ready::{ReadyContext, ReadyOptions, ReadySummary};
+use crate::commands::status::TuiTabInfo;
 use crate::docker;
 use crate::tui::pty::PtySession;
 use ratatui::style::Color;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 /// Duration of container output inactivity before a tab is considered "stuck".
-pub const STUCK_TIMEOUT: Duration = Duration::from_secs(60);
+pub const STUCK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Which widget currently receives keyboard input.
 #[derive(Debug, Clone, PartialEq)]
@@ -833,6 +835,10 @@ pub struct App {
     pub tabs: Vec<TabState>,
     pub active_tab_idx: usize,
     pub should_quit: bool,
+    /// Live snapshot of tab→container associations, kept up-to-date by `tick_all()`.
+    /// Shared with any running `status --watch` background task so the table reflects
+    /// current state on every refresh rather than the state at command-start time.
+    pub tui_tabs_shared: Arc<Mutex<Vec<TuiTabInfo>>>,
 }
 
 impl App {
@@ -841,6 +847,7 @@ impl App {
             tabs: vec![TabState::new(cwd)],
             active_tab_idx: 0,
             should_quit: false,
+            tui_tabs_shared: Arc::new(Mutex::new(vec![])),
         }
     }
 
@@ -873,9 +880,23 @@ impl App {
     }
 
     /// Call `tick()` on every tab so background PTY sessions stay live.
+    /// Also refreshes the shared `tui_tabs_shared` snapshot so any running
+    /// `status --watch` task sees up-to-date container associations and stuck state.
     pub fn tick_all(&mut self) {
         for tab in &mut self.tabs {
             tab.tick();
+        }
+        let snapshot: Vec<TuiTabInfo> = self.tabs.iter().enumerate()
+            .map(|(i, tab)| TuiTabInfo {
+                tab_number: i + 1,
+                container_name: tab.container_info.as_ref()
+                    .map(|ci| ci.container_name.clone())
+                    .unwrap_or_default(),
+                is_stuck: tab.is_stuck(),
+            })
+            .collect();
+        if let Ok(mut guard) = self.tui_tabs_shared.lock() {
+            *guard = snapshot;
         }
     }
 }
@@ -1448,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn is_stuck_true_when_container_silent_over_60s() {
+    fn is_stuck_true_when_container_silent_over_30s() {
         let mut tab = new_tab();
         tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
         tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
@@ -1462,8 +1483,8 @@ mod tests {
         let mut tab = new_tab();
         tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
         tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
-        // 59 seconds elapsed — just under the threshold.
-        tab.last_output_time = Some(Instant::now() - Duration::from_secs(59));
+        // 29 seconds elapsed — just under the threshold.
+        tab.last_output_time = Some(Instant::now() - Duration::from_secs(29));
         assert!(!tab.is_stuck());
     }
 

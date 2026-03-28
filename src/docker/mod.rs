@@ -94,6 +94,7 @@ impl HostSettings {
             // Create an empty directory so the mount target exists.
             std::fs::create_dir_all(&claude_dir_path).ok()?;
         }
+        disable_lsp_recommendations(&claude_dir_path).ok()?;
 
         Some(HostSettings {
             _temp_dir: Some(temp_dir),
@@ -145,6 +146,7 @@ impl HostSettings {
         } else {
             std::fs::create_dir_all(&claude_dir_path).ok()?;
         }
+        disable_lsp_recommendations(&claude_dir_path).ok()?;
 
         Some(HostSettings {
             _temp_dir: None,
@@ -165,6 +167,26 @@ impl HostSettings {
             claude_dir_path,
         }
     }
+}
+
+/// Disables LSP recommendations in the `settings.json` inside the copied claude dir.
+///
+/// Claude Code prompts the user to install language servers when it detects
+/// missing LSP support. Inside a container there is no IDE and no pre-installed
+/// language servers, so these recommendations are noise. This sets `"lsp": false`
+/// in the container's `settings.json` to suppress them.
+fn disable_lsp_recommendations(claude_dir: &Path) -> std::io::Result<()> {
+    let settings_path = claude_dir.join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let raw = std::fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if let Some(obj) = settings.as_object_mut() {
+        obj.insert("lsp".to_string(), serde_json::json!(false));
+    }
+    std::fs::write(&settings_path, serde_json::to_string(&settings)?)
 }
 
 /// Recursively copy `src` to `dst`, skipping top-level entries in `denylist`.
@@ -1128,6 +1150,38 @@ pub fn list_running_containers_by_prefix(prefix: &str) -> Vec<String> {
             .lines()
             .filter(|l| !l.is_empty() && l.starts_with(prefix))
             .map(|l| l.to_string())
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// List running containers matching `prefix`, returning `(name, short_id)` pairs.
+///
+/// Like `list_running_containers_by_prefix` but also returns the short container
+/// ID from `docker ps`. Used by the status dashboard to display IDs.
+pub fn list_running_containers_with_ids_by_prefix(prefix: &str) -> Vec<(String, String)> {
+    let output = Command::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            &format!("name={}", prefix),
+            "--format",
+            "{{.Names}}\t{{.ID}}",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| {
+                let mut parts = l.splitn(2, '\t');
+                let name = parts.next()?.to_string();
+                let id = parts.next().unwrap_or("").trim().to_string();
+                if name.starts_with(prefix) { Some((name, id)) } else { None }
+            })
             .collect(),
         _ => vec![],
     }

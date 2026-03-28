@@ -3,7 +3,9 @@ use crate::config::load_repo_config;
 use crate::docker;
 use anyhow::Result;
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 use tokio::time::Duration;
+use unicode_width::UnicodeWidthStr;
 
 /// 50 tips shown randomly at the bottom of the status dashboard.
 const TIPS: &[&str] = &[
@@ -38,7 +40,7 @@ const TIPS: &[&str] = &[
     "Press Esc in the execution window to return focus to the command box.",
     "When a container is running, press `c` to maximise its window for full interaction.",
     "The container window can be minimised with Esc, leaving the outer window scrollable.",
-    "A yellow tab name means the container has been idle for over 60 seconds.",
+    "A yellow tab name means the container has been idle for over 30 seconds.",
     "CPU and memory stats for running containers are polled and displayed live.",
     "Agent credentials are read from the system keychain automatically.",
     "Nanoclaw worker containers are named with the `nanoclaw-` prefix.",
@@ -77,10 +79,24 @@ pub fn select_random_tip() -> &'static str {
 /// in `TabState` recognises this marker and calls `output_lines.clear()`.
 pub const CLEAR_MARKER: &str = "\x00CLEAR\x00";
 
+/// Info about one TUI tab, used to annotate status tables with tab numbers.
+#[derive(Clone)]
+pub struct TuiTabInfo {
+    /// 1-based tab number as shown in the TUI tab bar.
+    pub tab_number: usize,
+    /// Name of the container running in this tab (from `ContainerInfo::container_name`),
+    /// or empty string if no container is active.
+    pub container_name: String,
+    /// Whether this tab is currently showing a yellow "stuck" warning.
+    pub is_stuck: bool,
+}
+
 /// A running code agent container and its associated metadata.
 pub struct CodeAgentRow {
     /// Docker container name (e.g. `amux-12345-678901234`).
     pub name: String,
+    /// Short Docker container ID (e.g. `a1b2c3d4e5f6`).
+    pub container_id: String,
     /// Host path of the Git project mounted into the container (from `/workspace` bind-mount).
     pub project: String,
     /// Agent name from the repo config (e.g. `claude`).
@@ -95,6 +111,8 @@ pub struct CodeAgentRow {
 pub struct NanoclawRow {
     /// Docker container name.
     pub name: String,
+    /// Short Docker container ID.
+    pub container_id: String,
     /// CPU usage percentage string.
     pub cpu: String,
     /// Memory usage string.
@@ -106,13 +124,13 @@ pub struct NanoclawRow {
 /// Code-agent containers have an `amux-` name prefix and are excluded if they
 /// belong to the nanoclaw subsystem (`amux-claws-*` or contain `nanoclaw`).
 pub fn gather_code_agents() -> Vec<CodeAgentRow> {
-    docker::list_running_containers_by_prefix("amux-")
+    docker::list_running_containers_with_ids_by_prefix("amux-")
         .into_iter()
-        .filter(|n| !n.starts_with("amux-claws-") && !n.contains("nanoclaw"))
-        .map(|name| {
+        .filter(|(n, _)| !n.starts_with("amux-claws-") && !n.contains("nanoclaw"))
+        .map(|(name, container_id)| {
             let (project, agent) = project_and_agent_for(&name);
             let (cpu, memory) = stats_for(&name);
-            CodeAgentRow { name, project, agent, cpu, memory }
+            CodeAgentRow { name, container_id, project, agent, cpu, memory }
         })
         .collect()
 }
@@ -122,30 +140,28 @@ pub fn gather_code_agents() -> Vec<CodeAgentRow> {
 /// Includes `amux-claws-controller` (if running) and any container whose name
 /// contains `nanoclaw`.
 pub fn gather_nanoclaw_containers() -> Vec<NanoclawRow> {
-    let mut names: Vec<String> = Vec::new();
+    let mut entries: Vec<(String, String)> = Vec::new();
 
     // The nanoclaw controller has a well-known name.
     let controller = crate::commands::claws::NANOCLAW_CONTROLLER_NAME;
-    let running_with_prefix = docker::list_running_containers_by_prefix(controller);
-    for n in running_with_prefix {
+    for (n, id) in docker::list_running_containers_with_ids_by_prefix(controller) {
         if n == controller {
-            names.push(n);
+            entries.push((n, id));
         }
     }
 
     // Any container whose name contains "nanoclaw" (worker containers, etc.).
-    let nanoclaw_workers = docker::list_running_containers_by_prefix("nanoclaw");
-    for n in nanoclaw_workers {
-        if !names.contains(&n) {
-            names.push(n);
+    for (n, id) in docker::list_running_containers_with_ids_by_prefix("nanoclaw") {
+        if !entries.iter().any(|(name, _)| name == &n) {
+            entries.push((n, id));
         }
     }
 
-    names
+    entries
         .into_iter()
-        .map(|name| {
+        .map(|(name, container_id)| {
             let (cpu, memory) = stats_for(&name);
-            NanoclawRow { name, cpu, memory }
+            NanoclawRow { name, container_id, cpu, memory }
         })
         .collect()
 }
@@ -177,18 +193,24 @@ fn stats_for(name: &str) -> (String, String) {
         .unwrap_or_else(|| ("--".to_string(), "--".to_string()))
 }
 
+/// Returns the terminal display width of a string, accounting for wide characters
+/// (e.g. emoji that occupy 2 columns).
+fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
 /// Render an ASCII box table with the given column `headers` and `rows`.
 ///
-/// Uses Unicode box-drawing characters for borders. All cell content is
-/// assumed to be ASCII (container names, paths, agent names, stats strings).
+/// Uses Unicode box-drawing characters for borders. Column widths are computed
+/// using terminal display width so that wide characters (e.g. emoji) align correctly.
 pub fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
     let ncols = headers.len();
 
-    // Compute column widths: max of header width and all cell widths.
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    // Compute column widths using display width so emoji align correctly.
+    let mut widths: Vec<usize> = headers.iter().map(|h| display_width(h)).collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate().take(ncols) {
-            widths[i] = widths[i].max(cell.len());
+            widths[i] = widths[i].max(display_width(cell));
         }
     }
 
@@ -205,7 +227,9 @@ pub fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
     // Header row: │ Col │ ...
     out.push('│');
     for (h, w) in headers.iter().zip(widths.iter()) {
-        out.push_str(&format!(" {:<width$} │", h, width = w));
+        let dw = display_width(h);
+        let pad = if *w > dw { *w - dw } else { 0 };
+        out.push_str(&format!(" {}{} │", h, " ".repeat(pad)));
     }
     out.push('\n');
 
@@ -221,7 +245,9 @@ pub fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
     for row in rows {
         out.push('│');
         for (cell, w) in row.iter().zip(widths.iter()) {
-            out.push_str(&format!(" {:<width$} │", cell, width = w));
+            let dw = display_width(cell);
+            let pad = if *w > dw { *w - dw } else { 0 };
+            out.push_str(&format!(" {}{} │", cell, " ".repeat(pad)));
         }
         out.push('\n');
     }
@@ -242,9 +268,23 @@ pub fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
 /// `tip` is a pre-selected tip string that is shown at the bottom of the output.
 /// Callers should select the tip once per invocation (not per refresh) so that
 /// the tip remains stable across `--watch` refreshes.
-pub fn format_status_output(tip: &str) -> String {
+///
+/// `tui_tabs` is a snapshot of running TUI tabs used to annotate the tables with
+/// tab numbers and attachment hints. Pass an empty slice when running from the CLI.
+pub fn format_status_output(tip: &str, tui_tabs: &[TuiTabInfo]) -> String {
     let code_agents = gather_code_agents();
     let nanoclaw = gather_nanoclaw_containers();
+    let in_tui = !tui_tabs.is_empty();
+
+    // Build container_name → (tab_number, is_stuck) lookups from the snapshot.
+    let mut tab_for: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut stuck_for: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+    for t in tui_tabs {
+        if !t.container_name.is_empty() {
+            tab_for.insert(t.container_name.as_str(), t.tab_number);
+            stuck_for.insert(t.container_name.as_str(), t.is_stuck);
+        }
+    }
 
     let mut out = String::new();
 
@@ -257,20 +297,36 @@ pub fn format_status_output(tip: &str) -> String {
         out.push_str("  No code agents running.\n");
         out.push_str("  To start one: amux implement <work-item>  or  amux chat\n");
     } else {
-        let headers = ["●", "Project", "Agent", "CPU", "Memory"];
         let rows: Vec<Vec<String>> = code_agents
             .iter()
             .map(|r| {
-                vec![
-                    "🟢".to_string(),
-                    r.project.clone(),
-                    r.agent.clone(),
-                    r.cpu.clone(),
-                    r.memory.clone(),
-                ]
+                let is_stuck = in_tui && stuck_for.get(r.name.as_str()).copied().unwrap_or(false);
+                let indicator = if is_stuck { "🟡" } else { "🟢" };
+                let mut row = vec![
+                    indicator.to_string(),
+                    r.name.clone(),
+                    r.container_id.clone(),
+                ];
+                if in_tui {
+                    let tab = tab_for.get(r.name.as_str())
+                        .map(|n| format!("Tab {}", n))
+                        .unwrap_or_else(|| "--".to_string());
+                    row.push(tab);
+                }
+                row.push(r.project.clone());
+                row.push(r.agent.clone());
+                row.push(r.cpu.clone());
+                row.push(r.memory.clone());
+                row
             })
             .collect();
-        out.push_str(&format_table(&headers, &rows));
+        if in_tui {
+            let headers = ["●", "Container", "ID", "Tab", "Project", "Agent", "CPU", "Memory"];
+            out.push_str(&format_table(&headers, &rows));
+        } else {
+            let headers = ["●", "Container", "ID", "Project", "Agent", "CPU", "Memory"];
+            out.push_str(&format_table(&headers, &rows));
+        }
     }
 
     out.push('\n');
@@ -281,12 +337,42 @@ pub fn format_status_output(tip: &str) -> String {
         out.push_str("  Nanoclaw is not running.\n");
         out.push_str("  To start it: amux claws init\n");
     } else {
-        let headers = ["●", "Container", "CPU", "Memory"];
+        let controller = crate::commands::claws::NANOCLAW_CONTROLLER_NAME;
         let rows: Vec<Vec<String>> = nanoclaw
             .iter()
-            .map(|r| vec!["🟢".to_string(), r.name.clone(), r.cpu.clone(), r.memory.clone()])
+            .map(|r| {
+                let is_stuck = in_tui && stuck_for.get(r.name.as_str()).copied().unwrap_or(false);
+                let indicator = if is_stuck { "🟡" } else { "🟢" };
+                let mut row = vec![
+                    indicator.to_string(),
+                    r.name.clone(),
+                    r.container_id.clone(),
+                ];
+                if in_tui {
+                    let tab = tab_for.get(r.name.as_str())
+                        .map(|n| format!("Tab {}", n))
+                        .unwrap_or_else(|| "--".to_string());
+                    row.push(tab);
+                }
+                row.push(r.cpu.clone());
+                row.push(r.memory.clone());
+                row
+            })
             .collect();
-        out.push_str(&format_table(&headers, &rows));
+        if in_tui {
+            let headers = ["●", "Container", "ID", "Tab", "CPU", "Memory"];
+            out.push_str(&format_table(&headers, &rows));
+        } else {
+            let headers = ["●", "Container", "ID", "CPU", "Memory"];
+            out.push_str(&format_table(&headers, &rows));
+        }
+
+        // In TUI mode: hint to attach if the controller is running but no tab is attached.
+        let controller_running = nanoclaw.iter().any(|r| r.name == controller);
+        let controller_attached = tab_for.contains_key(controller);
+        if in_tui && controller_running && !controller_attached {
+            out.push_str("  To attach: run claws chat\n");
+        }
     }
 
     // Tip of the run.
@@ -302,14 +388,20 @@ pub fn format_status_output(tip: &str) -> String {
 ///   using ANSI cursor-up + clear-to-end escape sequences.
 /// In watch mode (TUI / `OutputSink::Channel`): loops forever (until the channel is closed
 ///   or the provided `cancel` receiver fires), sending a `CLEAR_MARKER` before each refresh.
+///
+/// `tui_tabs` is a shared snapshot updated by the TUI main loop on every tick, so each
+/// refresh cycle reads the latest container associations and stuck state rather than the
+/// state frozen at command-start time.
 pub async fn run_with_sink(
     watch: bool,
     sink: &OutputSink,
     cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+    tui_tabs: Arc<Mutex<Vec<TuiTabInfo>>>,
 ) -> Result<()> {
     // Select the tip once per invocation so it stays stable across --watch refreshes.
     let tip = select_random_tip();
-    let content = format_status_output(tip);
+    let snapshot = tui_tabs.lock().map(|g| g.clone()).unwrap_or_default();
+    let content = format_status_output(tip, &snapshot);
 
     if !watch {
         sink.print(&content);
@@ -326,7 +418,8 @@ pub async fn run_with_sink(
         // `cancel` is not used in CLI watch mode (Ctrl-C terminates the process).
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
-            let new_content = format_status_output(tip);
+            let snapshot = tui_tabs.lock().map(|g| g.clone()).unwrap_or_default();
+            let new_content = format_status_output(tip, &snapshot);
             let new_lines = new_content.lines().count();
             // Move cursor up by `prev_lines` lines, then clear to end of screen.
             print!("\x1B[{}A\x1B[0J{}", prev_lines, new_content);
@@ -351,7 +444,8 @@ pub async fn run_with_sink(
                 sleep.await;
             }
 
-            let new_content = format_status_output(tip);
+            let snapshot = tui_tabs.lock().map(|g| g.clone()).unwrap_or_default();
+            let new_content = format_status_output(tip, &snapshot);
             // Send clear marker first; if the channel is closed, stop the loop.
             if !sink.try_println(CLEAR_MARKER) {
                 break;
@@ -365,7 +459,7 @@ pub async fn run_with_sink(
 /// Entry point for `amux status` (command mode).
 pub async fn run(watch: bool) -> Result<()> {
     let sink = OutputSink::Stdout;
-    run_with_sink(watch, &sink, None).await
+    run_with_sink(watch, &sink, None, Arc::new(Mutex::new(vec![]))).await
 }
 
 #[cfg(test)]
@@ -443,20 +537,20 @@ mod tests {
 
     #[test]
     fn format_status_output_contains_both_sections() {
-        let output = format_status_output("test tip");
+        let output = format_status_output("test tip", &[]);
         assert!(output.contains("CODE AGENTS"));
         assert!(output.contains("NANOCLAW"));
     }
 
     #[test]
     fn format_status_output_contains_dashboard_header() {
-        let output = format_status_output("test tip");
+        let output = format_status_output("test tip", &[]);
         assert!(output.contains("AMUX STATUS DASHBOARD"));
     }
 
     #[test]
     fn format_status_output_contains_tip() {
-        let output = format_status_output("my custom tip");
+        let output = format_status_output("my custom tip", &[]);
         assert!(output.contains("Tip: my custom tip"));
     }
 
@@ -464,7 +558,7 @@ mod tests {
     fn format_status_output_empty_state_messages_when_no_docker() {
         // When no containers are running (or Docker is unavailable), both sections
         // should show their empty-state messages rather than a table.
-        let output = format_status_output("test tip");
+        let output = format_status_output("test tip", &[]);
         // One or both sections will be empty in the test environment.
         // At minimum, both section headers must be present.
         assert!(output.contains("CODE AGENTS\n"));
