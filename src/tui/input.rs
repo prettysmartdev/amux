@@ -23,6 +23,14 @@ pub enum Action {
     NewWorkItem {
         kind: WorkItemKind,
         title: String,
+        interview: bool,
+    },
+    /// New work item interview summary submitted.
+    NewInterviewSummarySubmitted {
+        kind: WorkItemKind,
+        title: String,
+        work_item_number: u32,
+        summary: String,
     },
     /// Claws first-run wizard completed: proceed with launch.
     ClawsReadyProceed,
@@ -59,9 +67,22 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             return handle_mount_scope(app.active_tab_mut(), key, git_root, cwd)
         }
         Dialog::AgentAuth { .. } => return handle_agent_auth(app.active_tab_mut(), key),
-        Dialog::NewKindSelect => return handle_new_kind_select(app.active_tab_mut(), key),
-        Dialog::NewTitleInput { kind, title } => {
-            return handle_new_title_input(app.active_tab_mut(), key, kind, title)
+        Dialog::NewKindSelect { interview } => {
+            return handle_new_kind_select(app.active_tab_mut(), key, interview)
+        }
+        Dialog::NewTitleInput { kind, title, interview } => {
+            return handle_new_title_input(app.active_tab_mut(), key, kind, title, interview)
+        }
+        Dialog::NewInterviewSummary { kind, title, work_item_number, summary, cursor_pos } => {
+            return handle_new_interview_summary(
+                app.active_tab_mut(),
+                key,
+                kind,
+                title,
+                work_item_number,
+                summary,
+                cursor_pos,
+            )
         }
         Dialog::NewTabDirectory { input } => {
             return handle_new_tab_directory(app.active_tab_mut(), key, input)
@@ -400,24 +421,34 @@ fn handle_agent_auth(tab: &mut TabState, key: KeyEvent) -> Action {
     Action::None
 }
 
-fn handle_new_kind_select(tab: &mut TabState, key: KeyEvent) -> Action {
+fn handle_new_kind_select(tab: &mut TabState, key: KeyEvent, interview: bool) -> Action {
     match key.code {
         KeyCode::Char('1') | KeyCode::Char('f') | KeyCode::Char('F') => {
             tab.dialog = Dialog::NewTitleInput {
                 kind: WorkItemKind::Feature,
                 title: String::new(),
+                interview,
             };
         }
         KeyCode::Char('2') | KeyCode::Char('b') | KeyCode::Char('B') => {
             tab.dialog = Dialog::NewTitleInput {
                 kind: WorkItemKind::Bug,
                 title: String::new(),
+                interview,
             };
         }
         KeyCode::Char('3') | KeyCode::Char('t') | KeyCode::Char('T') => {
             tab.dialog = Dialog::NewTitleInput {
                 kind: WorkItemKind::Task,
                 title: String::new(),
+                interview,
+            };
+        }
+        KeyCode::Char('4') | KeyCode::Char('e') | KeyCode::Char('E') => {
+            tab.dialog = Dialog::NewTitleInput {
+                kind: WorkItemKind::Enhancement,
+                title: String::new(),
+                interview,
             };
         }
         KeyCode::Esc => {
@@ -434,6 +465,7 @@ fn handle_new_title_input(
     key: KeyEvent,
     kind: WorkItemKind,
     mut title: String,
+    interview: bool,
 ) -> Action {
     match key.code {
         KeyCode::Enter => {
@@ -445,6 +477,7 @@ fn handle_new_title_input(
             return Action::NewWorkItem {
                 kind,
                 title: trimmed,
+                interview,
             };
         }
         KeyCode::Esc => {
@@ -453,11 +486,200 @@ fn handle_new_title_input(
         }
         KeyCode::Backspace => {
             title.pop();
-            tab.dialog = Dialog::NewTitleInput { kind, title };
+            tab.dialog = Dialog::NewTitleInput { kind, title, interview };
         }
         KeyCode::Char(c) => {
             title.push(c);
-            tab.dialog = Dialog::NewTitleInput { kind, title };
+            tab.dialog = Dialog::NewTitleInput { kind, title, interview };
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_new_interview_summary(
+    tab: &mut TabState,
+    key: KeyEvent,
+    kind: WorkItemKind,
+    title: String,
+    work_item_number: u32,
+    mut summary: String,
+    mut cursor_pos: usize,
+) -> Action {
+    // Ctrl+Enter → submit.
+    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+        let trimmed = summary.trim().to_string();
+        if !trimmed.is_empty() {
+            tab.dialog = Dialog::None;
+            return Action::NewInterviewSummarySubmitted {
+                kind,
+                title,
+                work_item_number,
+                summary: trimmed,
+            };
+        }
+        return Action::None;
+    }
+
+    match key.code {
+        KeyCode::Enter => {
+            // Insert newline at cursor position.
+            summary.insert(cursor_pos, '\n');
+            cursor_pos += 1;
+            tab.dialog = Dialog::NewInterviewSummary {
+                kind,
+                title,
+                work_item_number,
+                summary,
+                cursor_pos,
+            };
+        }
+        KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            tab.input_error = Some("Command cancelled.".into());
+        }
+        KeyCode::Backspace => {
+            if cursor_pos > 0 {
+                // Find the char boundary before cursor_pos.
+                let mut char_start = cursor_pos - 1;
+                while char_start > 0 && !summary.is_char_boundary(char_start) {
+                    char_start -= 1;
+                }
+                summary.remove(char_start);
+                cursor_pos = char_start;
+            }
+            tab.dialog = Dialog::NewInterviewSummary {
+                kind,
+                title,
+                work_item_number,
+                summary,
+                cursor_pos,
+            };
+        }
+        KeyCode::Delete => {
+            if cursor_pos < summary.len() {
+                // Find the next char boundary.
+                let mut char_end = cursor_pos + 1;
+                while char_end < summary.len() && !summary.is_char_boundary(char_end) {
+                    char_end += 1;
+                }
+                summary.remove(cursor_pos);
+            }
+            tab.dialog = Dialog::NewInterviewSummary {
+                kind,
+                title,
+                work_item_number,
+                summary,
+                cursor_pos,
+            };
+        }
+        KeyCode::Left => {
+            if cursor_pos > 0 {
+                cursor_pos -= 1;
+                while cursor_pos > 0 && !summary.is_char_boundary(cursor_pos) {
+                    cursor_pos -= 1;
+                }
+            }
+            tab.dialog = Dialog::NewInterviewSummary {
+                kind,
+                title,
+                work_item_number,
+                summary,
+                cursor_pos,
+            };
+        }
+        KeyCode::Right => {
+            if cursor_pos < summary.len() {
+                cursor_pos += 1;
+                while cursor_pos < summary.len() && !summary.is_char_boundary(cursor_pos) {
+                    cursor_pos += 1;
+                }
+            }
+            tab.dialog = Dialog::NewInterviewSummary {
+                kind,
+                title,
+                work_item_number,
+                summary,
+                cursor_pos,
+            };
+        }
+        KeyCode::Up => {
+            // Navigate to the same column in the previous line.
+            let before = &summary[..cursor_pos];
+            if let Some(prev_newline) = before.rfind('\n') {
+                let col = cursor_pos - prev_newline - 1;
+                let line_start = before[..prev_newline].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                let line_len = prev_newline - line_start;
+                cursor_pos = line_start + col.min(line_len);
+            } else {
+                cursor_pos = 0;
+            }
+            tab.dialog = Dialog::NewInterviewSummary {
+                kind,
+                title,
+                work_item_number,
+                summary,
+                cursor_pos,
+            };
+        }
+        KeyCode::Down => {
+            // Navigate to the same column in the next line.
+            let before = &summary[..cursor_pos];
+            let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let col = cursor_pos - line_start;
+            if let Some(next_newline) = summary[cursor_pos..].find('\n') {
+                let next_line_start = cursor_pos + next_newline + 1;
+                let next_line_end = summary[next_line_start..]
+                    .find('\n')
+                    .map(|i| next_line_start + i)
+                    .unwrap_or(summary.len());
+                let next_line_len = next_line_end - next_line_start;
+                cursor_pos = next_line_start + col.min(next_line_len);
+            } else {
+                cursor_pos = summary.len();
+            }
+            tab.dialog = Dialog::NewInterviewSummary {
+                kind,
+                title,
+                work_item_number,
+                summary,
+                cursor_pos,
+            };
+        }
+        KeyCode::Home => {
+            let before = &summary[..cursor_pos];
+            let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+            cursor_pos = line_start;
+            tab.dialog = Dialog::NewInterviewSummary {
+                kind,
+                title,
+                work_item_number,
+                summary,
+                cursor_pos,
+            };
+        }
+        KeyCode::End => {
+            let after = &summary[cursor_pos..];
+            let line_end = after.find('\n').map(|i| cursor_pos + i).unwrap_or(summary.len());
+            cursor_pos = line_end;
+            tab.dialog = Dialog::NewInterviewSummary {
+                kind,
+                title,
+                work_item_number,
+                summary,
+                cursor_pos,
+            };
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            summary.insert(cursor_pos, c);
+            cursor_pos += c.len_utf8();
+            tab.dialog = Dialog::NewInterviewSummary {
+                kind,
+                title,
+                work_item_number,
+                summary,
+                cursor_pos,
+            };
         }
         _ => {}
     }
@@ -629,7 +851,7 @@ fn handle_claws_sudo_confirm(tab: &mut TabState, key: KeyEvent, mut password: St
 
 // --- Autocomplete ---
 
-const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "new", "claws", "status"];
+const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "specs", "claws", "status"];
 
 /// Return suggestions for the current input string.
 pub fn autocomplete_suggestions(input: &str) -> Vec<String> {
@@ -684,8 +906,10 @@ fn flag_suggestions_for(cmd: &str, _typed: &str) -> Vec<String> {
             "chat --plan".into(),
             "chat --allow-docker".into(),
         ],
-        "new" => vec![
-            "new  (creates a new work item from template)".into(),
+        "specs" => vec![
+            "specs new".into(),
+            "specs new --interview".into(),
+            "specs amend <NNNN>  e.g. specs amend 0025".into(),
         ],
         "claws" => vec![
             "claws init   (first-time setup: clone, build image, launch container)".into(),
@@ -1039,5 +1263,26 @@ mod tests {
         assert_eq!(app.active_tab().dialog, Dialog::None);
         // Empty password is allowed (e.g. NOPASSWD sudo configs).
         assert_eq!(rx.try_recv().unwrap(), Some(String::new()));
+    }
+
+    #[test]
+    fn suggestions_empty_input_includes_specs() {
+        let suggestions = autocomplete_suggestions("");
+        assert!(suggestions.contains(&"specs".to_string()), "Empty input should include specs: {:?}", suggestions);
+    }
+
+    #[test]
+    fn suggestions_specs_space_shows_subcommands() {
+        let suggestions = autocomplete_suggestions("specs ");
+        assert!(
+            suggestions.iter().any(|s| s.contains("new")),
+            "specs  should show new suggestion: {:?}",
+            suggestions
+        );
+        assert!(
+            suggestions.iter().any(|s| s.contains("amend")),
+            "specs  should show amend suggestion: {:?}",
+            suggestions
+        );
     }
 }

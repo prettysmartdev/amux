@@ -82,12 +82,13 @@ pub async fn run_with_sink(
     Ok(())
 }
 
-/// The three types of work items.
+/// The four types of work items.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkItemKind {
     Feature,
     Bug,
     Task,
+    Enhancement,
 }
 
 impl WorkItemKind {
@@ -96,6 +97,7 @@ impl WorkItemKind {
             WorkItemKind::Feature => "Feature",
             WorkItemKind::Bug => "Bug",
             WorkItemKind::Task => "Task",
+            WorkItemKind::Enhancement => "Enhancement",
         }
     }
 
@@ -104,6 +106,7 @@ impl WorkItemKind {
             "feature" | "f" | "1" => Some(WorkItemKind::Feature),
             "bug" | "b" | "2" => Some(WorkItemKind::Bug),
             "task" | "t" | "3" => Some(WorkItemKind::Task),
+            "enhancement" | "e" | "4" => Some(WorkItemKind::Enhancement),
             _ => None,
         }
     }
@@ -192,23 +195,24 @@ pub fn open_in_vscode(path: &Path) {
 }
 
 /// Prompt the user to select a work item kind (command mode via stdin).
-fn prompt_kind(out: &OutputSink) -> Result<WorkItemKind> {
+pub fn prompt_kind(out: &OutputSink) -> Result<WorkItemKind> {
     out.println("Select work item type:");
     out.println("  1) Feature");
     out.println("  2) Bug");
     out.println("  3) Task");
-    out.print("Choice [1/2/3]: ");
+    out.println("  4) Enhancement");
+    out.print("Choice [1/2/3/4]: ");
 
     let mut input = String::new();
     std::io::stdin()
         .read_line(&mut input)
         .context("Failed to read input")?;
 
-    WorkItemKind::from_str(&input).context("Invalid choice. Please enter 1, 2, or 3.")
+    WorkItemKind::from_str(&input).context("Invalid choice. Please enter 1, 2, 3, or 4.")
 }
 
 /// Prompt the user to provide a title (command mode via stdin).
-fn prompt_title(out: &OutputSink) -> Result<String> {
+pub fn prompt_title(out: &OutputSink) -> Result<String> {
     out.print("Work item title: ");
 
     let mut input = String::new();
@@ -221,6 +225,56 @@ fn prompt_title(out: &OutputSink) -> Result<String> {
         bail!("Title cannot be empty.");
     }
     Ok(title)
+}
+
+/// Creates a work item file and returns its number. Does NOT open in VS Code.
+/// Used by `specs new --interview` to create the file before launching the agent.
+pub async fn create_file_return_number(
+    out: &OutputSink,
+    kind: WorkItemKind,
+    title: String,
+    cwd: &Path,
+) -> Result<u32> {
+    use crate::commands::init::find_git_root_from;
+
+    let git_root = find_git_root_from(cwd).context("Not inside a Git repository")?;
+
+    // Locate or download the template.
+    let template_path = match find_template(&git_root) {
+        Ok(p) => p,
+        Err(_) => {
+            out.println(
+                "Template not found locally, downloading aspec folder from GitHub..."
+                    .to_string(),
+            );
+            download::download_aspec_folder(&git_root, out)
+                .await
+                .context("Failed to download aspec folder for template")?;
+            find_template(&git_root)?
+        }
+    };
+    let template_content =
+        std::fs::read_to_string(&template_path).context("Failed to read template file")?;
+
+    let work_items_dir = template_path
+        .parent()
+        .context("Template has no parent directory")?;
+    let next_number = next_work_item_number(work_items_dir)?;
+
+    // Build the filename.
+    let slug = slugify(&title);
+    let filename = format!("{:04}-{}.md", next_number, slug);
+    let file_path = work_items_dir.join(&filename);
+
+    // Build the file content from the template.
+    let content = apply_template(&template_content, &kind, &title);
+
+    std::fs::write(&file_path, &content)
+        .with_context(|| format!("Failed to write {}", file_path.display()))?;
+
+    out.println(format!("Created work item: {}", file_path.display()));
+
+    Ok(next_number)
 }
 
 #[cfg(test)]
@@ -328,10 +382,56 @@ mod tests {
     }
 
     #[test]
+    fn work_item_kind_enhancement_from_str() {
+        assert_eq!(WorkItemKind::from_str("enhancement"), Some(WorkItemKind::Enhancement));
+        assert_eq!(WorkItemKind::from_str("Enhancement"), Some(WorkItemKind::Enhancement));
+        assert_eq!(WorkItemKind::from_str("e"), Some(WorkItemKind::Enhancement));
+        assert_eq!(WorkItemKind::from_str("4"), Some(WorkItemKind::Enhancement));
+    }
+
+    #[test]
+    fn work_item_kind_enhancement_as_str() {
+        assert_eq!(WorkItemKind::Enhancement.as_str(), "Enhancement");
+    }
+
+    #[test]
     fn work_item_kind_as_str() {
         assert_eq!(WorkItemKind::Feature.as_str(), "Feature");
         assert_eq!(WorkItemKind::Bug.as_str(), "Bug");
         assert_eq!(WorkItemKind::Task.as_str(), "Task");
+        assert_eq!(WorkItemKind::Enhancement.as_str(), "Enhancement");
+    }
+
+    #[tokio::test]
+    async fn create_file_return_number_returns_correct_number() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // Set up a git repo and template.
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let work_items = root.join("aspec/work-items");
+        std::fs::create_dir_all(&work_items).unwrap();
+        std::fs::write(
+            work_items.join("0000-template.md"),
+            "# Work Item: [Feature | Bug | Task]\n\nTitle: title\nIssue: issuelink\n",
+        )
+        .unwrap();
+        std::fs::write(work_items.join("0001-first.md"), "").unwrap();
+
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        let number = create_file_return_number(
+            &sink,
+            WorkItemKind::Enhancement,
+            "My Enhancement".to_string(),
+            root,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(number, 2);
+        assert!(work_items.join("0002-my-enhancement.md").exists());
     }
 
     #[test]

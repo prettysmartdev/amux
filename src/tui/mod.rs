@@ -11,6 +11,7 @@ use crate::commands::implement::{
 };
 use crate::commands::init::find_git_root_from;
 use crate::commands::new::WorkItemKind;
+use crate::commands::specs::{amend_agent_entrypoint, interview_agent_entrypoint};
 use crate::commands::{claws, init, new, ready, status};
 use crate::commands::ready::{ReadyOptions, print_interactive_notice, print_summary};
 use crate::config::load_repo_config;
@@ -216,8 +217,24 @@ async fn handle_action(app: &mut App, action: Action) {
             }
         }
 
-        Action::NewWorkItem { kind, title } => {
-            launch_new(app, kind, title).await;
+        Action::NewWorkItem { kind, title, interview } => {
+            if interview {
+                launch_new_interview(app, kind, title).await;
+            } else {
+                launch_new(app, kind, title).await;
+            }
+        }
+
+        Action::NewInterviewSummarySubmitted { kind, title, work_item_number, summary } => {
+            let tab = app.active_tab_mut();
+            tab.pending_command = PendingCommand::SpecsNewInterview {
+                work_item_number,
+                kind,
+                title,
+                summary,
+                allow_docker: false,
+            };
+            show_pre_command_dialogs(app).await;
         }
 
         Action::ClawsReadyProceed => {
@@ -376,8 +393,35 @@ async fn execute_command(app: &mut App, cmd: &str) {
             show_pre_command_dialogs(app).await;
         }
 
-        "new" => {
-            app.active_tab_mut().dialog = state::Dialog::NewKindSelect;
+
+        "specs" => {
+            match parts.get(1) {
+                Some(&"new") => {
+                    let interview = parts.iter().any(|p| *p == "--interview");
+                    app.active_tab_mut().dialog = state::Dialog::NewKindSelect { interview };
+                }
+                Some(&"amend") => {
+                    let allow_docker = parts.iter().any(|p| *p == "--allow-docker");
+                    let work_item: u32 = match parts.iter()
+                        .skip(2)
+                        .find(|s| !s.starts_with("--"))
+                        .and_then(|s| parse_work_item(s).ok())
+                    {
+                        Some(n) => n,
+                        None => {
+                            app.active_tab_mut().input_error =
+                                Some("Usage: specs amend <NNNN>  e.g. specs amend 0025".into());
+                            return;
+                        }
+                    };
+                    app.active_tab_mut().pending_command = PendingCommand::SpecsAmend { work_item, allow_docker };
+                    show_pre_command_dialogs(app).await;
+                }
+                _ => {
+                    app.active_tab_mut().input_error =
+                        Some("Usage: specs <new|amend>  e.g. specs new --interview, specs amend 0025".into());
+                }
+            }
         }
 
         "claws" => {
@@ -476,6 +520,12 @@ async fn launch_pending_command(app: &mut App) {
         PendingCommand::ClawsReady => {
             // Claws ready is launched directly from dialog actions (ClawsReadyProceed /
             // ClawsReadyStartContainer), not through the mount-scope dialog flow.
+        }
+        PendingCommand::SpecsAmend { work_item, allow_docker } => {
+            launch_specs_amend(app, work_item, allow_docker).await;
+        }
+        PendingCommand::SpecsNewInterview { work_item_number, kind, title, summary, allow_docker } => {
+            launch_specs_interview_agent(app, work_item_number, kind, title, summary, allow_docker).await;
         }
         PendingCommand::None => {}
     }
@@ -1768,6 +1818,233 @@ async fn launch_new(app: &mut App, kind: WorkItemKind, title: String) {
     spawn_text_command(tx, exit_tx, move |sink| async move {
         new::run_with_sink(&sink, Some(kind), Some(title), &tab_cwd).await
     });
+}
+
+/// Launch `specs new --interview`: create the work item file, then show the interview summary dialog.
+async fn launch_new_interview(app: &mut App, kind: WorkItemKind, title: String) {
+    use crate::commands::new::create_file_return_number;
+    use crate::commands::output::OutputSink;
+    let tab_cwd = app.active_tab().cwd.clone();
+    let out = OutputSink::Channel(app.active_tab().output_tx.clone());
+    app.active_tab_mut().start_command("specs new --interview".to_string());
+    match create_file_return_number(&out, kind.clone(), title.clone(), &tab_cwd).await {
+        Ok(number) => {
+            drop(out);
+            app.active_tab_mut().finish_command(0);
+            app.active_tab_mut().dialog = state::Dialog::NewInterviewSummary {
+                kind,
+                title,
+                work_item_number: number,
+                summary: String::new(),
+                cursor_pos: 0,
+            };
+        }
+        Err(e) => {
+            drop(out);
+            app.active_tab_mut().finish_command(1);
+            app.active_tab_mut().input_error = Some(format!("Failed to create work item: {}", e));
+        }
+    }
+}
+
+/// Launch the specs amend agent via PTY.
+async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
+    let tab_cwd = app.active_tab().cwd.clone();
+    let git_root = match find_git_root_from(&tab_cwd) {
+        Some(r) => r,
+        None => {
+            app.active_tab_mut().input_error = Some("Not inside a Git repository.".into());
+            return;
+        }
+    };
+
+    if let Err(e) = find_work_item(&git_root, work_item) {
+        app.active_tab_mut().input_error = Some(format!("{}", e));
+        return;
+    }
+
+    let config = load_repo_config(&git_root).unwrap_or_default();
+    let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
+    let mount_path = app.active_tab_mut().pending_mount_path.take().unwrap_or_else(|| git_root.clone());
+
+    let credentials = agent_keychain_credentials(&agent_name);
+    let env_vars = credentials.env_vars;
+
+    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name);
+
+    let entrypoint = amend_agent_entrypoint(&agent_name, work_item);
+    let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+
+    let image_tag = docker::project_image_tag(&git_root);
+    let container_name = docker::generate_container_name();
+
+    let display_args = docker::build_run_args_pty_display(
+        &image_tag,
+        mount_path.to_str().unwrap(),
+        &entrypoint_refs,
+        &env_vars,
+        Some(&container_name),
+        app.active_tab().host_settings.as_ref(),
+        allow_docker,
+    );
+    let cmd_display = docker::format_run_cmd(&display_args);
+
+    let command_display = format!("specs amend {:04}", work_item);
+    app.active_tab_mut().start_command(command_display);
+
+    if allow_docker {
+        match docker::check_docker_socket() {
+            Ok(socket_path) => {
+                app.active_tab_mut().push_output(format!("Docker socket: {} (found)", socket_path.display()));
+            }
+            Err(e) => {
+                app.active_tab_mut().push_output(format!("Error: {}", e));
+                app.active_tab_mut().finish_command(1);
+                return;
+            }
+        }
+    }
+
+    app.active_tab_mut().push_output(format!("$ {}", cmd_display));
+
+    let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+    print_interactive_notice(&sink, &agent_name);
+
+    let docker_args = docker::build_run_args_pty(
+        &image_tag,
+        mount_path.to_str().unwrap(),
+        &entrypoint_refs,
+        &env_vars,
+        Some(&container_name),
+        app.active_tab().host_settings.as_ref(),
+        allow_docker,
+    );
+    let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
+
+    let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
+    let size = PtySize {
+        rows: inner_rows,
+        cols: inner_cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+
+    let display_name = state::agent_display_name(&agent_name).to_string();
+    app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
+
+    match PtySession::spawn("docker", &docker_str_refs, size) {
+        Ok((session, pty_rx)) => {
+            app.active_tab_mut().pty = Some(session);
+            app.active_tab_mut().pty_rx = Some(pty_rx);
+            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name));
+        }
+        Err(e) => {
+            app.active_tab_mut().push_output(format!("Failed to launch container: {}", e));
+            app.active_tab_mut().finish_command(1);
+        }
+    }
+}
+
+/// Launch the specs interview agent via PTY.
+async fn launch_specs_interview_agent(
+    app: &mut App,
+    work_item_number: u32,
+    kind: WorkItemKind,
+    title: String,
+    summary: String,
+    allow_docker: bool,
+) {
+    let tab_cwd = app.active_tab().cwd.clone();
+    let git_root = match find_git_root_from(&tab_cwd) {
+        Some(r) => r,
+        None => {
+            app.active_tab_mut().input_error = Some("Not inside a Git repository.".into());
+            return;
+        }
+    };
+
+    let config = load_repo_config(&git_root).unwrap_or_default();
+    let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
+    let mount_path = app.active_tab_mut().pending_mount_path.take().unwrap_or_else(|| git_root.clone());
+
+    let credentials = agent_keychain_credentials(&agent_name);
+    let env_vars = credentials.env_vars;
+
+    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name);
+
+    let entrypoint = interview_agent_entrypoint(&agent_name, work_item_number, &kind, &title, &summary);
+    let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+
+    let image_tag = docker::project_image_tag(&git_root);
+    let container_name = docker::generate_container_name();
+
+    let display_args = docker::build_run_args_pty_display(
+        &image_tag,
+        mount_path.to_str().unwrap(),
+        &entrypoint_refs,
+        &env_vars,
+        Some(&container_name),
+        app.active_tab().host_settings.as_ref(),
+        allow_docker,
+    );
+    let cmd_display = docker::format_run_cmd(&display_args);
+
+    let command_display = format!("specs new --interview {:04}", work_item_number);
+    app.active_tab_mut().start_command(command_display);
+
+    if allow_docker {
+        match docker::check_docker_socket() {
+            Ok(socket_path) => {
+                app.active_tab_mut().push_output(format!("Docker socket: {} (found)", socket_path.display()));
+            }
+            Err(e) => {
+                app.active_tab_mut().push_output(format!("Error: {}", e));
+                app.active_tab_mut().finish_command(1);
+                return;
+            }
+        }
+    }
+
+    app.active_tab_mut().push_output(format!("$ {}", cmd_display));
+
+    let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+    print_interactive_notice(&sink, &agent_name);
+
+    let docker_args = docker::build_run_args_pty(
+        &image_tag,
+        mount_path.to_str().unwrap(),
+        &entrypoint_refs,
+        &env_vars,
+        Some(&container_name),
+        app.active_tab().host_settings.as_ref(),
+        allow_docker,
+    );
+    let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
+
+    let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
+    let size = PtySize {
+        rows: inner_rows,
+        cols: inner_cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+
+    let display_name = state::agent_display_name(&agent_name).to_string();
+    app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
+
+    match PtySession::spawn("docker", &docker_str_refs, size) {
+        Ok((session, pty_rx)) => {
+            app.active_tab_mut().pty = Some(session);
+            app.active_tab_mut().pty_rx = Some(pty_rx);
+            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name));
+        }
+        Err(e) => {
+            app.active_tab_mut().push_output(format!("Failed to launch container: {}", e));
+            app.active_tab_mut().finish_command(1);
+        }
+    }
 }
 
 fn parse_agent_flag(parts: &[&str]) -> Option<Agent> {

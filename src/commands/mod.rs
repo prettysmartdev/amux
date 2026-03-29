@@ -8,9 +8,10 @@ pub mod init;
 pub mod new;
 pub mod output;
 pub mod ready;
+pub mod specs;
 pub mod status;
 
-use crate::cli::Command;
+use crate::cli::{Command, SpecsAction};
 use anyhow::Result;
 
 pub async fn run(command: Command) -> Result<()> {
@@ -32,8 +33,13 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Chat { non_interactive, plan, allow_docker } => {
             chat::run(non_interactive, plan, allow_docker).await
         }
-        Command::New => new::run().await,
         Command::Claws { action } => claws::run(action).await,
         Command::Status { watch } => status::run(watch).await,
+        Command::Specs { action } => match action {
+            SpecsAction::New { interview } => specs::run_new(interview).await,
+            SpecsAction::Amend { work_item, non_interactive, allow_docker } => {
+                specs::run_amend(&work_item, non_interactive, allow_docker).await
+            }
+        },
     }
 }

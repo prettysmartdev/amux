@@ -48,13 +48,24 @@ pub enum Dialog {
     /// Retained for completeness but currently unused (auto-passthrough).
     #[allow(dead_code)]
     AgentAuth { agent: String, git_root: PathBuf },
-    /// Step 1 of `new`: select work item kind (Feature/Bug/Task).
-    NewKindSelect,
+    /// Step 1 of `new`: select work item kind (Feature/Bug/Task/Enhancement).
+    NewKindSelect { interview: bool },
     /// Step 2 of `new`: enter title. The kind has already been chosen.
     NewTitleInput {
         kind: crate::commands::new::WorkItemKind,
         /// Current title text being typed.
         title: String,
+        interview: bool,
+    },
+    /// Interview summary input: large freeform text box.
+    NewInterviewSummary {
+        kind: crate::commands::new::WorkItemKind,
+        title: String,
+        work_item_number: u32,
+        /// The text being typed.
+        summary: String,
+        /// Byte offset of the cursor in `summary`.
+        cursor_pos: usize,
     },
     /// Claws wizard: ask if user has already forked nanoclaw.
     ClawsReadyHasForked,
@@ -105,6 +116,19 @@ pub enum PendingCommand {
         allow_docker: bool,
     },
     ClawsReady,
+    /// specs amend: run amend agent for a work item.
+    SpecsAmend {
+        work_item: u32,
+        allow_docker: bool,
+    },
+    /// specs new --interview: run interview agent after file creation.
+    SpecsNewInterview {
+        work_item_number: u32,
+        kind: crate::commands::new::WorkItemKind,
+        title: String,
+        summary: String,
+        allow_docker: bool,
+    },
 }
 
 /// Which phase of the multi-step claws workflow is active in the TUI.

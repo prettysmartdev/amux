@@ -663,6 +663,12 @@ fn draw_suggestions(frame: &mut Frame, tab: &TabState, area: Rect) {
 // --- Modal dialogs ---
 
 fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
+    // Special dialogs that do their own rendering.
+    if let Dialog::NewInterviewSummary { kind, title, work_item_number, summary, cursor_pos } = &tab.dialog {
+        draw_interview_summary_dialog(frame, kind, title, *work_item_number, summary, *cursor_pos, area);
+        return;
+    }
+
     let (title, body) = match &tab.dialog {
         Dialog::CloseTabConfirm => (
             " Close Tab? ",
@@ -695,11 +701,11 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
                 git_root.display()
             ),
         ),
-        Dialog::NewKindSelect => (
+        Dialog::NewKindSelect { .. } => (
             " New Work Item — Type ",
-            "  Select work item type:\n\n  1) Feature\n  2) Bug\n  3) Task\n\n  [1/2/3 or Esc to cancel]  ".to_string(),
+            "  Select work item type:\n\n  1) Feature\n  2) Bug\n  3) Task\n  4) Enhancement\n\n  [1/2/3/4 or Esc to cancel]  ".to_string(),
         ),
-        Dialog::NewTitleInput { kind, title: item_title } => (
+        Dialog::NewTitleInput { kind, title: item_title, .. } => (
             " New Work Item — Title ",
             format!(
                 "  Type: {}\n\n  Enter title: {}\n\n  [Enter to confirm, Esc to cancel]  ",
@@ -764,6 +770,8 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
             ),
         ),
         Dialog::None => return,
+        // NewInterviewSummary is handled by the early return above — this arm is unreachable.
+        Dialog::NewInterviewSummary { .. } => return,
     };
 
     let popup_width = 72u16.min(area.width.saturating_sub(4));
@@ -786,6 +794,153 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
         .wrap(Wrap { trim: false });
 
     frame.render_widget(para, popup);
+}
+
+fn draw_interview_summary_dialog(
+    frame: &mut Frame,
+    kind: &crate::commands::new::WorkItemKind,
+    title: &str,
+    work_item_number: u32,
+    summary: &str,
+    cursor_pos: usize,
+    area: Rect,
+) {
+    // Compute popup size: 80% width, 60% height, min 16 rows
+    let popup_width = ((area.width as u32 * 80 / 100) as u16).min(82).max(40);
+    let popup_height = ((area.height as u32 * 60 / 100) as u16)
+        .max(16)
+        .min(area.height.saturating_sub(4));
+    let popup = centered_rect(popup_width, popup_height, area);
+
+    frame.render_widget(Clear, popup);
+
+    // Outer block
+    let outer_block = Block::default()
+        .title(" Interview Summary ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = outer_block.inner(popup);
+    frame.render_widget(outer_block, popup);
+
+    if inner.height < 6 {
+        return;
+    }
+
+    // Header rows: info + blank + instructions + blank
+    let header_height = 4u16;
+    let footer_height = 1u16;
+    let text_area_height = inner.height.saturating_sub(header_height + footer_height);
+
+    // Layout inside the popup inner area
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(text_area_height.max(3)),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+
+    let header_area = layout[0];
+    let text_outer_area = layout[1];
+    let footer_area = layout[2];
+
+    // Render header
+    let header_text = vec![
+        Line::from(vec![Span::styled(
+            format!("  {:04} — {}: {}", work_item_number, kind.as_str(), title),
+            Style::default().fg(Color::Cyan),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "  Describe the work item. The code agent will complete the details.",
+            Style::default().fg(Color::DarkGray),
+        )]),
+        Line::from(""),
+    ];
+    let header_para = Paragraph::new(header_text);
+    frame.render_widget(header_para, header_area);
+
+    // Render text area with border
+    let text_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::White));
+    let text_inner = text_block.inner(text_outer_area);
+    frame.render_widget(text_block, text_outer_area);
+
+    // Split summary into logical lines
+    let lines: Vec<&str> = summary.split('\n').collect();
+
+    // Compute cursor logical row and col (in chars)
+    let before_cursor = &summary[..cursor_pos.min(summary.len())];
+    let cursor_logical_row = before_cursor.chars().filter(|&c| c == '\n').count();
+    let last_newline_byte = before_cursor.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let cursor_logical_col = before_cursor[last_newline_byte..].chars().count();
+
+    // Text width for wrapping (-1 for the " " prefix)
+    let text_width = (text_inner.width.saturating_sub(1) as usize).max(1);
+
+    // Build visual lines and find cursor visual position
+    let mut all_visual_lines: Vec<String> = Vec::new();
+    let mut cursor_visual_row = 0usize;
+    let mut cursor_visual_col = 0usize;
+
+    for (logical_row, line) in lines.iter().enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        let line_char_len = chars.len();
+        let num_visual = if line_char_len == 0 { 1 } else { (line_char_len + text_width - 1) / text_width };
+
+        if logical_row == cursor_logical_row {
+            cursor_visual_row = all_visual_lines.len() + cursor_logical_col / text_width;
+            cursor_visual_col = cursor_logical_col % text_width;
+        }
+
+        for chunk_idx in 0..num_visual {
+            let start = chunk_idx * text_width;
+            let end = (start + text_width).min(line_char_len);
+            let chunk: String = chars[start..end].iter().collect();
+            all_visual_lines.push(chunk);
+        }
+    }
+
+    // Scroll to keep cursor visible
+    let visible_rows = text_inner.height as usize;
+    let scroll_start = if cursor_visual_row >= visible_rows {
+        cursor_visual_row + 1 - visible_rows
+    } else {
+        0
+    };
+
+    // Render visible visual lines
+    let visible_lines: Vec<Line> = all_visual_lines
+        .iter()
+        .skip(scroll_start)
+        .take(visible_rows)
+        .map(|line| Line::from(format!(" {}", line)))
+        .collect();
+
+    let text_para = Paragraph::new(visible_lines);
+    frame.render_widget(text_para, text_inner);
+
+    // Place cursor
+    let cursor_visible_row = cursor_visual_row.saturating_sub(scroll_start);
+    let cx = text_inner.x + 1 + cursor_visual_col as u16; // +1 for the " " prefix
+    let cy = text_inner.y + cursor_visible_row as u16;
+    if cx < text_inner.x + text_inner.width && cy < text_inner.y + text_inner.height {
+        frame.set_cursor_position((cx, cy));
+    }
+
+    // Render footer
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("  Ctrl+Enter to submit", Style::default().fg(Color::Green)),
+        Span::raw("  ·  "),
+        Span::styled("Esc to cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+    frame.render_widget(footer, footer_area);
 }
 
 /// Return a centered rectangle of the given size within `area`.

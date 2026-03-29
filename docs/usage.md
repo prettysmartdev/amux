@@ -47,6 +47,9 @@ amux chat
 amux chat --plan
 amux chat --allow-docker
 amux new
+amux specs new
+amux specs new --interview
+amux specs amend 0025
 amux claws init
 amux claws ready
 amux claws chat
@@ -556,7 +559,7 @@ NANOCLAW
 Creates a new work item from the template (`aspec/work-items/0000-template.md`).
 
 1. Scans the `aspec/work-items/` directory to determine the next sequential number
-2. Prompts for the work item type: **Feature**, **Bug**, or **Task**
+2. Prompts for the work item type: **Feature**, **Bug**, **Task**, or **Enhancement**
 3. Prompts for a title
 4. Creates a new file using the naming pattern `XXXX-title-of-item.md`
 5. Replaces the template's header and title lines with the user's choices
@@ -580,9 +583,95 @@ amux new
 #   1) Feature
 #   2) Bug
 #   3) Task
-# Choice [1/2/3]: 1
+#   4) Enhancement
+# Choice [1/2/3/4]: 1
 # Work item title: Add user authentication
 # Created work item: /path/to/repo/aspec/work-items/0007-add-user-authentication.md
+```
+
+---
+
+### `amux specs new [--interview]`
+
+Creates a new work item from the template. This is the preferred entry point for
+spec-related operations. Without `--interview`, behaves identically to `amux new`.
+
+**With `--interview`**:
+
+1. Prompts for work item type and title
+2. Creates the work item file (same as `amux new`, does **not** open in VS Code yet)
+3. Prompts for a brief summary of the work item
+4. Launches the configured code agent in an interactive container with a prompt to
+   complete the work item details (user stories, implementation plan, edge cases, test plan)
+5. After the agent finishes, opens the work item file in VS Code (if inside a VS Code terminal)
+
+The agent prompt (filled in with your inputs):
+
+```
+Work item {number} template has been created for {kind}: {title}.
+Help complete the work item based on the following summary...
+
+Summary:
+{your summary}
+```
+
+**In TUI mode**, after entering the type and title, a large freeform text box
+dialog opens for entering the summary. Use **Ctrl+Enter** to submit or **Esc** to cancel.
+The text box supports multi-line input with full cursor movement (arrow keys, Home/End).
+
+**Flags**
+
+| Flag | Description |
+|------|-------------|
+| `--interview` | After creating the file, prompt for a summary and launch the agent to complete the spec |
+
+**Examples**
+
+```sh
+amux specs new               # same as amux new
+amux specs new --interview   # create file + run agent to complete spec
+```
+
+---
+
+### `amux specs amend <NNNN> [--non-interactive] [--allow-docker]`
+
+Launches the code agent to review a completed work item and amend it to match the
+final implementation.
+
+```sh
+amux specs amend 0025    # amends aspec/work-items/0025-*.md
+```
+
+The agent receives the following prompt:
+
+```
+Work item {number} is complete. Review the work that has been done in the codebase
+and compare it against the work item markdown file. If needed, amend the work item
+to ensure it matches the final implementation...
+Add new details if needed. Summarize the implementation and any corrections
+or changes that were needed to achieve the desired result in a new
+`Agent implementation notes` section at the bottom of the file.
+```
+
+- Finds the matching work item file in `aspec/work-items/`
+- Prompts to confirm the Docker mount scope (Git root vs CWD) if needed
+- Passes host agent credentials automatically
+- Launches a container with the configured agent
+
+**Flags**
+
+| Flag | Description |
+|------|-------------|
+| `--non-interactive` | Run the agent in print/non-interactive mode |
+| `--allow-docker` | Mount the host Docker daemon socket into the container |
+
+**Examples**
+
+```sh
+amux specs amend 0025                     # interactive agent reviews work item 0025
+amux specs amend 0025 --non-interactive   # non-interactive mode
+amux specs amend 0025 --allow-docker      # with Docker daemon access in container
 ```
 
 ---
@@ -778,7 +867,7 @@ As you type, amux shows suggestions below the command box:
 ```
 ready
   ready
-  init  ·  ready  ·  implement  ·  chat  ·  new  ·  claws  ·  status
+  init  ·  ready  ·  implement  ·  chat  ·  new  ·  specs  ·  claws  ·  status
 
 init --
   init --agent=claude  ·  init --agent=codex  ·  init --agent=opencode

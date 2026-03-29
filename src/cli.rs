@@ -88,8 +88,11 @@ pub enum Command {
         allow_docker: bool,
     },
 
-    /// Create a new work item from the template.
-    New,
+    /// Manage work item specs (create, interview, amend).
+    Specs {
+        #[command(subcommand)]
+        action: SpecsAction,
+    },
 
     /// Manage persistent background agent containers (claws agents).
     Claws {
@@ -102,6 +105,28 @@ pub enum Command {
         /// Continuously refresh the output every 3 seconds.
         #[arg(long)]
         watch: bool,
+    },
+}
+
+/// Subcommands for `amux specs`.
+#[derive(Subcommand)]
+pub enum SpecsAction {
+    /// Create a new work item from the template.
+    New {
+        /// Use interview mode: have the agent complete the work item based on a summary you provide.
+        #[arg(long)]
+        interview: bool,
+    },
+    /// Review and amend a completed work item to match the final implementation.
+    Amend {
+        /// Work item number (e.g. 0025).
+        work_item: String,
+        /// Run the agent in non-interactive (print) mode.
+        #[arg(long)]
+        non_interactive: bool,
+        /// Mount the host Docker daemon socket into the agent container.
+        #[arg(long)]
+        allow_docker: bool,
     },
 }
 
@@ -313,12 +338,6 @@ mod tests {
             Command::Implement { non_interactive, .. } => assert!(!non_interactive),
             _ => panic!("expected implement"),
         }
-    }
-
-    #[test]
-    fn new_subcommand_parsed() {
-        let cli = parse(&["amux", "new"]);
-        assert!(matches!(cli.command.unwrap(), Command::New));
     }
 
     #[test]
@@ -621,6 +640,59 @@ mod tests {
         match cli.command.unwrap() {
             Command::Claws { action } => assert!(matches!(action, ClawsAction::Chat)),
             _ => panic!("expected claws"),
+        }
+    }
+
+    #[test]
+    fn specs_new_parsed() {
+        let cli = parse(&["amux", "specs", "new"]);
+        match cli.command.unwrap() {
+            Command::Specs { action: SpecsAction::New { interview } } => assert!(!interview),
+            _ => panic!("expected specs new"),
+        }
+    }
+
+    #[test]
+    fn specs_new_interview_flag() {
+        let cli = parse(&["amux", "specs", "new", "--interview"]);
+        match cli.command.unwrap() {
+            Command::Specs { action: SpecsAction::New { interview } } => assert!(interview),
+            _ => panic!("expected specs new --interview"),
+        }
+    }
+
+    #[test]
+    fn specs_amend_parsed() {
+        let cli = parse(&["amux", "specs", "amend", "0025"]);
+        match cli.command.unwrap() {
+            Command::Specs { action: SpecsAction::Amend { work_item, non_interactive, allow_docker } } => {
+                assert_eq!(work_item, "0025");
+                assert!(!non_interactive);
+                assert!(!allow_docker);
+            }
+            _ => panic!("expected specs amend"),
+        }
+    }
+
+    #[test]
+    fn specs_amend_non_interactive_flag() {
+        let cli = parse(&["amux", "specs", "amend", "0025", "--non-interactive"]);
+        match cli.command.unwrap() {
+            Command::Specs { action: SpecsAction::Amend { non_interactive, .. } } => {
+                assert!(non_interactive);
+            }
+            _ => panic!("expected specs amend --non-interactive"),
+        }
+    }
+
+    #[test]
+    fn specs_amend_allow_docker_flag() {
+        let cli = parse(&["amux", "specs", "amend", "0025", "--allow-docker"]);
+        match cli.command.unwrap() {
+            Command::Specs { action: SpecsAction::Amend { allow_docker, .. } } => {
+                assert!(allow_docker);
+            }
+            _ => panic!("expected specs amend --allow-docker"),
         }
     }
 
