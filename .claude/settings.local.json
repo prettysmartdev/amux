@@ -21,7 +21,9 @@
       "Bash(curl -s https://docs.anthropic.com/en/docs/claude-code/settings)",
       "Bash(claude --version)",
       "Read(//usr/local/bin/**)",
-      "Bash(grep -iE \"^lsp$|\"\"lsp\"\"|lspEnabled|suppressLsp|hasLsp|disableLsp|lsp_enabled|install.*lsp|lsp.*install\")"
+      "Bash(grep -iE \"^lsp$|\"\"lsp\"\"|lspEnabled|suppressLsp|hasLsp|disableLsp|lsp_enabled|install.*lsp|lsp.*install\")",
+      "Bash(grep -rn claws_chat_container_not_running /workspace --include=*.rs)",
+      "Bash(grep -rn claws_chat /workspace --include=*.rs)"
     ]
   }
 }

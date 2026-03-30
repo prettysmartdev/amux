@@ -12,7 +12,7 @@ install: build
 	install -m 755 target/release/$(BINARY) $(INSTALL_PATH)/$(BINARY)
 
 test:
-	cargo test
+	cargo test --quiet
 
 clean:
 	cargo clean

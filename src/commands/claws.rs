@@ -264,9 +264,8 @@ pub async fn run_claws_ready(out: &OutputSink) -> Result<()> {
 
 /// Entry point for `amux claws chat` — attaches to the running nanoclaw container.
 ///
-/// If the container is not running, first checks for a stopped container and
-/// offers to restart it; if none exists (or the user declines), offers to run
-/// a fresh container. Then attaches to whichever container is now running.
+/// Errors immediately if nanoclaw is not installed or the container is not running.
+/// Use `amux claws ready` to start or restart the container.
 pub async fn run_claws_chat() -> Result<()> {
     let nanoclaw_dir = nanoclaw_path();
 
@@ -278,80 +277,7 @@ pub async fn run_claws_chat() -> Result<()> {
     let container_id = match config.nanoclaw_container_id {
         Some(ref id) if docker::is_container_running(id) => id.clone(),
         _ => {
-            // Container not running — check for a stopped one first.
-            if let Some(stopped) = docker::find_stopped_container(NANOCLAW_CONTROLLER_NAME, NANOCLAW_IMAGE_TAG) {
-                println!(
-                    "\nFound stopped container: ID={}, Name={}, Created={}",
-                    &stopped.id[..stopped.id.len().min(12)],
-                    stopped.name,
-                    stopped.created,
-                );
-                println!();
-                let restart = ask_yes_no_stdin(&format!(
-                    "Start stopped container '{}' (ID: {}, created: {})? [1=yes/2=no]: ",
-                    stopped.name,
-                    &stopped.id[..stopped.id.len().min(12)],
-                    stopped.created,
-                ))?;
-                if restart {
-                    print!("Starting stopped container... ");
-                    use std::io::Write;
-                    std::io::stdout().flush().ok();
-                    let final_container_id = match docker::start_container(&stopped.id) {
-                        Ok(()) => {
-                            if !wait_for_container(&stopped.id, 5) {
-                                bail!("Container did not start within 5 seconds.");
-                            }
-                            println!("OK");
-                            stopped.id.clone()
-                        }
-                        Err(e) => {
-                            println!("FAILED");
-                            println!();
-                            println!("Docker error: {}", e);
-                            println!();
-                            let delete_and_fresh = ask_yes_no_stdin(
-                                "Delete the stopped container and start a fresh one? [1=yes/2=no]: ",
-                            )?;
-                            if !delete_and_fresh {
-                                bail!("Container restart failed. Run 'amux claws ready' to try again.");
-                            }
-                            print!("Deleting stopped container {}... ", &stopped.id[..stopped.id.len().min(12)]);
-                            std::io::stdout().flush().ok();
-                            docker::remove_container(&stopped.id)?;
-                            println!("OK");
-                            start_fresh_nanoclaw_container_cli()?
-                        }
-                    };
-                    let mut new_config = load_nanoclaw_config().unwrap_or_default();
-                    new_config.nanoclaw_container_id = Some(final_container_id.clone());
-                    save_nanoclaw_config(&new_config)?;
-                    final_container_id
-                } else {
-                    // User declined stopped container — offer a fresh one.
-                    println!();
-                    let run_fresh = ask_yes_no_stdin(&format!(
-                        "Run a fresh '{}' container? [1=yes/2=no]: ",
-                        NANOCLAW_CONTROLLER_NAME,
-                    ))?;
-                    if !run_fresh {
-                        bail!("No container started. Run 'amux claws ready' to start the nanoclaw container.");
-                    }
-                    start_fresh_nanoclaw_container_cli()?
-                }
-            } else {
-                // No stopped container — offer a fresh one.
-                println!("\nnanoclaw container is not running.");
-                println!();
-                let run_fresh = ask_yes_no_stdin(&format!(
-                    "Run a fresh '{}' container? [1=yes/2=no]: ",
-                    NANOCLAW_CONTROLLER_NAME,
-                ))?;
-                if !run_fresh {
-                    bail!("No container started. Run 'amux claws ready' to start the nanoclaw container.");
-                }
-                start_fresh_nanoclaw_container_cli()?
-            }
+            bail!("nanoclaw container is not running. Run 'amux claws ready' to start it.");
         }
     };
 
@@ -365,42 +291,6 @@ pub async fn run_claws_chat() -> Result<()> {
     Ok(())
 }
 
-/// Start a fresh nanoclaw controller container and return its ID (CLI helper).
-fn start_fresh_nanoclaw_container_cli() -> Result<String> {
-    let nanoclaw_str = nanoclaw_path_str();
-    let cfg = load_repo_config(&nanoclaw_path()).unwrap_or_default();
-    let agent_name = cfg.agent.unwrap_or_else(|| "claude".to_string());
-    let credentials = agent_keychain_credentials(&agent_name);
-    let settings_dir = nanoclaw_settings_dir();
-    let host_settings = docker::HostSettings::prepare_to_dir(&agent_name, &settings_dir);
-
-    println!("Starting nanoclaw controller container {}...", NANOCLAW_CONTROLLER_NAME);
-    let container_id = docker::run_container_detached(
-        NANOCLAW_IMAGE_TAG,
-        &nanoclaw_str,
-        &nanoclaw_str,
-        &nanoclaw_str,
-        Some(NANOCLAW_CONTROLLER_NAME),
-        &credentials.env_vars,
-        true,
-        host_settings.as_ref(),
-    )
-    .context("Failed to start nanoclaw background container")?;
-
-    print!("Waiting for container to start... ");
-    use std::io::Write;
-    std::io::stdout().flush().ok();
-    if !wait_for_container(&container_id, 5) {
-        bail!("Container did not start within 5 seconds.");
-    }
-    println!("OK");
-
-    let mut new_config = load_nanoclaw_config().unwrap_or_default();
-    new_config.nanoclaw_container_id = Some(container_id.clone());
-    save_nanoclaw_config(&new_config)?;
-
-    Ok(container_id)
-}
 
 /// Result of a clone or move operation that may require elevated privileges.
 #[derive(Debug, PartialEq)]
