@@ -656,24 +656,24 @@ async fn new_via_sink_creates_work_item() {
 }
 
 // ---------------------------------------------------------------------------
-// 16. New command: autocomplete includes "new"
+// 16. New command: autocomplete includes "specs new"
 // ---------------------------------------------------------------------------
 
 #[test]
 fn autocomplete_includes_new_subcommand() {
     let sug = autocomplete_suggestions("");
-    assert!(sug.contains(&"new".to_string()), "Expected 'new' in suggestions");
+    assert!(sug.contains(&"specs".to_string()), "Expected 'specs' in suggestions");
 
-    let sug = autocomplete_suggestions("ne");
-    assert_eq!(sug, vec!["new"]);
+    let sug = autocomplete_suggestions("sp");
+    assert_eq!(sug, vec!["specs"]);
 }
 
 #[test]
 fn autocomplete_new_shows_hint() {
-    let sug = autocomplete_suggestions("new ");
+    let sug = autocomplete_suggestions("specs ");
     assert!(
         sug.iter().any(|s| s.contains("new")),
-        "Expected hint for 'new' command, got: {:?}",
+        "Expected hint for 'specs new' command, got: {:?}",
         sug
     );
 }

@@ -13,7 +13,10 @@
       "Bash(chmod:*)",
       "Bash(echo \"EXIT: $?\")",
       "Bash(./target/debug/deps/amux-*)",
-      "Bash(--help)"
+      "Bash(--help)",
+      "Bash(gh run:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api.github.com)"
     ]
   }
 }
