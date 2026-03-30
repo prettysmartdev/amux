@@ -17,7 +17,11 @@
       "Bash(gh run:*)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:api.github.com)",
-      "Bash(grep -n \"quit_confirm\\\\|close_tab_confirm\\\\|QuitConfirm\\\\|CloseTabConfirm\" /workspace/tests/*.rs)"
+      "Bash(grep -n \"quit_confirm\\\\|close_tab_confirm\\\\|QuitConfirm\\\\|CloseTabConfirm\" /workspace/tests/*.rs)",
+      "Bash(curl -s https://docs.anthropic.com/en/docs/claude-code/settings)",
+      "Bash(claude --version)",
+      "Read(//usr/local/bin/**)",
+      "Bash(grep -iE \"^lsp$|\"\"lsp\"\"|lspEnabled|suppressLsp|hasLsp|disableLsp|lsp_enabled|install.*lsp|lsp.*install\")"
     ]
   }
 }

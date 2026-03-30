@@ -94,13 +94,15 @@ implement 0001
 
 Launches the agent with a prompt to implement `aspec/work-items/0001-*.md`. The agent reads the spec, writes code, runs tests, and reports back — all inside the container.
 
-Create a new work item:
+### Creating and refining work items
 
 ```sh
-new
+specs new               # prompts for a type and title, creates the file
+specs new --interview   # creates the file, then opens an agent session to help fill it out
+specs amend 0001        # after implementing, have the agent update the spec to match reality
 ```
 
-Prompts for a type (Feature, Bug, Task) and title, then creates the file in `aspec/work-items/`.
+`specs new` offers four work item kinds: Feature, Bug, Task, and Enhancement. With `--interview`, the agent asks you questions and completes the spec based on your answers before any implementation starts. `specs amend` is useful for keeping specs accurate after the work is done — useful for ongoing maintenance and handoff context.
 
 ---
 
@@ -167,6 +169,17 @@ global settings are maintained without any prompting or manual configuration.
 
 Credentials are passed as environment variables only — never as mounted files.
 API key values are masked in all displayed Docker commands.
+
+---
+
+## Monitoring running agents
+
+```sh
+amux status          # one-shot snapshot of all running agent containers
+amux status --watch  # auto-refreshing dashboard (updates every 3 seconds)
+```
+
+`status` works outside the TUI. It shows every active code agent session and the nanoclaw container with CPU usage, memory, project path, and runtime.
 
 ---
 

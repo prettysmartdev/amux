@@ -173,8 +173,8 @@ impl HostSettings {
 ///
 /// Claude Code prompts the user to install language servers when it detects
 /// missing LSP support. Inside a container there is no IDE and no pre-installed
-/// language servers, so these recommendations are noise. This sets `"lsp": false`
-/// in the container's `settings.json` to suppress them.
+/// language servers, so these recommendations are noise. This sets
+/// `"lspRecommendationDisabled": true` in the container's `settings.json` to suppress them.
 fn disable_lsp_recommendations(claude_dir: &Path) -> std::io::Result<()> {
     let settings_path = claude_dir.join("settings.json");
     let mut settings: serde_json::Value = if settings_path.exists() {
@@ -184,7 +184,7 @@ fn disable_lsp_recommendations(claude_dir: &Path) -> std::io::Result<()> {
         serde_json::json!({})
     };
     if let Some(obj) = settings.as_object_mut() {
-        obj.insert("lsp".to_string(), serde_json::json!(false));
+        obj.insert("lspRecommendationDisabled".to_string(), serde_json::json!(true));
     }
     std::fs::write(&settings_path, serde_json::to_string(&settings)?)
 }

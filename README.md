@@ -59,11 +59,14 @@ sudo make install
 # 1. Initialize your repo (only once)
 amux init
 
-# 2. Open the TUI and start an agent session
+# 2. Open the TUI for multi-agent coordination
 amux
 
-# 3. Then run an amux command (starts an agent chat session)
+# 3. Starts an agent chat session
 chat
+
+# 4. Quit the agent container and then amux
+ctrl-c twice to quit agent, twice again to quit amux
 ```
 
 See the [Getting Started Guide](docs/getting-started.md) for a full walkthrough. All commands are available directly via the CLI in addition to the TUI.
@@ -134,6 +137,23 @@ The nanoclaw container:
 - Your code agent is automatically configured and authenticated with secure copies of config files and OAuth tokens from your host installation.
 - `amux` itself is a statically compiled Rust binary — memory-safe and unmodifiable by agents
 - Every Docker command is printed in full before execution so you can see exactly what runs
+
+---
+
+## Commands
+
+```sh
+amux init                        # set up a project for amux
+amux ready [--refresh]           # verify environment; refresh and rebuild Dockerfile.dev
+amux specs new [--interview]     # create a work item; --interview has the agent fill it out
+amux specs amend <nnnn>          # update a spec to match what was actually built
+amux implement <nnnn> [--plan]   # launch an agent to implement a work item
+amux chat [--plan]               # start a freeform agent session
+amux status [--watch]            # live dashboard of all running agent containers
+amux claws ready                 # check/start the persistent nanoclaw container
+```
+
+All commands work in both TUI mode (type without `amux` prefix) and command mode.
 
 ---
 
