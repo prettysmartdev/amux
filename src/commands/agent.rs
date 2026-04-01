@@ -24,6 +24,7 @@ pub async fn run_agent_with_sink(
     non_interactive: bool,
     host_settings: Option<&docker::HostSettings>,
     allow_docker: bool,
+    container_name_override: Option<String>,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let config = load_repo_config(&git_root)?;
@@ -60,6 +61,7 @@ pub async fn run_agent_with_sink(
         &env_vars,
         host_settings,
         allow_docker,
+        container_name_override.as_deref(),
     );
     out.println(format!("$ {}", docker::format_run_cmd(&display_args)));
 
@@ -77,6 +79,7 @@ pub async fn run_agent_with_sink(
             &env_vars,
             host_settings,
             allow_docker,
+            container_name_override.as_deref(),
         )
         .context("Container exited with an error")?;
         for line in output.lines() {
@@ -90,6 +93,7 @@ pub async fn run_agent_with_sink(
             &env_vars,
             host_settings,
             allow_docker,
+            container_name_override.as_deref(),
         )
         .context("Container exited with an error")?;
     }
@@ -121,6 +125,7 @@ mod tests {
             false,
             None,
             false,
+            None,
         )
         .await;
 

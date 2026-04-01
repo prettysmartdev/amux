@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod docker;
 mod tui;
+mod workflow;
 
 use anyhow::Result;
 use clap::Parser;

@@ -71,6 +71,11 @@ pub enum Command {
         /// Mount the host Docker daemon socket into the agent container.
         #[arg(long)]
         allow_docker: bool,
+
+        /// Path to a workflow Markdown file. If omitted, the work item is implemented
+        /// in a single agent run with the current prompt, unchanged.
+        #[arg(long)]
+        workflow: Option<std::path::PathBuf>,
     },
 
     /// Start a freeform chat session with the configured agent in a container.
@@ -226,6 +231,38 @@ mod tests {
         let cli = parse(&["amux", "implement", "42"]);
         match cli.command.unwrap() {
             Command::Implement { work_item, .. } => assert_eq!(work_item, "42"),
+            _ => panic!("expected implement"),
+        }
+    }
+
+    #[test]
+    fn implement_workflow_flag_some() {
+        let cli = parse(&["amux", "implement", "0001", "--workflow", "wf.md"]);
+        match cli.command.unwrap() {
+            Command::Implement { workflow, .. } => {
+                assert_eq!(workflow, Some(std::path::PathBuf::from("wf.md")));
+            }
+            _ => panic!("expected implement"),
+        }
+    }
+
+    #[test]
+    fn implement_workflow_flag_none_by_default() {
+        let cli = parse(&["amux", "implement", "0001"]);
+        match cli.command.unwrap() {
+            Command::Implement { workflow, .. } => assert!(workflow.is_none()),
+            _ => panic!("expected implement"),
+        }
+    }
+
+    #[test]
+    fn implement_workflow_with_other_flags() {
+        let cli = parse(&["amux", "implement", "0001", "--workflow", "my-wf.md", "--non-interactive"]);
+        match cli.command.unwrap() {
+            Command::Implement { workflow, non_interactive, .. } => {
+                assert!(workflow.is_some());
+                assert!(non_interactive);
+            }
             _ => panic!("expected implement"),
         }
     }

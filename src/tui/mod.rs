@@ -8,6 +8,7 @@ use crate::commands::auth::{agent_keychain_credentials, apply_auth_decision};
 use crate::commands::chat::{chat_entrypoint, chat_entrypoint_non_interactive};
 use crate::commands::implement::{
     agent_entrypoint, agent_entrypoint_non_interactive, find_work_item, parse_work_item,
+    workflow_step_entrypoint,
 };
 use crate::commands::init::find_git_root_from;
 use crate::commands::new::WorkItemKind;
@@ -18,8 +19,9 @@ use crate::config::load_repo_config;
 use crate::docker;
 use crate::tui::input::Action;
 use crate::tui::pty::{spawn_text_command, PtySession};
-use crate::tui::render::calculate_container_inner_size;
+use crate::tui::render::{calculate_container_inner_size, workflow_strip_height};
 use crate::tui::state::{App, ClawsPhase, ContainerWindowState, Dialog, PendingCommand, ReadyPhase};
+use crate::workflow::{self, StepStatus};
 use anyhow::Result;
 use crossterm::{
     event::{
@@ -147,8 +149,12 @@ where
                     for tab in app.tabs.iter_mut() {
                         if let Some(ref pty) = tab.pty {
                             if tab.container_window != ContainerWindowState::Hidden {
-                                // Resize the PTY and vt100 parser to match the container inner area.
-                                let (inner_cols, inner_rows) = calculate_container_inner_size(cols, rows);
+                                // Resize the PTY and vt100 parser to match the container inner area,
+                                // accounting for any active workflow strip that reduces exec height.
+                                let wf_strip_h = tab.workflow.as_ref()
+                                    .map(|wf| workflow_strip_height(wf))
+                                    .unwrap_or(0);
+                                let (inner_cols, inner_rows) = calculate_container_inner_size(cols, rows, wf_strip_h);
                                 pty.resize(PtySize {
                                     rows: inner_rows,
                                     cols: inner_cols,
@@ -182,6 +188,7 @@ where
         if was_running && now_done {
             check_ready_continuation(&mut app).await;
             check_claws_continuation(&mut app).await;
+            check_workflow_step_completion(&mut app).await;
         }
 
         if app.should_quit {
@@ -319,6 +326,18 @@ async fn handle_action(app: &mut App, action: Action) {
             app.active_tab_idx = new_idx;
             execute_tab_command(app, new_idx, "ready").await;
         }
+
+        Action::WorkflowAdvance => {
+            launch_next_workflow_step(app).await;
+        }
+
+        Action::WorkflowAbort => {
+            abort_workflow(app);
+        }
+
+        Action::WorkflowRetry => {
+            retry_workflow_step(app).await;
+        }
     }
 }
 
@@ -337,12 +356,29 @@ fn parse_ready_flags(parts: &[&str]) -> (bool, bool, bool, bool, bool) {
     (refresh, build, no_cache, non_interactive, allow_docker)
 }
 
-/// Parse flags from implement command parts, returning (non_interactive, plan, allow_docker).
-fn parse_implement_flags(parts: &[&str]) -> (bool, bool, bool) {
+/// Parse flags from implement command parts, returning (non_interactive, plan, allow_docker, workflow_path).
+fn parse_implement_flags(parts: &[&str]) -> (bool, bool, bool, Option<std::path::PathBuf>) {
     let non_interactive = parts.iter().any(|p| *p == "--non-interactive");
     let plan = parts.iter().any(|p| *p == "--plan");
     let allow_docker = parts.iter().any(|p| *p == "--allow-docker");
-    (non_interactive, plan, allow_docker)
+    // Accept --workflow=<path> or --workflow <path>
+    let workflow = parts
+        .iter()
+        .find_map(|p| {
+            if let Some(val) = p.strip_prefix("--workflow=") {
+                Some(std::path::PathBuf::from(val))
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            // --workflow <path> (separate token)
+            parts
+                .windows(2)
+                .find(|w| w[0] == "--workflow")
+                .map(|w| std::path::PathBuf::from(w[1]))
+        });
+    (non_interactive, plan, allow_docker, workflow)
 }
 
 /// Parse flags from chat command parts, returning (non_interactive, plan, allow_docker).
@@ -384,21 +420,22 @@ async fn execute_command(app: &mut App, cmd: &str) {
         }
 
         "implement" => {
-            let (non_interactive, plan, allow_docker) = parse_implement_flags(&parts);
-            // Filter out flags to find the work item number.
+            let (non_interactive, plan, allow_docker, workflow) = parse_implement_flags(&parts);
+            // Filter out flags (and --workflow <path>) to find the work item number.
             let work_item: u32 = match parts.iter()
                 .skip(1)
-                .find(|s| !s.starts_with("--"))
+                .filter(|s| !s.starts_with("--"))
+                .find(|s| parse_work_item(s).is_ok())
                 .and_then(|s| parse_work_item(s).ok())
             {
                 Some(n) => n,
                 None => {
                     app.active_tab_mut().input_error =
-                        Some("Usage: implement <work-item-number> [--non-interactive] [--plan] [--allow-docker]".into());
+                        Some("Usage: implement <work-item-number> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>]".into());
                     return;
                 }
             };
-            app.active_tab_mut().pending_command = PendingCommand::Implement { work_item, non_interactive, plan, allow_docker };
+            app.active_tab_mut().pending_command = PendingCommand::Implement { work_item, non_interactive, plan, allow_docker, workflow };
             show_pre_command_dialogs(app).await;
         }
 
@@ -526,8 +563,8 @@ async fn launch_pending_command(app: &mut App) {
             app.active_tab_mut().ready_opts = ReadyOptions { refresh, build, no_cache, non_interactive, allow_docker, auto_create_dockerfile: true };
             launch_ready(app).await;
         }
-        PendingCommand::Implement { work_item, non_interactive, plan, allow_docker } => {
-            launch_implement(app, work_item, non_interactive, plan, allow_docker).await;
+        PendingCommand::Implement { work_item, non_interactive, plan, allow_docker, workflow } => {
+            launch_implement(app, work_item, non_interactive, plan, allow_docker, workflow).await;
         }
         PendingCommand::Chat { non_interactive, plan, allow_docker } => {
             launch_chat(app, non_interactive, plan, allow_docker).await;
@@ -567,7 +604,8 @@ async fn launch_ready(app: &mut App) {
     let env_vars = credentials.env_vars;
 
     // Prepare host settings (sanitized config files in a temp dir).
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name);
+    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
+        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
 
     let opts = app.active_tab().ready_opts.clone();
 
@@ -713,7 +751,7 @@ fn launch_ready_audit(app: &mut App) {
 
     // Use actual terminal dimensions for the PTY.
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
+    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, 0);
     let size = PtySize {
         rows: inner_rows,
         cols: inner_cols,
@@ -794,6 +832,7 @@ fn launch_ready_audit_captured(app: &mut App) {
             &ctx.env_vars,
             host_settings.as_ref(),
             allow_docker,
+            None,
         )?;
         for line in output.lines() {
             sink.println(line);
@@ -835,7 +874,7 @@ fn launch_ready_post_audit(app: &mut App) {
 }
 
 /// Actually spawn the docker container for `implement` via PTY.
-async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, plan: bool, allow_docker: bool) {
+async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, plan: bool, allow_docker: bool, workflow_path: Option<std::path::PathBuf>) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
         Some(r) => r,
@@ -860,13 +899,74 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
     let env_vars = credentials.env_vars;
 
     // Prepare host settings (sanitized config files in a temp dir).
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name);
+    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
+        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
 
-    let entrypoint = if non_interactive {
-        agent_entrypoint_non_interactive(&agent_name, work_item, plan)
+    // If a workflow is specified, initialise/load its state and derive the step prompt.
+    let effective_entrypoint: Vec<String>;
+    let command_display: String;
+    if let Some(ref wf_path) = workflow_path {
+        // Resolve relative paths against the tab's working directory so that
+        // paths like ./aspec/workflows/implement-feature.md work as expected.
+        let resolved_wf_path: std::path::PathBuf = if wf_path.is_absolute() {
+            wf_path.clone()
+        } else {
+            tab_cwd.join(wf_path)
+        };
+        // Load or resume workflow state.
+        let wf_state = match init_workflow_tui(app, &resolved_wf_path, work_item, &git_root, non_interactive, plan) {
+            Some(s) => s,
+            None => return, // Error already pushed to output.
+        };
+        // Get the first ready step.
+        let ready = wf_state.next_ready();
+        if ready.is_empty() {
+            if wf_state.all_done() {
+                app.active_tab_mut().push_output("All workflow steps are already done.");
+            } else {
+                app.active_tab_mut().push_output("No workflow steps are ready to run.");
+            }
+            app.active_tab_mut().finish_command(0);
+            return;
+        }
+        let step_name = ready[0].clone();
+        let step_state = wf_state.get_step(&step_name).unwrap().clone();
+
+        // Load work item content for prompt substitution.
+        let work_item_content = match find_work_item(&git_root, work_item).and_then(|p| {
+            std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("{}", e))
+        }) {
+            Ok(c) => c,
+            Err(e) => {
+                app.active_tab_mut().push_output(format!("Cannot read work item: {}", e));
+                app.active_tab_mut().finish_command(1);
+                return;
+            }
+        };
+
+        let prompt = workflow::substitute_prompt(&step_state.prompt_template, work_item, &work_item_content);
+        effective_entrypoint = workflow_step_entrypoint(&agent_name, &prompt, non_interactive, plan);
+        command_display = format!("implement {:04} [step: {}]", work_item, step_name);
+
+        // Update state: mark step as Running, persist, store in tab.
+        let mut wf_state_mut = wf_state;
+        wf_state_mut.set_status(&step_name, StepStatus::Running);
+        if let Some(ref git_root_path) = app.active_tab().workflow_git_root.clone() {
+            let _ = workflow::save_workflow_state(git_root_path, &wf_state_mut);
+        }
+        app.active_tab_mut().workflow = Some(wf_state_mut);
+        app.active_tab_mut().workflow_current_step = Some(step_name);
+        app.active_tab_mut().workflow_git_root = Some(git_root.clone());
     } else {
-        agent_entrypoint(&agent_name, work_item, plan)
-    };
+        effective_entrypoint = if non_interactive {
+            agent_entrypoint_non_interactive(&agent_name, work_item, plan)
+        } else {
+            agent_entrypoint(&agent_name, work_item, plan)
+        };
+        command_display = format!("implement {:04}", work_item);
+    }
+
+    let entrypoint = effective_entrypoint;
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
     let image_tag = docker::project_image_tag(&git_root);
@@ -876,13 +976,12 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
 
     // Show the full Docker CLI command in the execution window (with masked env values).
     let display_args = if non_interactive {
-        docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker)
+        docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, None)
     } else {
         docker::build_run_args_pty_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, Some(&container_name), app.active_tab().host_settings.as_ref(), allow_docker)
     };
     let cmd_display = docker::format_run_cmd(&display_args);
 
-    let command_display = format!("implement {:04}", work_item);
     app.active_tab_mut().start_command(command_display);
 
     // If --allow-docker, check the socket and print a warning before launching.
@@ -926,6 +1025,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
                 &env_vars,
                 host_settings.as_ref(),
                 allow_docker,
+                None,
             )?;
             for line in output.lines() {
                 sink.println(line);
@@ -943,7 +1043,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
 
         // Use actual terminal dimensions for the PTY.
         let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
+        let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, 0);
         let size = PtySize {
             rows: inner_rows,
             cols: inner_cols,
@@ -990,7 +1090,8 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
     let env_vars = credentials.env_vars;
 
     // Prepare host settings (sanitized config files in a temp dir).
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name);
+    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
+        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
 
     let entrypoint = if non_interactive {
         chat_entrypoint_non_interactive(&agent_name, plan)
@@ -1006,7 +1107,7 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
 
     // Show the full Docker CLI command in the execution window (with masked env values).
     let display_args = if non_interactive {
-        docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker)
+        docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, None)
     } else {
         docker::build_run_args_pty_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, Some(&container_name), app.active_tab().host_settings.as_ref(), allow_docker)
     };
@@ -1056,6 +1157,7 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
                 &env_vars,
                 host_settings.as_ref(),
                 allow_docker,
+                None,
             )?;
             for line in output.lines() {
                 sink.println(line);
@@ -1073,7 +1175,7 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
 
         // Use actual terminal dimensions for the PTY.
         let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
+        let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, 0);
         let size = PtySize {
             rows: inner_rows,
             cols: inner_cols,
@@ -1299,7 +1401,8 @@ async fn launch_claws_ready(app: &mut App) {
     // Prepare sanitized host config (same as `chat`/`implement` auto-configuration).
     // Stored in tab.host_settings so the temp dir outlives all phases of the wizard
     // and remains valid through the subsequent PTY exec session.
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name);
+    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
+        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
     // A path-only view is moved into the closure; the actual TempDir lives in the tab.
     let closure_host_settings = app.active_tab().host_settings.as_ref().map(|hs| {
         docker::HostSettings::from_paths(hs.config_path.clone(), hs.claude_dir_path.clone())
@@ -1744,7 +1847,7 @@ async fn launch_claws_exec_audit(app: &mut App, container_id: String, ctx: claws
     let exec_str_refs: Vec<&str> = exec_args.iter().map(String::as_str).collect();
 
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
+    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, 0);
     let size = PtySize {
         rows: inner_rows,
         cols: inner_cols,
@@ -1796,7 +1899,7 @@ async fn launch_claws_exec(app: &mut App, container_id: String) {
     let exec_str_refs: Vec<&str> = exec_args.iter().map(String::as_str).collect();
 
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
+    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, 0);
     let size = PtySize {
         rows: inner_rows,
         cols: inner_cols,
@@ -1885,7 +1988,8 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
     let credentials = agent_keychain_credentials(&agent_name);
     let env_vars = credentials.env_vars;
 
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name);
+    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
+        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
 
     let entrypoint = amend_agent_entrypoint(&agent_name, work_item);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
@@ -1937,7 +2041,7 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
     let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
 
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
+    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, 0);
     let size = PtySize {
         rows: inner_rows,
         cols: inner_cols,
@@ -1986,7 +2090,8 @@ async fn launch_specs_interview_agent(
     let credentials = agent_keychain_credentials(&agent_name);
     let env_vars = credentials.env_vars;
 
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name);
+    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
+        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
 
     let entrypoint = interview_agent_entrypoint(&agent_name, work_item_number, &kind, &title, &summary);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
@@ -2038,7 +2143,7 @@ async fn launch_specs_interview_agent(
     let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
 
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows);
+    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, 0);
     let size = PtySize {
         rows: inner_rows,
         cols: inner_cols,
@@ -2076,4 +2181,265 @@ fn parse_agent_flag(parts: &[&str]) -> Option<Agent> {
             _ => None,
         }
     })
+}
+
+// ─── Multi-step workflow helpers ──────────────────────────────────────────────
+
+/// Initialise or resume workflow state for TUI mode.
+///
+/// On error, pushes a message to the active tab's output and returns `None`.
+fn init_workflow_tui(
+    app: &mut App,
+    wf_path: &std::path::Path,
+    work_item: u32,
+    git_root: &std::path::Path,
+    _non_interactive: bool,
+    _plan: bool,
+) -> Option<crate::workflow::WorkflowState> {
+    let (hash, title, steps) = match workflow::load_workflow_file(wf_path) {
+        Ok(v) => v,
+        Err(e) => {
+            app.active_tab_mut().push_output(format!("Workflow error: {}", e));
+            app.active_tab_mut().finish_command(1);
+            return None;
+        }
+    };
+
+    let workflow_name = wf_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("workflow")
+        .to_string();
+
+    let state_path = workflow::workflow_state_path(git_root, work_item, &workflow_name);
+
+    let state = if state_path.exists() {
+        match workflow::load_workflow_state(&state_path) {
+            Ok(existing) => {
+                // Hash mismatch or same hash — just try to resume.
+                if existing.workflow_hash != hash {
+                    app.active_tab_mut().push_output(
+                        "Warning: workflow file changed since last run. Restarting from beginning.".to_string(),
+                    );
+                    let _ = std::fs::remove_file(&state_path);
+                    crate::workflow::WorkflowState::new(title, steps, hash, work_item, workflow_name)
+                } else {
+                    app.active_tab_mut().push_output("Resuming previous workflow run.".to_string());
+                    existing
+                }
+            }
+            Err(_) => {
+                crate::workflow::WorkflowState::new(title, steps, hash, work_item, workflow_name)
+            }
+        }
+    } else {
+        crate::workflow::WorkflowState::new(title, steps, hash, work_item, workflow_name)
+    };
+
+    // Persist state.
+    if let Err(e) = workflow::save_workflow_state(git_root, &state) {
+        app.active_tab_mut().push_output(format!("Cannot save workflow state: {}", e));
+    }
+
+    Some(state)
+}
+
+/// Called after a command completes: if a workflow step just finished, show the
+/// confirm/error dialog for the next step.
+async fn check_workflow_step_completion(app: &mut App) {
+    let has_workflow = app.active_tab().workflow.is_some();
+    let current_step = app.active_tab().workflow_current_step.clone();
+
+    if !has_workflow || current_step.is_none() {
+        return;
+    }
+
+    let step_name = current_step.unwrap();
+    let phase = app.active_tab().phase.clone();
+
+    match phase {
+        state::ExecutionPhase::Done { .. } => {
+            // Mark step as Done.
+            if let Some(ref mut wf) = app.active_tab_mut().workflow {
+                wf.set_status(&step_name, StepStatus::Done);
+            }
+            if let (Some(wf), Some(git_root)) = (
+                app.active_tab().workflow.clone(),
+                app.active_tab().workflow_git_root.clone(),
+            ) {
+                let _ = workflow::save_workflow_state(&git_root, &wf);
+                let next_steps = wf.next_ready();
+                if wf.all_done() {
+                    app.active_tab_mut().push_output(format!(
+                        "Workflow step '{}' complete. All steps done!", step_name
+                    ));
+                    app.active_tab_mut().workflow_current_step = None;
+                    // Clean up state file.
+                    let state_path = workflow::workflow_state_path(&git_root, wf.work_item, &wf.workflow_name);
+                    let _ = std::fs::remove_file(state_path);
+                } else if next_steps.is_empty() {
+                    app.active_tab_mut().push_output(format!(
+                        "Workflow step '{}' complete but no steps are ready.", step_name
+                    ));
+                    app.active_tab_mut().workflow_current_step = None;
+                } else {
+                    app.active_tab_mut().dialog = Dialog::WorkflowStepConfirm {
+                        completed_step: step_name,
+                        next_steps,
+                    };
+                }
+            }
+        }
+        state::ExecutionPhase::Error { exit_code, .. } => {
+            // Mark step as Error.
+            let error_msg = format!("Container exited with code {}", exit_code);
+            if let Some(ref mut wf) = app.active_tab_mut().workflow {
+                wf.set_status(&step_name, StepStatus::Error(error_msg.clone()));
+            }
+            if let (Some(wf), Some(git_root)) = (
+                app.active_tab().workflow.clone(),
+                app.active_tab().workflow_git_root.clone(),
+            ) {
+                let _ = workflow::save_workflow_state(&git_root, &wf);
+            }
+            app.active_tab_mut().dialog = Dialog::WorkflowStepError {
+                failed_step: step_name,
+                error: error_msg,
+            };
+        }
+        _ => {}
+    }
+}
+
+/// Launch the next ready workflow step (called after user confirms advancing).
+async fn launch_next_workflow_step(app: &mut App) {
+    let (wf_state, git_root, work_item, agent_name, allow_docker) = {
+        let tab = app.active_tab();
+        let wf = match tab.workflow.clone() {
+            Some(w) => w,
+            None => return,
+        };
+        let git_root = match tab.workflow_git_root.clone() {
+            Some(r) => r,
+            None => return,
+        };
+        let config = load_repo_config(&git_root).unwrap_or_default();
+        let agent = config.agent.as_deref().unwrap_or("claude").to_string();
+        (wf, git_root, tab.workflow.as_ref().map(|w| w.work_item).unwrap_or(0), agent, false)
+    };
+
+    let ready = wf_state.next_ready();
+    if ready.is_empty() {
+        return;
+    }
+
+    let step_name = ready[0].clone();
+    let step_state = wf_state.get_step(&step_name).unwrap().clone();
+
+    // Load work item content.
+    let work_item_content = match find_work_item(&git_root, work_item).and_then(|p| {
+        std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("{}", e))
+    }) {
+        Ok(c) => c,
+        Err(e) => {
+            app.active_tab_mut().push_output(format!("Cannot read work item: {}", e));
+            return;
+        }
+    };
+
+    let config = load_repo_config(&git_root).unwrap_or_default();
+    let agent = config.agent.as_deref().unwrap_or("claude").to_string();
+    let credentials = agent_keychain_credentials(&agent);
+    let env_vars = credentials.env_vars;
+
+    let prompt = workflow::substitute_prompt(&step_state.prompt_template, work_item, &work_item_content);
+    let entrypoint = workflow_step_entrypoint(&agent_name, &prompt, false, false);
+    let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+
+    let image_tag = docker::project_image_tag(&git_root);
+    let container_name = docker::generate_container_name();
+
+    if app.active_tab().host_settings.is_none() {
+        app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent)
+            .or_else(|| docker::HostSettings::prepare_minimal(&agent));
+    }
+    let host_settings_ref = app.active_tab().host_settings.as_ref();
+
+    let docker_args = docker::build_run_args_pty(
+        &image_tag,
+        git_root.to_str().unwrap_or("."),
+        &entrypoint_refs,
+        &env_vars,
+        Some(&container_name),
+        host_settings_ref,
+        allow_docker,
+    );
+    let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
+
+    let command_display = format!("implement {:04} [step: {}]", work_item, step_name);
+    app.active_tab_mut().continue_command(command_display);
+    app.active_tab_mut().push_output(format!("--- Workflow step: {} ---", step_name));
+
+    let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let wf_strip_h = app.active_tab().workflow.as_ref()
+        .map(|wf| workflow_strip_height(wf))
+        .unwrap_or(0);
+    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, wf_strip_h);
+    let size = PtySize {
+        rows: inner_rows,
+        cols: inner_cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+
+    let display_name = state::agent_display_name(&agent).to_string();
+    app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
+
+    // Record container name in workflow state for persistence.
+    if let Some(ref mut wf) = app.active_tab_mut().workflow {
+        wf.set_container_id(&step_name, container_name.clone());
+    }
+
+    // Mark the step as Running and persist.
+    if let Some(ref mut wf) = app.active_tab_mut().workflow {
+        wf.set_status(&step_name, StepStatus::Running);
+    }
+    if let (Some(wf), Some(gr)) = (app.active_tab().workflow.clone(), app.active_tab().workflow_git_root.clone()) {
+        let _ = workflow::save_workflow_state(&gr, &wf);
+    }
+    app.active_tab_mut().workflow_current_step = Some(step_name);
+
+    match PtySession::spawn("docker", &docker_str_refs, size) {
+        Ok((session, pty_rx)) => {
+            app.active_tab_mut().pty = Some(session);
+            app.active_tab_mut().pty_rx = Some(pty_rx);
+            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name));
+        }
+        Err(e) => {
+            app.active_tab_mut().push_output(format!("Failed to launch container: {}", e));
+            app.active_tab_mut().finish_command(1);
+        }
+    }
+}
+
+/// Abort the current workflow: clear workflow state from tab.
+fn abort_workflow(app: &mut App) {
+    app.active_tab_mut().push_output("Workflow paused. Run again to resume.".to_string());
+    app.active_tab_mut().workflow_current_step = None;
+    // Keep `workflow` state so the user can resume later.
+}
+
+/// Retry the failed workflow step.
+async fn retry_workflow_step(app: &mut App) {
+    let step_name = app.active_tab().workflow_current_step.clone();
+    if let Some(ref step_name) = step_name {
+        if let Some(ref mut wf) = app.active_tab_mut().workflow {
+            wf.set_status(step_name, StepStatus::Pending);
+        }
+    }
+    if let (Some(wf), Some(git_root)) = (app.active_tab().workflow.clone(), app.active_tab().workflow_git_root.clone()) {
+        let _ = workflow::save_workflow_state(&git_root, &wf);
+    }
+    // Re-launch via advance.
+    launch_next_workflow_step(app).await;
 }

@@ -15,7 +15,8 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool) -> Resul
     let credentials = resolve_auth(&git_root, agent_name(&git_root)?)?;
     let config = load_repo_config(&git_root)?;
     let agent = config.agent.as_deref().unwrap_or("claude");
-    let host_settings = docker::HostSettings::prepare(agent);
+    let host_settings = docker::HostSettings::prepare(agent)
+        .or_else(|| docker::HostSettings::prepare_minimal(agent));
 
     let entrypoint = if non_interactive {
         chat_entrypoint_non_interactive(agent, plan)
@@ -32,6 +33,7 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool) -> Resul
         non_interactive,
         host_settings.as_ref(),
         allow_docker,
+        None,
     )
     .await
 }
@@ -71,6 +73,7 @@ pub async fn run_with_sink(
         non_interactive,
         host_settings,
         allow_docker,
+        None,
     )
     .await
 }

@@ -1,6 +1,7 @@
 use crate::tui::state::{
     App, TabState, ContainerWindowState, Dialog, ExecutionPhase, Focus, LastContainerSummary,
 };
+use crate::workflow::{StepStatus, WorkflowState};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -32,44 +33,56 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         && tab.last_container_summary.is_some();
     let extra_bar_height = if show_minimized_bar || show_summary { 3 } else { 0 };
 
-    let constraints = if extra_bar_height > 0 {
-        vec![
-            Constraint::Min(5),
-            Constraint::Length(extra_bar_height),
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ]
+    // Determine workflow strip height (0 if no workflow active).
+    let workflow_strip_height = if tab.workflow.is_some() {
+        workflow_strip_height(tab.workflow.as_ref().unwrap())
     } else {
-        vec![
-            Constraint::Min(5),
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ]
+        0
     };
+
+    let mut constraint_list: Vec<Constraint> = vec![Constraint::Min(5)];
+    if extra_bar_height > 0 {
+        constraint_list.push(Constraint::Length(extra_bar_height));
+    }
+    if workflow_strip_height > 0 {
+        constraint_list.push(Constraint::Length(workflow_strip_height));
+    }
+    constraint_list.push(Constraint::Length(1)); // status bar
+    constraint_list.push(Constraint::Length(3)); // command box
+    constraint_list.push(Constraint::Length(1)); // suggestions
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints(constraint_list)
         .split(main_area);
 
-    let (exec_area, status_idx, cmd_idx, suggest_idx) = if extra_bar_height > 0 {
-        (chunks[0], 2, 3, 4)
-    } else {
-        (chunks[0], 1, 2, 3)
-    };
+    let mut idx = 0usize;
+    let exec_area = chunks[idx];
+    idx += 1;
 
     draw_exec_window(frame, tab, exec_area);
 
-    if show_minimized_bar {
-        draw_minimized_container_bar(frame, tab, chunks[1]);
-    } else if show_summary {
-        draw_container_summary(frame, tab.last_container_summary.as_ref().unwrap(), chunks[1]);
+    if extra_bar_height > 0 {
+        if show_minimized_bar {
+            draw_minimized_container_bar(frame, tab, chunks[idx]);
+        } else if show_summary {
+            draw_container_summary(frame, tab.last_container_summary.as_ref().unwrap(), chunks[idx]);
+        }
+        idx += 1;
     }
 
-    draw_status_bar(frame, tab, chunks[status_idx]);
-    draw_command_box(frame, tab, chunks[cmd_idx]);
-    draw_suggestions(frame, tab, chunks[suggest_idx]);
+    if workflow_strip_height > 0 {
+        if let Some(wf) = tab.workflow.as_ref() {
+            draw_workflow_strip(frame, wf, tab.workflow_current_step.as_deref(), chunks[idx]);
+        }
+        idx += 1;
+    }
+
+    draw_status_bar(frame, tab, chunks[idx]);
+    idx += 1;
+    draw_command_box(frame, tab, chunks[idx]);
+    idx += 1;
+    draw_suggestions(frame, tab, chunks[idx]);
 
     if tab.container_window == ContainerWindowState::Maximized {
         draw_container_window(frame, tab, exec_area);
@@ -84,10 +97,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 ///
 /// This mirrors the layout used in `draw_container_window` so the vt100 parser
 /// and PTY are sized to match the actual rendered area.
-pub fn calculate_container_inner_size(term_cols: u16, term_rows: u16) -> (u16, u16) {
+///
+/// `extra_rows` accounts for additional UI strips that reduce the exec area height
+/// (e.g. the workflow status strip). Pass 0 when no extra strips are visible.
+pub fn calculate_container_inner_size(term_cols: u16, term_rows: u16, extra_rows: u16) -> (u16, u16) {
     // No sidebar. Tab bar takes 3 rows at top.
     // Fixed rows below tab bar: status(1) + cmd(3) + suggest(1) = 5.
-    let exec_height = term_rows.saturating_sub(3 + 5);
+    let exec_height = term_rows.saturating_sub(3 + 5 + extra_rows);
     // Container window: 95% of exec area, centered.
     let container_height = (exec_height * 95 / 100).max(5);
     let container_width = (term_cols * 95 / 100).max(10);
@@ -775,6 +791,24 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
                 "*".repeat(password.len()),
             ),
         ),
+        Dialog::WorkflowStepConfirm { completed_step, next_steps } => (
+            " Workflow Step Complete ",
+            format!(
+                "  Step '{}' completed successfully.\n\n  Next step(s): {}\n\n  \
+                 [Enter/y] Advance to next step  [q/n/Esc] Pause workflow  ",
+                completed_step,
+                if next_steps.is_empty() { "none".to_string() } else { next_steps.join(", ") }
+            ),
+        ),
+        Dialog::WorkflowStepError { failed_step, error } => (
+            " Workflow Step Failed ",
+            format!(
+                "  Step '{}' failed.\n  Error: {}\n\n  \
+                 [r/1] Retry step  [q/n/Esc] Pause workflow  ",
+                failed_step,
+                if error.len() > 60 { &error[..60] } else { error.as_str() }
+            ),
+        ),
         Dialog::None => return,
         // NewInterviewSummary is handled by the early return above — this arm is unreachable.
         Dialog::NewInterviewSummary { .. } => return,
@@ -956,6 +990,222 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     Rect { x, y, width: width.min(area.width), height: height.min(area.height) }
 }
 
+// ─── Workflow strip ───────────────────────────────────────────────────────────
+
+/// Compute the height in rows needed for the workflow status strip.
+/// Returns 0 if there are no parallel groups (sequential only = 1 box row = 3 rows),
+/// and up to 3 box-rows tall (9 rows max) for parallel groups.
+pub fn workflow_strip_height(wf: &WorkflowState) -> u16 {
+    let max_parallel = max_parallel_group_size(wf);
+    // Cap at 3 box-rows. Each box is 3 rows tall.
+    let rows = max_parallel.min(3) as u16;
+    rows * 3
+}
+
+/// Return the size of the largest parallel group (steps sharing same depends_on set).
+fn max_parallel_group_size(wf: &WorkflowState) -> usize {
+    use std::collections::HashMap;
+    let mut group_sizes: HashMap<Vec<String>, usize> = HashMap::new();
+    for step in &wf.steps {
+        let mut key = step.depends_on.clone();
+        key.sort();
+        *group_sizes.entry(key).or_insert(0) += 1;
+    }
+    group_sizes.values().copied().max().unwrap_or(1)
+}
+
+/// Render the workflow status strip.
+///
+/// The strip shows steps arranged left-to-right in topological order.
+/// Parallel steps (same depends_on) are stacked vertically (max 3 rows), with
+/// subsequent ones indented slightly to show they'll run sequentially.
+pub fn draw_workflow_strip(
+    frame: &mut Frame,
+    wf: &WorkflowState,
+    current_step: Option<&str>,
+    area: Rect,
+) {
+    // Layout: one column per topological "level" (unique depends_on set in order).
+    // Build ordered columns.
+    let columns = build_workflow_columns(wf);
+    if columns.is_empty() {
+        return;
+    }
+
+    let num_cols = columns.len() as u16;
+    // Distribute all available width across columns.
+    // Reserve 1 char per inter-column arrow (N-1 arrows for N columns).
+    // Each column box gets an equal share of the remaining space; the last
+    // column absorbs any remainder so the strip always fills the full width.
+    let arrow_chars = num_cols.saturating_sub(1);
+    let box_space = area.width.saturating_sub(arrow_chars);
+    let base_col_w = (box_space / num_cols).max(4);
+    // Stride = box width + 1 arrow char between columns.
+    let col_stride = base_col_w + 1;
+
+    // Render each column.
+    for (col_idx, col_steps) in columns.iter().enumerate() {
+        let col_x = area.x + col_idx as u16 * col_stride;
+        if col_x >= area.x + area.width {
+            break; // Out of space — stop rendering columns.
+        }
+
+        // Last column gets any remaining space so the strip fills the full width.
+        let this_col_w = if col_idx + 1 == columns.len() {
+            (area.x + area.width).saturating_sub(col_x)
+        } else {
+            base_col_w
+        };
+
+        let visible_rows = (area.height / 3).max(1) as usize;
+        let steps_to_show: Vec<_> = col_steps.iter().take(visible_rows).collect();
+        let hidden_count = col_steps.len().saturating_sub(visible_rows);
+
+        for (row_idx, step_name) in steps_to_show.iter().enumerate() {
+            let row_y = area.y + row_idx as u16 * 3;
+            if row_y + 3 > area.y + area.height {
+                break;
+            }
+
+            // Indent by row_idx if there are multiple steps in column (parallel group).
+            let indent = if col_steps.len() > 1 { row_idx as u16 } else { 0 };
+            let box_x = (col_x + indent).min(area.x + area.width.saturating_sub(4));
+            let box_w = this_col_w.saturating_sub(indent).max(4);
+
+            let step = wf.get_step(step_name).unwrap();
+            let is_current = current_step == Some(step_name.as_str());
+
+            let (label, style) = step_box_label_and_style(step_name, &step.status, is_current, box_w);
+
+            let box_area = Rect {
+                x: box_x,
+                y: row_y,
+                width: box_w,
+                height: 3,
+            };
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(style);
+
+            let para = Paragraph::new(label)
+                .block(block)
+                .style(style);
+            frame.render_widget(para, box_area);
+
+            // Render arrow between columns (→) in the 1-char gap after the box.
+            if col_idx + 1 < columns.len() && row_idx == 0 {
+                let arrow_x = col_x + this_col_w; // immediately after the box area
+                if arrow_x < area.x + area.width {
+                    let arrow_area = Rect { x: arrow_x, y: row_y + 1, width: 1, height: 1 };
+                    let arrow = Paragraph::new("→")
+                        .style(Style::default().fg(Color::DarkGray));
+                    frame.render_widget(arrow, arrow_area);
+                }
+            }
+        }
+
+        // Show "+ N more" if there are hidden steps.
+        if hidden_count > 0 {
+            let last_row = steps_to_show.len().saturating_sub(1);
+            let row_y = area.y + last_row as u16 * 3;
+            if row_y + 3 <= area.y + area.height {
+                let indent = last_row as u16;
+                let box_x = (col_x + indent).min(area.x + area.width.saturating_sub(4));
+                let box_w = this_col_w.saturating_sub(indent).max(4);
+                let box_area = Rect { x: box_x, y: row_y, width: box_w, height: 3 };
+                let more_label = format!("+ {} more…", hidden_count);
+                let para = Paragraph::new(more_label)
+                    .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(Color::DarkGray)))
+                    .style(Style::default().fg(Color::DarkGray));
+                frame.render_widget(para, box_area);
+            }
+        }
+    }
+}
+
+/// Build topological columns for the workflow:
+/// each column is a Vec of step names that share the same `depends_on` set,
+/// in file order.
+fn build_workflow_columns(wf: &WorkflowState) -> Vec<Vec<String>> {
+    use std::collections::HashMap;
+
+    // Map each depends_on signature (sorted deps) → column index, preserving order.
+    let mut sig_to_col: HashMap<Vec<String>, usize> = HashMap::new();
+    let mut columns: Vec<Vec<String>> = Vec::new();
+
+    // Process steps in topological order (preserved by file order for same-level steps).
+    let topo = crate::workflow::dag::topological_order(
+        &wf.steps.iter().map(|s| crate::workflow::parser::WorkflowStep {
+            name: s.name.clone(),
+            depends_on: s.depends_on.clone(),
+            prompt_template: String::new(),
+        }).collect::<Vec<_>>(),
+    );
+
+    for step_name in &topo {
+        let step = match wf.get_step(step_name) {
+            Some(s) => s,
+            None => continue,
+        };
+        let mut sig = step.depends_on.clone();
+        sig.sort();
+        let col_idx = *sig_to_col.entry(sig).or_insert_with(|| {
+            columns.push(Vec::new());
+            columns.len() - 1
+        });
+        columns[col_idx].push(step_name.clone());
+    }
+
+    columns
+}
+
+/// Return (label_text, style) for a step box.
+fn step_box_label_and_style(
+    name: &str,
+    status: &StepStatus,
+    is_current: bool,
+    box_width: u16,
+) -> (String, Style) {
+    const MAX_NAME: usize = 12;
+    let truncated_name = if name.len() > MAX_NAME {
+        format!("{}…", &name[..MAX_NAME.saturating_sub(1)])
+    } else {
+        name.to_string()
+    };
+
+    let (status_char, style) = match status {
+        StepStatus::Pending => (
+            "○",
+            Style::default().fg(Color::DarkGray),
+        ),
+        StepStatus::Running => (
+            "●",
+            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        ),
+        StepStatus::Done => (
+            "✓",
+            Style::default().fg(Color::Green),
+        ),
+        StepStatus::Error(_) => (
+            "✗",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+    };
+
+    let style = if is_current {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    };
+
+    // Fit label in box: " ● name "
+    let label = format!(" {} {} ", status_char, truncated_name);
+    (label, style)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1112,7 +1362,7 @@ mod tests {
         app.active_tab_mut().phase = ExecutionPhase::Running { command: "implement 0001".into() };
         app.active_tab_mut().focus = Focus::ExecutionWindow;
         // Use size matching what TestBackend(80,25) would produce.
-        let (inner_cols, inner_rows) = calculate_container_inner_size(80, 25);
+        let (inner_cols, inner_rows) = calculate_container_inner_size(80, 25, 0);
         app.active_tab_mut().start_container("amux-test".into(), "Claude Code".into(), inner_cols, inner_rows);
 
         // Feed data through the vt100 parser.
@@ -1172,7 +1422,7 @@ mod tests {
 
     #[test]
     fn calculate_container_inner_size_reasonable_values() {
-        let (cols, rows) = calculate_container_inner_size(80, 25);
+        let (cols, rows) = calculate_container_inner_size(80, 25, 0);
         // exec_height = 25 - 3 (tab bar) - 5 (status+cmd+suggest) = 17
         // container_height = 17 * 95 / 100 = 16
         // container_width = 80 * 95 / 100 = 76
@@ -1188,7 +1438,7 @@ mod tests {
         let mut app = new_app();
         app.active_tab_mut().phase = ExecutionPhase::Running { command: "implement 0001".into() };
         app.active_tab_mut().focus = Focus::ExecutionWindow;
-        let (inner_cols, inner_rows) = calculate_container_inner_size(100, 30);
+        let (inner_cols, inner_rows) = calculate_container_inner_size(100, 30, 0);
         app.active_tab_mut().start_container("test".into(), "Agent".into(), inner_cols, inner_rows);
 
         let backend = TestBackend::new(100, 30);
@@ -1235,7 +1485,7 @@ mod tests {
         let mut app = new_app();
         app.active_tab_mut().phase = ExecutionPhase::Running { command: "implement 0001".into() };
         app.active_tab_mut().focus = Focus::ExecutionWindow;
-        let (inner_cols, inner_rows) = calculate_container_inner_size(80, 25);
+        let (inner_cols, inner_rows) = calculate_container_inner_size(80, 25, 0);
         app.active_tab_mut().start_container("test".into(), "Agent".into(), inner_cols, inner_rows);
 
         // Feed enough data to create scrollback: write many lines to push
@@ -1293,7 +1543,7 @@ mod tests {
         let mut app = new_app();
         app.active_tab_mut().phase = ExecutionPhase::Running { command: "implement 0001".into() };
         app.active_tab_mut().focus = Focus::ExecutionWindow;
-        let (inner_cols, inner_rows) = calculate_container_inner_size(80, 25);
+        let (inner_cols, inner_rows) = calculate_container_inner_size(80, 25, 0);
         app.active_tab_mut().start_container("test".into(), "Agent".into(), inner_cols, inner_rows);
 
         // Feed data to create scrollback.
@@ -1441,6 +1691,141 @@ mod tests {
             inactive_bottom_left, "╰",
             "Inactive tab must have a bottom-left corner. Got: '{}'",
             inactive_bottom_left
+        );
+    }
+
+    #[test]
+    fn workflow_strip_renders_without_panic() {
+        use crate::workflow::{WorkflowState, WorkflowStepState, StepStatus};
+
+        let mut app = new_app();
+
+        // Build a minimal WorkflowState with three steps (plan → implement → review).
+        let steps = vec![
+            WorkflowStepState {
+                name: "plan".to_string(),
+                depends_on: vec![],
+                prompt_template: "Plan the work.".to_string(),
+                status: StepStatus::Done,
+                container_id: None,
+            },
+            WorkflowStepState {
+                name: "implement".to_string(),
+                depends_on: vec!["plan".to_string()],
+                prompt_template: "Implement it.".to_string(),
+                status: StepStatus::Running,
+                container_id: Some("abc123".to_string()),
+            },
+            WorkflowStepState {
+                name: "review".to_string(),
+                depends_on: vec!["implement".to_string()],
+                prompt_template: "Review the changes.".to_string(),
+                status: StepStatus::Pending,
+                container_id: None,
+            },
+        ];
+
+        let wf = WorkflowState {
+            title: Some("Test Workflow".to_string()),
+            steps,
+            workflow_hash: "deadbeef".to_string(),
+            work_item: 27,
+            workflow_name: "test-workflow".to_string(),
+        };
+
+        app.active_tab_mut().workflow = Some(wf);
+        app.active_tab_mut().workflow_current_step = Some("implement".to_string());
+
+        // Render — must not panic.
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        // Collect all rendered text.
+        let buf = terminal.backend().buffer();
+        let mut all_text = String::new();
+        for row in 0..30 {
+            for col in 0..80 {
+                all_text.push_str(buf[(col, row)].symbol());
+            }
+        }
+
+        // The workflow strip should contain at least one of the step names.
+        assert!(
+            all_text.contains("plan") || all_text.contains("impl") || all_text.contains("review"),
+            "Workflow strip should render step names. Buffer text: {:?}",
+            &all_text[..all_text.len().min(200)]
+        );
+    }
+
+    #[test]
+    fn workflow_strip_height_matches_parallel_groups() {
+        use crate::workflow::{WorkflowState, WorkflowStepState, StepStatus};
+
+        // Single-column workflow (linear chain): height should be 3 (1 row of boxes).
+        let linear_steps = vec![
+            WorkflowStepState {
+                name: "a".to_string(),
+                depends_on: vec![],
+                prompt_template: String::new(),
+                status: StepStatus::Pending,
+                container_id: None,
+            },
+            WorkflowStepState {
+                name: "b".to_string(),
+                depends_on: vec!["a".to_string()],
+                prompt_template: String::new(),
+                status: StepStatus::Pending,
+                container_id: None,
+            },
+        ];
+        let wf_linear = WorkflowState {
+            title: None,
+            steps: linear_steps,
+            workflow_hash: "h".to_string(),
+            work_item: 1,
+            workflow_name: "w".to_string(),
+        };
+        let h = workflow_strip_height(&wf_linear);
+        assert!(h >= 3, "Strip height for linear workflow should be at least 3. Got: {}", h);
+
+        // Parallel group (both b and c depend on a): height should accommodate stacking.
+        let parallel_steps = vec![
+            WorkflowStepState {
+                name: "a".to_string(),
+                depends_on: vec![],
+                prompt_template: String::new(),
+                status: StepStatus::Pending,
+                container_id: None,
+            },
+            WorkflowStepState {
+                name: "b".to_string(),
+                depends_on: vec!["a".to_string()],
+                prompt_template: String::new(),
+                status: StepStatus::Pending,
+                container_id: None,
+            },
+            WorkflowStepState {
+                name: "c".to_string(),
+                depends_on: vec!["a".to_string()],
+                prompt_template: String::new(),
+                status: StepStatus::Pending,
+                container_id: None,
+            },
+        ];
+        let wf_parallel = WorkflowState {
+            title: None,
+            steps: parallel_steps,
+            workflow_hash: "h".to_string(),
+            work_item: 1,
+            workflow_name: "w".to_string(),
+        };
+        let h_parallel = workflow_strip_height(&wf_parallel);
+        assert!(
+            h_parallel >= h,
+            "Strip height for parallel workflow ({}) should be >= linear ({})",
+            h_parallel,
+            h
         );
     }
 }

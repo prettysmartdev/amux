@@ -43,6 +43,7 @@ amux ready --build --no-cache
 amux implement 0001
 amux implement 0001 --plan
 amux implement 0001 --allow-docker
+amux implement 0001 --workflow aspec/workflows/implement-feature.md
 amux chat
 amux chat --plan
 amux chat --allow-docker
@@ -241,13 +242,14 @@ amux ready --refresh --allow-docker       # audit with Docker daemon access in c
 
 ---
 
-### `amux implement <NNNN> [--non-interactive] [--plan] [--allow-docker]`
+### `amux implement <NNNN> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>]`
 
 Launches the dev container to implement a work item.
 
 ```sh
 amux implement 0001    # implements aspec/work-items/0001-*.md
 amux implement 0003    # implements aspec/work-items/0003-*.md
+amux implement 0027 --workflow aspec/workflows/implement-feature.md
 ```
 
 The work item number is a 4-digit identifier (e.g. `0001`). Both `0001` and
@@ -265,6 +267,9 @@ The work item number is a 4-digit identifier (e.g. `0001`). Both `0001` and
 | `--non-interactive` | Run the agent in print/non-interactive mode |
 | `--plan` | Run the agent in plan mode (read-only, no file modifications) |
 | `--allow-docker` | Mount the host Docker daemon socket into the container (see [Docker Socket Access](#docker-socket-access)) |
+| `--workflow=<path>` | Path to a workflow Markdown file for multi-step execution (see [Workflows](workflows.md)) |
+
+When `--workflow` is provided, amux runs the work item through a series of agent steps defined in the workflow file, pausing between each step for your review. State is persisted so interrupted workflows can be resumed.
 
 **Interactive Mode (default)**
 

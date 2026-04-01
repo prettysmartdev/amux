@@ -29,7 +29,8 @@ pub async fn run(command: Command) -> Result<()> {
             non_interactive,
             plan,
             allow_docker,
-        } => implement::run(&work_item, non_interactive, plan, allow_docker).await,
+            workflow,
+        } => implement::run(&work_item, non_interactive, plan, allow_docker, workflow.as_deref()).await,
         Command::Chat { non_interactive, plan, allow_docker } => {
             chat::run(non_interactive, plan, allow_docker).await
         }

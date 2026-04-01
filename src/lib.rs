@@ -3,3 +3,4 @@ pub mod commands;
 pub mod config;
 pub mod docker;
 pub mod tui;
+pub mod workflow;

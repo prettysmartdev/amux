@@ -34,7 +34,23 @@
       "Bash(curl --version)",
       "Bash(curl -sf --max-time 5 https://api.github.com/)",
       "Bash(echo \"exit code: $?\")",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(sed -i 's/PendingCommand::Implement { work_item: 1, non_interactive: false, plan: true, allow_docker: false }/PendingCommand::Implement { work_item: 1, non_interactive: false, plan: true, allow_docker: false, workflow: None }/g' /workspace/tests/command_tui_parity.rs)",
+      "Bash(sed -i 's/PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: false }/PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: false, workflow: None }/g' /workspace/tests/command_tui_parity.rs)",
+      "Bash(sed -i 's/PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: true }/PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: true, workflow: None }/g' /workspace/tests/command_tui_parity.rs)",
+      "Bash(grep -E \"^\\(test |error|FAILED|ok$|warning.*error\\)\")",
+      "WebSearch",
+      "Bash(curl -s https://code.claude.com/docs/en/settings)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:registry.npmjs.org)",
+      "Read(//tmp/**)",
+      "Bash(npm pack:*)",
+      "Read(//root/.local/**)",
+      "Read(//root/**)",
+      "Read(//usr/local/lib/node_modules/@anthropic-ai/**)",
+      "Read(//usr/local/share/**)",
+      "Bash(grep -o '.\\\\{0,100\\\\}lspRecommendation.\\\\{0,100\\\\}')"
     ]
   }
 }

@@ -188,3 +188,4 @@ amux status --watch  # auto-refreshing dashboard (updates every 3 seconds)
 - Read the [Usage Guide](usage.md) for all commands, flags, and TUI keyboard reference
 - Use `--plan` on any session to have the agent analyse without modifying files: `amux chat --plan`
 - Use `--allow-docker` to give an agent container access to the host Docker daemon when a task requires it
+- Break complex work items into auditable phases with [Multi-Agent Workflows](workflows.md): `amux implement 0001 --workflow aspec/workflows/implement-feature.md`

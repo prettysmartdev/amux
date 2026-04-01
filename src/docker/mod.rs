@@ -167,14 +167,48 @@ impl HostSettings {
             claude_dir_path,
         }
     }
+
+    /// Creates a minimal `HostSettings` with only LSP recommendations disabled.
+    ///
+    /// Used as a fallback when the host has no `~/.claude.json` (e.g. the user has never
+    /// run Claude Code on this machine). This ensures LSP recommendation dialogs are always
+    /// suppressed inside containers, even without a full host config. Only applies to the
+    /// `claude` agent — returns `None` for all others.
+    pub fn prepare_minimal(agent: &str) -> Option<Self> {
+        if agent != "claude" {
+            return None;
+        }
+        let temp_dir = tempfile::TempDir::new().ok()?;
+        let config_path = temp_dir.path().join("claude.json");
+        // Write a minimal valid config so the bind-mount target exists.
+        std::fs::write(&config_path, "{}").ok()?;
+        let claude_dir_path = temp_dir.path().join("dot-claude");
+        std::fs::create_dir_all(&claude_dir_path).ok()?;
+        disable_lsp_recommendations(&claude_dir_path).ok()?;
+        Some(HostSettings {
+            _temp_dir: Some(temp_dir),
+            config_path,
+            claude_dir_path,
+        })
+    }
 }
+
+/// The `settings.json` key that tells Claude Code not to show LSP recommendation dialogs.
+///
+/// Confirmed empirically: after dismissing the LSP dialog inside a container,
+/// Claude Code writes this key to `~/.claude/settings.json`.
+const LSP_SETTINGS_KEY: &str = "hasShownLspRecommendation";
+
+/// The dead key written by older versions of amux — has no effect in Claude Code.
+const LSP_SETTINGS_KEY_DEAD: &str = "lspRecommendationDisabled";
 
 /// Disables LSP recommendations in the `settings.json` inside the copied claude dir.
 ///
 /// Claude Code prompts the user to install language servers when it detects
 /// missing LSP support. Inside a container there is no IDE and no pre-installed
 /// language servers, so these recommendations are noise. This sets
-/// `"lspRecommendationDisabled": true` in the container's `settings.json` to suppress them.
+/// `hasShownLspRecommendation: true` in the container's `settings.json` to suppress them,
+/// and removes the old dead key written by prior versions of amux.
 fn disable_lsp_recommendations(claude_dir: &Path) -> std::io::Result<()> {
     let settings_path = claude_dir.join("settings.json");
     let mut settings: serde_json::Value = if settings_path.exists() {
@@ -184,7 +218,8 @@ fn disable_lsp_recommendations(claude_dir: &Path) -> std::io::Result<()> {
         serde_json::json!({})
     };
     if let Some(obj) = settings.as_object_mut() {
-        obj.insert("lspRecommendationDisabled".to_string(), serde_json::json!(true));
+        obj.insert(LSP_SETTINGS_KEY.to_string(), serde_json::json!(true));
+        obj.remove(LSP_SETTINGS_KEY_DEAD);
     }
     std::fs::write(&settings_path, serde_json::to_string(&settings)?)
 }
@@ -565,6 +600,7 @@ pub fn run_container_captured(
     env_vars: &[(String, String)],
     host_settings: Option<&HostSettings>,
     allow_docker: bool,
+    container_name: Option<&str>,
 ) -> Result<(String, String)> {
     let mut args: Vec<String> = vec![
         "run".into(),
@@ -574,6 +610,11 @@ pub fn run_container_captured(
         "-w".into(),
         "/workspace".into(),
     ];
+
+    if let Some(name) = container_name {
+        args.insert(1, "--name".to_string());
+        args.insert(2, name.to_string());
+    }
 
     if let Some(settings) = host_settings {
         append_settings_mounts(&mut args, settings);
@@ -585,7 +626,7 @@ pub fn run_container_captured(
     append_entrypoint(&mut args, image, entrypoint);
 
     let cmd_line = format_run_cmd(&build_run_args_display(
-        image, host_path, entrypoint, env_vars, host_settings, allow_docker,
+        image, host_path, entrypoint, env_vars, host_settings, allow_docker, container_name,
     ));
 
     let output = Command::new("docker")
@@ -634,10 +675,11 @@ pub fn run_container(
     env_vars: &[(String, String)],
     host_settings: Option<&HostSettings>,
     allow_docker: bool,
+    container_name: Option<&str>,
 ) -> Result<String> {
-    let args = build_run_args(image, host_path, entrypoint, env_vars, host_settings, allow_docker);
+    let args = build_run_args(image, host_path, entrypoint, env_vars, host_settings, allow_docker, container_name);
     let cmd_line = format_run_cmd(&build_run_args_display(
-        image, host_path, entrypoint, env_vars, host_settings, allow_docker,
+        image, host_path, entrypoint, env_vars, host_settings, allow_docker, container_name,
     ));
 
     let status = Command::new("docker")
@@ -787,6 +829,7 @@ pub fn build_run_args(
     env_vars: &[(String, String)],
     host_settings: Option<&HostSettings>,
     allow_docker: bool,
+    container_name: Option<&str>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "run".into(),
@@ -797,6 +840,11 @@ pub fn build_run_args(
         "-w".into(),
         "/workspace".into(),
     ];
+
+    if let Some(name) = container_name {
+        args.insert(1, "--name".to_string());
+        args.insert(2, name.to_string());
+    }
 
     if let Some(settings) = host_settings {
         append_settings_mounts(&mut args, settings);
@@ -819,6 +867,7 @@ pub fn build_run_args_display(
     env_vars: &[(String, String)],
     host_settings: Option<&HostSettings>,
     allow_docker: bool,
+    container_name: Option<&str>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "run".into(),
@@ -829,6 +878,11 @@ pub fn build_run_args_display(
         "-w".into(),
         "/workspace".into(),
     ];
+
+    if let Some(name) = container_name {
+        args.insert(1, "--name".to_string());
+        args.insert(2, name.to_string());
+    }
 
     if host_settings.is_some() {
         append_settings_mounts_display(&mut args);
@@ -1328,7 +1382,7 @@ mod tests {
     #[test]
     fn run_args_include_mount_and_workdir() {
         let args =
-            build_run_args("amux-dev:latest", "/repo", &["claude", "--print", "go"], &[], None, false);
+            build_run_args("amux-dev:latest", "/repo", &["claude", "--print", "go"], &[], None, false, None);
         assert!(args.contains(&"-v".to_string()));
         assert!(args.contains(&"/repo:/workspace".to_string()));
         assert!(args.contains(&"-w".to_string()));
@@ -1339,7 +1393,7 @@ mod tests {
 
     #[test]
     fn run_args_use_rm_and_interactive() {
-        let args = build_run_args("img", "/repo", &[], &[], None, false);
+        let args = build_run_args("img", "/repo", &[], &[], None, false, None);
         assert!(args.contains(&"--rm".to_string()));
         assert!(args.contains(&"-it".to_string()));
     }
@@ -1367,7 +1421,7 @@ mod tests {
     #[test]
     fn env_vars_passed_to_run_args() {
         let env = vec![("ANTHROPIC_API_KEY".into(), "sk-test".into())];
-        let args = build_run_args("img", "/repo", &[], &env, None, false);
+        let args = build_run_args("img", "/repo", &[], &env, None, false, None);
         assert!(args.contains(&"-e".to_string()));
         assert!(args.contains(&"ANTHROPIC_API_KEY=sk-test".to_string()));
     }
@@ -1378,7 +1432,7 @@ mod tests {
             ("ANTHROPIC_API_KEY".into(), "sk-ant".into()),
             ("OPENAI_API_KEY".into(), "sk-oai".into()),
         ];
-        let args = build_run_args("img", "/repo", &[], &env, None, false);
+        let args = build_run_args("img", "/repo", &[], &env, None, false, None);
         let env_args: Vec<&String> = args
             .iter()
             .filter(|a| a.contains("_API_KEY="))
@@ -1405,7 +1459,7 @@ mod tests {
     #[test]
     fn display_args_mask_env_values() {
         let env = vec![("ANTHROPIC_API_KEY".into(), "sk-secret-key".into())];
-        let args = build_run_args_display("img", "/repo", &[], &env, None, false);
+        let args = build_run_args_display("img", "/repo", &[], &env, None, false, None);
         assert!(args.contains(&"ANTHROPIC_API_KEY=***".to_string()));
         assert!(!args.iter().any(|a| a.contains("sk-secret-key")));
     }
@@ -1451,7 +1505,7 @@ mod tests {
     #[test]
     fn no_settings_mounts_when_none() {
         let env = vec![("ANTHROPIC_API_KEY".into(), "sk-ant-oat01-test".into())];
-        let args = build_run_args("img", "/repo", &[], &env, None, false);
+        let args = build_run_args("img", "/repo", &[], &env, None, false, None);
         // Without host_settings or allow_docker, only the workspace mount should be present.
         let volume_mounts: Vec<&String> = args.iter()
             .zip(args.iter().skip(1))
@@ -1477,7 +1531,7 @@ mod tests {
             claude_dir_path: claude_dir_path.clone(),
         };
 
-        let args = build_run_args("img", "/repo", &["claude", "--print", "hi"], &[], Some(&hs), false);
+        let args = build_run_args("img", "/repo", &["claude", "--print", "hi"], &[], Some(&hs), false, None);
 
         // Should have bind mounts for .claude.json and .claude/
         let volume_mounts: Vec<&String> = args.windows(2)
@@ -1512,7 +1566,7 @@ mod tests {
             claude_dir_path,
         };
 
-        let args = build_run_args_display("img", "/repo", &["claude"], &[], Some(&hs), false);
+        let args = build_run_args_display("img", "/repo", &["claude"], &[], Some(&hs), false, None);
         assert!(args.iter().any(|a| a == "<settings>:/root/.claude.json"));
         assert!(args.iter().any(|a| a == "<settings>:/root/.claude"));
         assert!(!args.iter().any(|a| a.contains("secret")));
@@ -1595,7 +1649,7 @@ mod tests {
 
     #[test]
     fn format_run_cmd_produces_valid_string() {
-        let args = build_run_args("img", "/repo", &["echo", "hello"], &[], None, false);
+        let args = build_run_args("img", "/repo", &["echo", "hello"], &[], None, false, None);
         let cmd = format_run_cmd(&args);
         assert!(cmd.starts_with("docker run"));
         assert!(cmd.contains("/repo:/workspace"));
@@ -1670,7 +1724,7 @@ mod tests {
 
     #[test]
     fn allow_docker_adds_socket_mount_to_run_args() {
-        let args = build_run_args("img", "/repo", &[], &[], None, true);
+        let args = build_run_args("img", "/repo", &[], &[], None, true, None);
         // The docker socket should appear as a volume mount.
         let socket_path = docker_socket_path().to_string_lossy().to_string();
         let has_socket_mount = args.windows(2)
@@ -1681,7 +1735,7 @@ mod tests {
 
     #[test]
     fn no_allow_docker_does_not_add_socket_mount() {
-        let args = build_run_args("img", "/repo", &[], &[], None, false);
+        let args = build_run_args("img", "/repo", &[], &[], None, false, None);
         let socket_path = docker_socket_path().to_string_lossy().to_string();
         let has_socket_mount = args.iter().any(|a| a.contains(&socket_path));
         assert!(!has_socket_mount, "Without allow_docker, socket should not be mounted: {:?}", args);
@@ -1698,7 +1752,7 @@ mod tests {
 
     #[test]
     fn allow_docker_adds_socket_mount_to_display_args() {
-        let args = build_run_args_display("img", "/repo", &[], &[], None, true);
+        let args = build_run_args_display("img", "/repo", &[], &[], None, true, None);
         let socket_path = docker_socket_path().to_string_lossy().to_string();
         let has_socket = args.iter().any(|a| a.contains(&socket_path));
         #[cfg(not(target_os = "windows"))]
@@ -1780,7 +1834,7 @@ mod tests {
 
     #[test]
     fn allow_docker_socket_mount_appears_after_workspace_mount() {
-        let args = build_run_args("img", "/repo", &[], &[], None, true);
+        let args = build_run_args("img", "/repo", &[], &[], None, true, None);
         let socket_path = docker_socket_path().to_string_lossy().to_string();
 
         #[cfg(not(target_os = "windows"))]
@@ -1794,5 +1848,143 @@ mod tests {
             assert!(socket_pos.unwrap() > workspace_pos.unwrap(),
                 "Socket mount should appear after workspace mount");
         }
+    }
+
+    // --- disable_lsp_recommendations tests ---
+
+    #[test]
+    fn disable_lsp_recommendations_creates_file_with_correct_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // No settings.json exists yet.
+        disable_lsp_recommendations(dir.path()).unwrap();
+
+        let settings_path = dir.path().join("settings.json");
+        assert!(settings_path.exists(), "settings.json should be created");
+
+        let raw = std::fs::read_to_string(&settings_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            parsed[LSP_SETTINGS_KEY].as_bool(),
+            Some(true),
+            "correct LSP key should be true"
+        );
+        assert!(
+            parsed.get(LSP_SETTINGS_KEY_DEAD).is_none(),
+            "dead key '{}' must not be written",
+            LSP_SETTINGS_KEY_DEAD
+        );
+    }
+
+    #[test]
+    fn disable_lsp_recommendations_preserves_existing_settings() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        std::fs::write(&settings_path, r#"{"theme":"dark"}"#).unwrap();
+
+        disable_lsp_recommendations(dir.path()).unwrap();
+
+        let raw = std::fs::read_to_string(&settings_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            parsed["theme"].as_str(),
+            Some("dark"),
+            "pre-existing 'theme' key should be preserved"
+        );
+        assert_eq!(
+            parsed[LSP_SETTINGS_KEY].as_bool(),
+            Some(true),
+            "LSP key should be added alongside existing settings"
+        );
+    }
+
+    #[test]
+    fn disable_lsp_recommendations_overwrites_false() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let initial = serde_json::json!({ LSP_SETTINGS_KEY: false });
+        std::fs::write(&settings_path, serde_json::to_string(&initial).unwrap()).unwrap();
+
+        disable_lsp_recommendations(dir.path()).unwrap();
+
+        let raw = std::fs::read_to_string(&settings_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            parsed[LSP_SETTINGS_KEY].as_bool(),
+            Some(true),
+            "LSP key set to false must be overwritten to true"
+        );
+    }
+
+    #[test]
+    fn disable_lsp_recommendations_handles_invalid_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        std::fs::write(&settings_path, "not json").unwrap();
+
+        let result = disable_lsp_recommendations(dir.path());
+        assert!(result.is_ok(), "function should succeed even with invalid JSON input");
+
+        let raw = std::fs::read_to_string(&settings_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw)
+            .expect("resulting file must contain valid JSON");
+        assert_eq!(
+            parsed[LSP_SETTINGS_KEY].as_bool(),
+            Some(true),
+            "LSP key should be present in the recovered settings"
+        );
+    }
+
+    #[test]
+    fn prepare_minimal_returns_valid_host_settings() {
+        let hs = HostSettings::prepare_minimal("claude");
+        let hs = hs.expect("prepare_minimal should return Some for the claude agent");
+
+        assert!(hs.config_path.exists(), "config_path should exist");
+        let raw = std::fs::read_to_string(&hs.config_path).unwrap();
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .expect("config_path should contain valid JSON");
+
+        assert!(hs.claude_dir_path.is_dir(), "claude_dir_path should be a directory");
+
+        let settings_path = hs.claude_dir_path.join("settings.json");
+        assert!(settings_path.exists(), "settings.json should exist inside claude_dir_path");
+        let raw = std::fs::read_to_string(&settings_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed[LSP_SETTINGS_KEY].as_bool(),
+            Some(true),
+            "settings.json should have LSP key set to true"
+        );
+    }
+
+    #[test]
+    fn host_settings_lsp_key_present_after_prepare() {
+        // Dev-machine gated: only runs when ~/.claude.json exists.
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => return,
+        };
+        if !home.join(".claude.json").exists() {
+            return;
+        }
+
+        let hs = match HostSettings::prepare("claude") {
+            Some(h) => h,
+            None => return,
+        };
+
+        let settings_path = hs.claude_dir_path.join("settings.json");
+        assert!(settings_path.exists(), "settings.json should exist in claude_dir_path");
+
+        let raw = std::fs::read_to_string(&settings_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed[LSP_SETTINGS_KEY].as_bool(),
+            Some(true),
+            "LSP key should be true after prepare()"
+        );
     }
 }

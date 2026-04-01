@@ -338,7 +338,7 @@ fn autocomplete_implement_shows_non_interactive_flag() {
 #[test]
 fn agent_env_vars_passed_to_container() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-test".into())];
-    let args = amux::docker::build_run_args("img", "/repo", &[], &env, None, false);
+    let args = amux::docker::build_run_args("img", "/repo", &[], &env, None, false, None);
     assert!(args.contains(&"-e".to_string()));
     assert!(args.contains(&"ANTHROPIC_API_KEY=sk-test".to_string()));
 }
@@ -346,7 +346,7 @@ fn agent_env_vars_passed_to_container() {
 #[test]
 fn display_args_mask_env_var_values() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-secret".into())];
-    let args = amux::docker::build_run_args_display("img", "/repo", &[], &env, None, false);
+    let args = amux::docker::build_run_args_display("img", "/repo", &[], &env, None, false, None);
     assert!(
         args.contains(&"ANTHROPIC_API_KEY=***".to_string()),
         "Display args must mask env var values, got: {:?}",
@@ -919,7 +919,7 @@ fn agent_credentials_default_is_empty() {
 #[test]
 fn docker_args_without_settings_has_workspace_mount_only() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-ant-oat01-test".into())];
-    let args = amux::docker::build_run_args("img", "/repo", &[], &env, None, false);
+    let args = amux::docker::build_run_args("img", "/repo", &[], &env, None, false, None);
     // Without host_settings or allow_docker, only the workspace mount should be present.
     let volume_mounts: Vec<&String> = args.windows(2)
         .filter(|w| w[0] == "-v")
@@ -937,7 +937,7 @@ fn docker_args_without_settings_has_workspace_mount_only() {
 #[test]
 fn docker_display_args_mask_secrets() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-ant-oat01-secret".into())];
-    let args = amux::docker::build_run_args_display("img", "/repo", &[], &env, None, false);
+    let args = amux::docker::build_run_args_display("img", "/repo", &[], &env, None, false, None);
     assert!(args.contains(&"ANTHROPIC_API_KEY=***".to_string()), "API key should be masked");
     assert!(!args.iter().any(|a| a.contains("sk-ant-oat01-secret")), "Secret must not appear");
 }
@@ -1027,8 +1027,8 @@ fn chat_and_implement_share_docker_args() {
     let chat_ep_refs: Vec<&str> = chat_ep.iter().map(String::as_str).collect();
     let impl_ep_refs: Vec<&str> = impl_ep.iter().map(String::as_str).collect();
 
-    let chat_args = amux::docker::build_run_args("img", "/repo", &chat_ep_refs, &[], None, false);
-    let impl_args = amux::docker::build_run_args("img", "/repo", &impl_ep_refs, &[], None, false);
+    let chat_args = amux::docker::build_run_args("img", "/repo", &chat_ep_refs, &[], None, false, None);
+    let impl_args = amux::docker::build_run_args("img", "/repo", &impl_ep_refs, &[], None, false, None);
 
     // Both should start with the same Docker flags.
     assert_eq!(chat_args[0], impl_args[0]); // "run"
@@ -1438,9 +1438,9 @@ fn pending_command_chat_plan_field() {
 fn pending_command_implement_plan_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Implement { work_item: 1, non_interactive: false, plan: true, allow_docker: false };
-    assert_eq!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: true, allow_docker: false });
-    assert_ne!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: false });
+    let cmd = PendingCommand::Implement { work_item: 1, non_interactive: false, plan: true, allow_docker: false, workflow: None };
+    assert_eq!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: true, allow_docker: false, workflow: None });
+    assert_ne!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: false, workflow: None });
 }
 
 // ---------------------------------------------------------------------------
@@ -1619,9 +1619,9 @@ fn pending_command_chat_allow_docker_field() {
 fn pending_command_implement_allow_docker_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: true };
-    assert_eq!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: true });
-    assert_ne!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: false });
+    let cmd = PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: true, workflow: None };
+    assert_eq!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: true, workflow: None });
+    assert_ne!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: false, workflow: None });
 }
 
 #[test]
@@ -1651,6 +1651,7 @@ fn allow_docker_adds_socket_mount_to_implement_run_args() {
         &[],
         None,
         true, // allow_docker
+        None,
     );
 
     #[cfg(not(target_os = "windows"))]
@@ -1679,6 +1680,7 @@ fn no_allow_docker_omits_socket_mount_from_implement_run_args() {
         &[],
         None,
         false, // allow_docker
+        None,
     );
 
     let joined = args.join(" ");
@@ -2289,4 +2291,116 @@ fn claws_audit_ctx_carries_prompt_via_audit_entrypoint() {
             args
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workflow state tests
+// ---------------------------------------------------------------------------
+
+use amux::workflow::{
+    StepStatus as WfStepStatus, WorkflowState,
+};
+
+#[test]
+fn workflow_resume_loads_correct_ready_steps() {
+    use amux::workflow::WorkflowStepState;
+    // Build a two-step workflow state: step "plan" Done, step "implement" Pending (depends on plan).
+    let steps = vec![
+        WorkflowStepState {
+            name: "plan".to_string(),
+            depends_on: vec![],
+            prompt_template: "Plan the work.".to_string(),
+            status: WfStepStatus::Done,
+            container_id: Some("amux-plan-container".to_string()),
+        },
+        WorkflowStepState {
+            name: "implement".to_string(),
+            depends_on: vec!["plan".to_string()],
+            prompt_template: "Implement the work.".to_string(),
+            status: WfStepStatus::Pending,
+            container_id: None,
+        },
+    ];
+    let wf = WorkflowState {
+        title: None,
+        work_item: 27,
+        workflow_name: "test-workflow".to_string(),
+        workflow_hash: "abc123".to_string(),
+        steps,
+    };
+
+    let ready = wf.next_ready();
+    assert_eq!(ready, vec!["implement".to_string()]);
+    assert!(!wf.all_done());
+}
+
+#[test]
+fn workflow_state_file_removed_on_completion() {
+    use amux::workflow::{save_workflow_state, load_workflow_state, workflow_state_path, WorkflowStepState};
+
+    let tmp = TempDir::new().unwrap();
+    let git_root = tmp.path().to_path_buf();
+    // Create .amux/workflows dir structure.
+    std::fs::create_dir_all(git_root.join(".amux").join("workflows")).unwrap();
+
+    let steps = vec![
+        WorkflowStepState {
+            name: "plan".to_string(),
+            depends_on: vec![],
+            prompt_template: "Do the plan.".to_string(),
+            status: WfStepStatus::Done,
+            container_id: Some("amux-abc".to_string()),
+        },
+    ];
+    let wf = WorkflowState {
+        title: None,
+        work_item: 27,
+        workflow_name: "test-wf".to_string(),
+        workflow_hash: "deadbeef".to_string(),
+        steps,
+    };
+
+    // Save state.
+    save_workflow_state(&git_root, &wf).unwrap();
+
+    // Verify it was saved.
+    let state_path = workflow_state_path(&git_root, 27, "test-wf");
+    let loaded = load_workflow_state(&state_path);
+    assert!(loaded.is_ok(), "State should be loadable after save");
+
+    // Remove the file (simulating workflow completion).
+    std::fs::remove_file(&state_path).unwrap();
+
+    // Verify it's gone.
+    let after = load_workflow_state(&state_path);
+    assert!(after.is_err(), "State file should be gone after removal");
+}
+
+#[test]
+fn workflow_set_container_id_overwrites_on_retry() {
+    use amux::workflow::WorkflowStepState;
+
+    let steps = vec![
+        WorkflowStepState {
+            name: "plan".to_string(),
+            depends_on: vec![],
+            prompt_template: "Plan.".to_string(),
+            status: WfStepStatus::Pending,
+            container_id: None,
+        },
+    ];
+    let mut wf = WorkflowState {
+        title: None,
+        work_item: 27,
+        workflow_name: "test-wf".to_string(),
+        workflow_hash: "deadbeef".to_string(),
+        steps,
+    };
+
+    wf.set_container_id("plan", "amux-first-run".to_string());
+    assert_eq!(wf.get_step("plan").unwrap().container_id.as_deref(), Some("amux-first-run"));
+
+    // Simulate retry: overwrite with new container ID.
+    wf.set_container_id("plan", "amux-second-run".to_string());
+    assert_eq!(wf.get_step("plan").unwrap().container_id.as_deref(), Some("amux-second-run"));
 }

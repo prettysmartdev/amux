@@ -50,6 +50,12 @@ pub enum Action {
     SwitchTabRight,
     CloseCurrentTab,
     NewTabDirectoryChosen(PathBuf),
+    /// Workflow: advance to the next step.
+    WorkflowAdvance,
+    /// Workflow: abort the current workflow run.
+    WorkflowAbort,
+    /// Workflow: retry the failed step.
+    WorkflowRetry,
 }
 
 /// Dispatch a key press to the correct handler based on application state.
@@ -104,6 +110,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         Dialog::ClawsReadySudoConfirm { password } => {
             return handle_claws_sudo_confirm(app.active_tab_mut(), key, password)
+        }
+        Dialog::WorkflowStepConfirm { completed_step, next_steps } => {
+            return handle_workflow_step_confirm(app.active_tab_mut(), key, completed_step, next_steps)
+        }
+        Dialog::WorkflowStepError { failed_step, error } => {
+            return handle_workflow_step_error(app.active_tab_mut(), key, failed_step, error)
         }
         Dialog::None => {}
     }
@@ -850,6 +862,48 @@ fn handle_claws_sudo_confirm(tab: &mut TabState, key: KeyEvent, mut password: St
     Action::None
 }
 
+// --- Workflow dialog handlers ---
+
+fn handle_workflow_step_confirm(
+    tab: &mut TabState,
+    key: KeyEvent,
+    _completed_step: String,
+    _next_steps: Vec<String>,
+) -> Action {
+    match key.code {
+        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
+            tab.dialog = Dialog::None;
+            Action::WorkflowAdvance
+        }
+        KeyCode::Char('q') | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2')
+        | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::WorkflowAbort
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_workflow_step_error(
+    tab: &mut TabState,
+    key: KeyEvent,
+    _failed_step: String,
+    _error: String,
+) -> Action {
+    match key.code {
+        KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('1') => {
+            tab.dialog = Dialog::None;
+            Action::WorkflowRetry
+        }
+        KeyCode::Char('q') | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2')
+        | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::WorkflowAbort
+        }
+        _ => Action::None,
+    }
+}
+
 // --- Autocomplete ---
 
 const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "specs", "claws", "status"];
@@ -900,6 +954,7 @@ fn flag_suggestions_for(cmd: &str, _typed: &str) -> Vec<String> {
             "implement <NNNN> --non-interactive".into(),
             "implement <NNNN> --plan".into(),
             "implement <NNNN> --allow-docker".into(),
+            "implement <NNNN> --workflow aspec/workflows/implement-feature.md".into(),
         ],
         "chat" => vec![
             "chat  (start a freeform agent session)".into(),

@@ -273,6 +273,12 @@ into a temporary directory. These are mounted at `/root/.claude.json:ro` and
 `/root/.claude:ro`. The temp directory is cleaned up automatically when the
 `HostSettings` struct is dropped (after the container exits).
 
+When the host has no `~/.claude.json` (first-time users, CI machines),
+`HostSettings::prepare()` returns `None`. In this case, callers fall back to
+`HostSettings::prepare_minimal()`, which creates a settings-only mount with
+LSP suppression but no auth forwarding. This guarantees that LSP recommendation
+dialogs are always suppressed regardless of whether the host has a Claude config.
+
 Authentication is handled entirely via the `CLAUDE_CODE_OAUTH_TOKEN` environment
 variable — the host settings mount provides agent configuration (onboarding
 state, model preferences, plugins) without interfering with auth.
@@ -403,6 +409,62 @@ In TUI mode, `ReadyPhase` tracks which phase is active. When a phase completes,
 
 Image tags are project-specific (`amux-{projectname}:latest`) derived from the
 Git root folder name via `docker::project_image_tag()`.
+
+### Host Settings Injection
+
+`docker::HostSettings` encapsulates the preparation and lifetime of the
+sanitized Claude configuration that is bind-mounted into every agent container.
+
+```
+~/.claude.json          ──sanitize──► temp/claude.json       (oauthAccount removed,
+~/.claude/              ──filter──►  temp/dot-claude/         /workspace trust added,
+                                         settings.json        LSP suppression applied)
+                                         (denylist applied)
+```
+
+**Sanitization steps performed by `HostSettings::prepare()`:**
+
+1. Read `~/.claude.json`; strip `oauthAccount` (OAuth tokens live in the
+   macOS keychain, not in this file, but the field references the account and
+   can produce broken state inside the container).
+2. Inject `/workspace` project trust so Claude Code does not show the
+   "do you trust this project?" dialog inside the container.
+3. Copy `~/.claude/` into a temp directory with a denylist filter that excludes
+   large, host-specific, or irrelevant entries (`projects/`, `sessions/`,
+   `history.jsonl`, `telemetry/`, etc.).
+4. Call `disable_lsp_recommendations()` to write the correct suppression key
+   into `settings.json`, preventing LSP installation dialogs inside the container
+   (containers have no IDE and no pre-installed language servers).
+
+**LSP recommendation suppression (`disable_lsp_recommendations`):**
+
+Reads the existing `settings.json` (or starts from `{}`), merges the LSP
+suppression key, and writes the result back. Existing settings keys are
+preserved. If `settings.json` contains invalid JSON, the function falls back to
+`{}` so that the container launch is never blocked.
+
+**Fallback when host has no `~/.claude.json` (`HostSettings::prepare_minimal`):**
+
+`prepare()` returns `None` when the host has no `~/.claude.json` (first-time
+users, CI machines). Callers use `or_else(|| HostSettings::prepare_minimal())`
+to ensure a minimal settings mount is always created. `prepare_minimal()` skips
+auth and config forwarding but still applies LSP suppression, guaranteeing that
+LSP dialogs are suppressed even on machines where Claude has never been used.
+
+**Lifetime management:**
+
+`HostSettings` holds a `tempfile::TempDir` (RAII). The temp directory — and all
+bind-mounted files — is automatically deleted when `HostSettings` is dropped,
+which occurs after the container exits. `prepare_to_dir` writes into a
+caller-supplied stable directory instead so that bind-mount sources survive
+process restarts (used by the TUI's persistent session path).
+
+**Denylist (`CLAUDE_DIR_DENYLIST`):**
+
+Top-level `~/.claude/` entries skipped during copy:
+`projects`, `sessions`, `session-env`, `debug`, `file-history`,
+`history.jsonl`, `telemetry`, `downloads`, `ide`, `shell-snapshots`,
+`paste-cache`.
 
 ### Agent Credential Passing
 
@@ -576,6 +638,7 @@ without them.
 | Unit — container input | `tui::input::tests` | Key handling in maximized/minimized/hidden states |
 | Unit — docker build streaming | `docker::tests` | Incremental line delivery, stderr capture, failure handling |
 | Unit — docker stats | `docker::tests` | Stats parsing, container name generation |
+| Unit — host settings / LSP suppression | `docker::tests` | `disable_lsp_recommendations` file creation, key merging, invalid-JSON fallback; `prepare_minimal` returns valid settings with LSP key |
 | Unit — PTY | `tui::pty::tests` | Real `echo` and `sh -c 'exit 42'` processes |
 | Unit — ready | `commands::ready::tests` | Summary table, interactive notice, options, entrypoints |
 | Unit — implement | `commands::implement::tests` | Entrypoints (interactive + non-interactive) |

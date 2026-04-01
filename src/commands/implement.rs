@@ -4,8 +4,9 @@ use crate::commands::init::find_git_root;
 use crate::commands::output::OutputSink;
 use crate::config::load_repo_config;
 use crate::docker;
+use crate::workflow::{self, StepStatus, WorkflowState};
 use anyhow::{bail, Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Parse a work item string like "0001" or "1" into a u32.
 pub fn parse_work_item(s: &str) -> Result<u32> {
@@ -14,7 +15,13 @@ pub fn parse_work_item(s: &str) -> Result<u32> {
 }
 
 /// Command-mode entry point.
-pub async fn run(work_item_str: &str, non_interactive: bool, plan: bool, allow_docker: bool) -> Result<()> {
+pub async fn run(
+    work_item_str: &str,
+    non_interactive: bool,
+    plan: bool,
+    allow_docker: bool,
+    workflow_path: Option<&Path>,
+) -> Result<()> {
     let work_item = parse_work_item(work_item_str)?;
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
@@ -22,6 +29,29 @@ pub async fn run(work_item_str: &str, non_interactive: bool, plan: bool, allow_d
     let config = load_repo_config(&git_root)?;
     let agent = config.agent.as_deref().unwrap_or("claude");
     let host_settings = docker::HostSettings::prepare(agent);
+
+    if let Some(wf_path) = workflow_path {
+        // Resolve relative paths against the process's working directory so that
+        // paths like ./aspec/workflows/implement-feature.md work as expected.
+        let resolved_wf: PathBuf = if wf_path.is_absolute() {
+            wf_path.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| git_root.clone()).join(wf_path)
+        };
+        return run_workflow(
+            work_item,
+            &resolved_wf,
+            &git_root,
+            mount_path,
+            credentials.env_vars,
+            agent,
+            host_settings,
+            non_interactive,
+            plan,
+            allow_docker,
+        )
+        .await;
+    }
 
     let entrypoint = if non_interactive {
         agent_entrypoint_non_interactive(agent, work_item, plan)
@@ -46,6 +76,7 @@ pub async fn run(work_item_str: &str, non_interactive: bool, plan: bool, allow_d
         non_interactive,
         host_settings.as_ref(),
         allow_docker,
+        None,
     )
     .await
 }
@@ -95,6 +126,7 @@ pub async fn run_with_sink(
         non_interactive,
         host_settings,
         allow_docker,
+        None,
     )
     .await
 }
@@ -219,6 +251,20 @@ pub fn agent_entrypoint_non_interactive(agent: &str, work_item: u32, plan: bool)
     args
 }
 
+/// Build an agent entrypoint for a workflow step using a custom prompt.
+pub fn workflow_step_entrypoint(agent: &str, prompt: &str, non_interactive: bool, plan: bool) -> Vec<String> {
+    let mut args = match (agent, non_interactive) {
+        ("claude", true) => vec!["claude".to_string(), "-p".to_string(), prompt.to_string()],
+        ("claude", false) => vec!["claude".to_string(), prompt.to_string()],
+        ("codex", true) => vec!["codex".to_string(), "--quiet".to_string(), prompt.to_string()],
+        ("codex", false) => vec!["codex".to_string(), prompt.to_string()],
+        ("opencode", _) => vec!["opencode".to_string(), "run".to_string(), prompt.to_string()],
+        (a, _) => vec![a.to_string(), prompt.to_string()],
+    };
+    append_plan_flags(&mut args, agent, plan);
+    args
+}
+
 /// Append agent-specific plan mode flags to the argument list.
 ///
 /// - Claude: `--permission-mode plan`
@@ -240,6 +286,260 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
         // Opencode and unknown agents have no plan mode.
         _ => {}
     }
+}
+
+// ─── Workflow command-mode runner ────────────────────────────────────────────
+
+/// Run a multi-step workflow in command mode (with stdin prompts between steps).
+///
+/// Steps are executed sequentially in the order they become ready (topological order).
+/// After each step the user is prompted to advance or abort.
+/// State is persisted to JSON so the workflow can be resumed after an interruption.
+#[allow(clippy::too_many_arguments)]
+async fn run_workflow(
+    work_item: u32,
+    workflow_path: &Path,
+    git_root: &Path,
+    mount_path: PathBuf,
+    env_vars: Vec<(String, String)>,
+    agent: &str,
+    host_settings: Option<docker::HostSettings>,
+    non_interactive: bool,
+    plan: bool,
+    allow_docker: bool,
+) -> Result<()> {
+    use std::io::{BufRead, Write};
+
+    // Load and validate the workflow file.
+    let (hash, title, steps) = workflow::load_workflow_file(workflow_path)?;
+
+    let workflow_name = workflow_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("workflow")
+        .to_string();
+
+    // Check for an existing state file.
+    let state_path = workflow::workflow_state_path(git_root, work_item, &workflow_name);
+
+    let mut state = if state_path.exists() {
+        let existing = workflow::load_workflow_state(&state_path)?;
+        resolve_resume_or_restart(existing, &hash, &steps, work_item, &workflow_name, &state_path)?
+    } else {
+        WorkflowState::new(title.clone(), steps.clone(), hash.clone(), work_item, workflow_name.clone())
+    };
+
+    // Persist initial state.
+    workflow::save_workflow_state(git_root, &state)?;
+
+    let title_display = state
+        .title
+        .clone()
+        .unwrap_or_else(|| "Workflow".to_string());
+    println!("\nRunning workflow: {}", title_display);
+    println!("Work item: {:04}", work_item);
+    println!("Steps: {}", state.steps.len());
+
+    // Load work item content for prompt substitution.
+    let work_item_path = find_work_item(&PathBuf::from(git_root), work_item)?;
+    let work_item_content = std::fs::read_to_string(&work_item_path)
+        .with_context(|| format!("Cannot read work item: {}", work_item_path.display()))?;
+
+    // Handle any previously Running steps (from an interrupted run).
+    let interrupted = state.interrupted_running_steps();
+    for step_name in interrupted {
+        println!("\nStep '{}' was running when the previous session ended.", step_name);
+        print!("Start it over (s) or skip to next step (n)? [s/n]: ");
+        std::io::stdout().flush()?;
+        let stdin = std::io::stdin();
+        let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+        if answer.trim().eq_ignore_ascii_case("n") {
+            state.set_status(&step_name, StepStatus::Done);
+        } else {
+            state.set_status(&step_name, StepStatus::Pending);
+        }
+        workflow::save_workflow_state(git_root, &state)?;
+    }
+
+    // Main workflow loop.
+    loop {
+        let ready = state.next_ready();
+
+        if ready.is_empty() {
+            if state.all_done() {
+                println!("\nAll workflow steps completed successfully.");
+                let _ = std::fs::remove_file(&state_path);
+                break;
+            } else {
+                // Some steps errored — nothing left to do automatically.
+                println!("\nNo steps are ready to run. Check for errors above.");
+                break;
+            }
+        }
+
+        // Execute the first ready step (sequential execution).
+        let step_name = ready[0].clone();
+        let step_state = state
+            .get_step(&step_name)
+            .expect("ready step exists in state")
+            .clone();
+
+        println!("\n─── Step: {} ───", step_name);
+
+        // Substitute template variables in the prompt.
+        let prompt = workflow::substitute_prompt(
+            &step_state.prompt_template,
+            work_item,
+            &work_item_content,
+        );
+
+        let entrypoint =
+            workflow_step_entrypoint(agent, &prompt, non_interactive, plan);
+        let status_msg = format!(
+            "Workflow step '{}' — work item {:04} with agent '{}'",
+            step_name, work_item, agent
+        );
+
+        // Generate a container name and record it for state persistence.
+        let container_name = docker::generate_container_name();
+        state.set_container_id(&step_name, container_name.clone());
+
+        // Mark step as Running and save state.
+        state.set_status(&step_name, StepStatus::Running);
+        workflow::save_workflow_state(git_root, &state)?;
+
+        let result = run_agent_with_sink(
+            entrypoint,
+            &status_msg,
+            &OutputSink::Stdout,
+            Some(mount_path.clone()),
+            env_vars.clone(),
+            non_interactive,
+            host_settings.as_ref(),
+            allow_docker,
+            Some(container_name),
+        )
+        .await;
+
+        match result {
+            Ok(_) => {
+                state.set_status(&step_name, StepStatus::Done);
+                workflow::save_workflow_state(git_root, &state)?;
+
+                if state.all_done() {
+                    println!("\nStep '{}' completed. Workflow finished!", step_name);
+                    let _ = std::fs::remove_file(&state_path);
+                    break;
+                }
+
+                println!("\nStep '{}' completed.", step_name);
+                let next = state.next_ready();
+                if !next.is_empty() {
+                    println!("Next step(s): {}", next.join(", "));
+                }
+                print!("Press [Enter] to advance, or [q] to abort: ");
+                std::io::stdout().flush()?;
+                let stdin = std::io::stdin();
+                let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+                if answer.trim().eq_ignore_ascii_case("q") {
+                    println!("Workflow paused. Run again to resume.");
+                    break;
+                }
+            }
+            Err(e) => {
+                state.set_status(&step_name, StepStatus::Error(e.to_string()));
+                workflow::save_workflow_state(git_root, &state)?;
+
+                println!("\nStep '{}' failed: {}", step_name, e);
+                print!("Press [r] to retry, or any other key to abort: ");
+                std::io::stdout().flush()?;
+                let stdin = std::io::stdin();
+                let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+                if answer.trim().eq_ignore_ascii_case("r") {
+                    state.set_status(&step_name, StepStatus::Pending);
+                    workflow::save_workflow_state(git_root, &state)?;
+                    // Continue loop — the step will appear ready again.
+                } else {
+                    println!("Workflow paused. Run again to resume from the failed step.");
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve whether to resume an existing workflow state or start fresh.
+///
+/// Handles hash mismatch detection and interrupted-run step recovery.
+fn resolve_resume_or_restart(
+    existing: WorkflowState,
+    new_hash: &str,
+    new_steps: &[workflow::parser::WorkflowStep],
+    work_item: u32,
+    workflow_name: &str,
+    state_path: &Path,
+) -> Result<WorkflowState> {
+    use std::io::{BufRead, Write};
+
+    println!(
+        "\nFound a saved workflow state for '{}' (work item {:04}).",
+        workflow_name, work_item
+    );
+
+    if existing.workflow_hash != new_hash {
+        println!("WARNING: The workflow file has changed since the last run.");
+        print!("  1) Restart from the beginning\n  2) Continue anyway (could be dangerous)\n  [1/2]: ");
+        std::io::stdout().flush()?;
+        let stdin = std::io::stdin();
+        let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+
+        if answer.trim() == "2" {
+            // Attempt to resume — validate step structure compatibility.
+            match workflow::validate_resume_compatibility(&existing, new_steps) {
+                Ok(_) => {
+                    println!("Resuming with changed workflow file.");
+                    return Ok(existing);
+                }
+                Err(e) => {
+                    println!("Cannot resume: {}", e);
+                    println!("Restarting from the beginning.");
+                    // Fall through to restart.
+                }
+            }
+        }
+
+        // Restart: delete old state file, create fresh.
+        let _ = std::fs::remove_file(state_path);
+        return Ok(WorkflowState::new(
+            existing.title,
+            new_steps.to_vec(),
+            new_hash.to_string(),
+            work_item,
+            workflow_name.to_string(),
+        ));
+    }
+
+    // Hash matches — offer resume or restart.
+    print!("  1) Resume from where you left off\n  2) Restart from the beginning\n  [1/2]: ");
+    std::io::stdout().flush()?;
+    let stdin = std::io::stdin();
+    let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+
+    if answer.trim() == "2" {
+        let _ = std::fs::remove_file(state_path);
+        return Ok(WorkflowState::new(
+            existing.title,
+            new_steps.to_vec(),
+            new_hash.to_string(),
+            work_item,
+            workflow_name.to_string(),
+        ));
+    }
+
+    println!("Resuming previous workflow run.");
+    Ok(existing)
 }
 
 #[cfg(test)]
@@ -398,5 +698,36 @@ mod tests {
     fn agent_entrypoint_non_interactive_plan_opencode() {
         let args = agent_entrypoint_non_interactive("opencode", 3, true);
         assert_eq!(args.len(), 3); // opencode, run, prompt — no extra flags
+    }
+
+    // --- Workflow step entrypoint tests ---
+
+    #[test]
+    fn workflow_step_entrypoint_claude_interactive() {
+        let args = workflow_step_entrypoint("claude", "my prompt", false, false);
+        assert_eq!(args[0], "claude");
+        assert_eq!(args[1], "my prompt");
+    }
+
+    #[test]
+    fn workflow_step_entrypoint_claude_non_interactive() {
+        let args = workflow_step_entrypoint("claude", "my prompt", true, false);
+        assert_eq!(args[0], "claude");
+        assert_eq!(args[1], "-p");
+        assert_eq!(args[2], "my prompt");
+    }
+
+    #[test]
+    fn workflow_step_entrypoint_codex_non_interactive() {
+        let args = workflow_step_entrypoint("codex", "prompt", true, false);
+        assert_eq!(args[0], "codex");
+        assert_eq!(args[1], "--quiet");
+    }
+
+    #[test]
+    fn workflow_step_entrypoint_with_plan() {
+        let args = workflow_step_entrypoint("claude", "prompt", false, true);
+        assert!(args.contains(&"--permission-mode".to_string()));
+        assert!(args.contains(&"plan".to_string()));
     }
 }

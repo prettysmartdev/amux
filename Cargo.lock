@@ -37,6 +37,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "strip-ansi-escapes",
  "strsim",
  "tar",

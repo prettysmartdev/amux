@@ -3,6 +3,7 @@ use crate::commands::ready::{ReadyContext, ReadyOptions, ReadySummary};
 use crate::commands::status::TuiTabInfo;
 use crate::docker;
 use crate::tui::pty::PtySession;
+use crate::workflow::WorkflowState;
 use ratatui::style::Color;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -91,6 +92,20 @@ pub enum Dialog {
         /// The sudo password being entered (displayed as '*').
         password: String,
     },
+    /// Workflow step completed: ask user to advance to the next step or abort.
+    WorkflowStepConfirm {
+        /// Name of the step that just completed.
+        completed_step: String,
+        /// Names of the next ready step(s).
+        next_steps: Vec<String>,
+    },
+    /// Workflow step failed: ask user to retry or abort.
+    WorkflowStepError {
+        /// Name of the step that failed.
+        failed_step: String,
+        /// Error message.
+        error: String,
+    },
 }
 
 /// Tracks which command is waiting for dialog answers (mount scope, auth).
@@ -109,6 +124,8 @@ pub enum PendingCommand {
         non_interactive: bool,
         plan: bool,
         allow_docker: bool,
+        /// Optional workflow file path for multi-step execution.
+        workflow: Option<PathBuf>,
     },
     Chat {
         non_interactive: bool,
@@ -343,6 +360,15 @@ pub struct TabState {
     /// command, stopping the background watch task so stale status output does not
     /// overwrite the new command's output.
     pub status_watch_cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+
+    // --- Multi-step workflow state ---
+    /// Active workflow state for the current `implement --workflow` run.
+    /// `None` when no workflow is active.
+    pub workflow: Option<WorkflowState>,
+    /// Name of the workflow step currently executing (while `workflow` is `Some`).
+    pub workflow_current_step: Option<String>,
+    /// Git root path captured when the workflow was launched (needed for state persistence).
+    pub workflow_git_root: Option<PathBuf>,
 }
 
 impl TabState {
@@ -395,6 +421,9 @@ impl TabState {
             claws_restarting_container_id: None,
             status_watch_cancel_tx: None,
             last_output_time: None,
+            workflow: None,
+            workflow_current_step: None,
+            workflow_git_root: None,
         }
     }
 
@@ -485,7 +514,11 @@ impl TabState {
         // launches — host_settings must survive across phases.
         // During claws setup, the text task completes before the PTY exec session starts —
         // host_settings must survive until the exec session ends.
-        if self.ready_phase == ReadyPhase::Inactive && self.claws_phase == ClawsPhase::Inactive {
+        // Also preserve host_settings while a workflow step sequence is in progress.
+        if self.ready_phase == ReadyPhase::Inactive
+            && self.claws_phase == ClawsPhase::Inactive
+            && self.workflow.is_none()
+        {
             self.host_settings = None;
         }
 
