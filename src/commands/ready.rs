@@ -3,7 +3,7 @@ use crate::commands::auth::resolve_auth;
 use crate::commands::implement::confirm_mount_scope_stdin;
 use crate::commands::init::{ask_yes_no_stdin, dockerfile_for_agent_embedded, find_git_root, find_git_root_from, write_dockerfile};
 use crate::commands::output::OutputSink;
-use crate::config::load_repo_config;
+use crate::config::{load_repo_config, migrate_legacy_repo_config};
 use crate::docker;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
@@ -262,6 +262,9 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
     // If --refresh is set, ignore --build (refresh always rebuilds after audit).
     let effective_build = if refresh { false } else { build };
     let git_root = find_git_root().context("Not inside a Git repository")?;
+    if migrate_legacy_repo_config(&git_root)? {
+        println!("Migrated config: aspec/.amux.json -> .amux/config.json");
+    }
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
     let config = load_repo_config(&git_root)?;
     let agent_name = config.agent.as_deref().unwrap_or("claude");
@@ -445,6 +448,9 @@ pub async fn run_pre_audit(
     // Derive the git root from mount_path (the tab's working directory) so that
     // each tab operates against its own project, not the process CWD.
     let git_root = find_git_root_from(&mount_path).context("Not inside a Git repository")?;
+    if migrate_legacy_repo_config(&git_root)? {
+        out.println("Migrated config: aspec/.amux.json -> .amux/config.json".to_string());
+    }
     let image_tag = docker::project_image_tag(&git_root);
     let dockerfile = git_root.join("Dockerfile.dev");
     let config = load_repo_config(&git_root)?;

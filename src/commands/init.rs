@@ -100,7 +100,7 @@ pub async fn run_with_sink(
     save_repo_config(&git_root, &config)?;
     out.println(format!(
         "Config written to: {}",
-        git_root.join("aspec/.amux.json").display()
+        git_root.join(".amux/config.json").display()
     ));
     summary.config = StepStatus::Ok("saved".into());
 

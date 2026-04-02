@@ -119,32 +119,76 @@ pub fn remove_worktree(git_root: &Path, worktree_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Merge `branch` into the current branch in `git_root` using `--no-ff`.
+/// Squash-merge `branch` into the current branch in `git_root` and create a single commit.
+///
+/// Uses `git merge --squash` to stage all changes from `branch` without preserving its
+/// commit history, then commits them as one dedicated commit.
 pub fn merge_branch(git_root: &Path, branch: &str) -> Result<()> {
     let output = Command::new("git")
-        .args(["merge", "--no-ff", branch])
+        .args(["merge", "--squash", branch])
         .current_dir(git_root)
         .output()
-        .context("Failed to invoke `git merge`")?;
+        .context("Failed to invoke `git merge --squash`")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("`git merge` failed: {}", stderr.trim());
+        bail!("`git merge --squash` failed: {}", stderr.trim());
+    }
+
+    let message = format!("Implement {}", branch);
+    let output = Command::new("git")
+        .args(["commit", "-m", &message])
+        .current_dir(git_root)
+        .output()
+        .context("Failed to invoke `git commit`")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("`git commit` failed: {}", stderr.trim());
     }
     Ok(())
 }
 
-/// Delete a local branch using `git branch -d`.
-pub fn delete_branch(git_root: &Path, branch: &str) -> Result<()> {
+/// Returns a list of uncommitted file status lines in the given worktree path.
+///
+/// Runs `git status --porcelain` and returns each non-empty line (e.g. `" M src/foo.rs"`).
+/// Returns an empty `Vec` when the worktree is clean.
+pub fn uncommitted_files(worktree_path: &Path) -> Result<Vec<String>> {
     let output = Command::new("git")
-        .args(["branch", "-d", branch])
-        .current_dir(git_root)
+        .args(["status", "--porcelain"])
+        .current_dir(worktree_path)
         .output()
-        .context("Failed to invoke `git branch -d`")?;
+        .context("Failed to invoke `git status --porcelain`")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("`git branch -d` failed: {}", stderr.trim());
+        bail!("`git status --porcelain` failed: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let files: Vec<String> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.to_string())
+        .collect();
+
+    Ok(files)
+}
+
+/// Force-delete a local branch using `git branch -D`.
+///
+/// `-D` is required after a squash merge because git does not consider the branch
+/// "fully merged" (there is no merge commit pointing back to it).
+pub fn delete_branch(git_root: &Path, branch: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["branch", "-D", branch])
+        .current_dir(git_root)
+        .output()
+        .context("Failed to invoke `git branch -D`")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("`git branch -D` failed: {}", stderr.trim());
     }
     Ok(())
 }

@@ -120,6 +120,30 @@ pub enum Dialog {
         git_root: PathBuf,
         had_error: bool,
     },
+    /// Worktree has uncommitted files — prompt user to enter a commit message before merging.
+    WorktreeCommitPrompt {
+        branch: String,
+        worktree_path: PathBuf,
+        git_root: PathBuf,
+        /// Lines from `git status --porcelain` to show the user.
+        uncommitted_files: Vec<String>,
+        /// Commit message being typed.
+        message: String,
+        /// Byte offset of the cursor in `message`.
+        cursor_pos: usize,
+    },
+    /// Confirm squash-merge of the worktree branch into the current HEAD.
+    WorktreeMergeConfirm {
+        branch: String,
+        worktree_path: PathBuf,
+        git_root: PathBuf,
+    },
+    /// Confirm deletion of the worktree directory and branch after a successful merge.
+    WorktreeDeleteConfirm {
+        branch: String,
+        worktree_path: PathBuf,
+        git_root: PathBuf,
+    },
 }
 
 /// Tracks which command is waiting for dialog answers (mount scope, auth).

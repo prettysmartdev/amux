@@ -50,7 +50,9 @@
       "Read(//root/**)",
       "Read(//usr/local/lib/node_modules/@anthropic-ai/**)",
       "Read(//usr/local/share/**)",
-      "Bash(grep -o '.\\\\{0,100\\\\}lspRecommendation.\\\\{0,100\\\\}')"
+      "Bash(grep -o '.\\\\{0,100\\\\}lspRecommendation.\\\\{0,100\\\\}')",
+      "Bash(timeout:*)",
+      "Bash(grep -E \"\\(FAILED|ok$|test result\\)\" /root/.claude/projects/-workspace/484d09f3-428b-447e-a490-a66f1c889751/tool-results/bfy5or7eq.txt)"
     ]
   }
 }

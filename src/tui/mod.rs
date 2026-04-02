@@ -368,10 +368,52 @@ async fn handle_action(app: &mut App, action: Action) {
         Action::WorktreeSkip => {
             handle_worktree_skip(app);
         }
+
+        Action::WorktreeCommitFiles { message, branch, worktree_path, git_root } => {
+            handle_worktree_commit_files(app, message, branch, worktree_path, git_root).await;
+        }
+
+        Action::WorktreeMergeConfirmed { branch, worktree_path, git_root } => {
+            handle_worktree_merge_confirmed(app, branch, worktree_path, git_root).await;
+        }
+
+        Action::WorktreeDeleteConfirmed { branch, worktree_path, git_root } => {
+            handle_worktree_delete_confirmed(app, branch, worktree_path, git_root);
+        }
+
+        Action::WorktreeKeepAfterMerge => {
+            app.active_tab_mut().push_output(
+                "Worktree kept. Use 'git worktree list' to see active worktrees.".to_string(),
+            );
+        }
     }
 }
 
-/// Merge the worktree branch into the current HEAD and clean up the worktree.
+/// Run a git command in `cwd`, print `$ git <args>` and full stdout+stderr to the outer window.
+/// Returns `true` if the command succeeded.
+fn run_git_show(tab: &mut crate::tui::state::TabState, cwd: &std::path::Path, args: &[&str]) -> bool {
+    tab.push_output(format!("$ git {}", args.join(" ")));
+    match std::process::Command::new("git").args(args).current_dir(cwd).output() {
+        Ok(out) => {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            for line in combined.lines() {
+                tab.push_output(line.to_string());
+            }
+            out.status.success()
+        }
+        Err(e) => {
+            tab.push_output(format!("error: {}", e));
+            false
+        }
+    }
+}
+
+/// Check for uncommitted files in the worktree and either show the commit-prompt dialog
+/// (if there are uncommitted files) or skip straight to the merge-confirm dialog.
 async fn handle_worktree_merge(app: &mut App) {
     let (branch, wt_path, git_root) = match (
         app.active_tab_mut().worktree_branch.take(),
@@ -381,23 +423,81 @@ async fn handle_worktree_merge(app: &mut App) {
         (Some(b), Some(p), Some(r)) => (b, p, r),
         _ => return,
     };
-    let tx = app.active_tab().output_tx.clone();
-    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
-    app.active_tab_mut().exit_rx = Some(exit_rx);
-    spawn_text_command(tx, exit_tx, move |sink| async move {
-        match crate::git::merge_branch(&git_root, &branch) {
-            Ok(()) => {
-                sink.println(format!("Merged branch '{}' into current branch.", branch));
-                let _ = crate::git::remove_worktree(&git_root, &wt_path);
-                let _ = crate::git::delete_branch(&git_root, &branch);
-                sink.println("Worktree removed and branch deleted.".to_string());
-            }
-            Err(e) => {
-                sink.println(format!("Merge failed: {}. Worktree kept at {}.", e, wt_path.display()));
-            }
+
+    let files = crate::git::uncommitted_files(&wt_path).unwrap_or_default();
+    if files.is_empty() {
+        app.active_tab_mut().dialog = Dialog::WorktreeMergeConfirm {
+            branch,
+            worktree_path: wt_path,
+            git_root,
+        };
+    } else {
+        let default_msg = format!("Uncommitted changes in {}", branch);
+        let cursor_pos = default_msg.len();
+        app.active_tab_mut().dialog = Dialog::WorktreeCommitPrompt {
+            branch,
+            worktree_path: wt_path,
+            git_root,
+            uncommitted_files: files,
+            message: default_msg,
+            cursor_pos,
+        };
+    }
+}
+
+/// Stage all uncommitted files in the worktree and create a commit, then show the merge-confirm dialog.
+async fn handle_worktree_commit_files(
+    app: &mut App,
+    message: String,
+    branch: String,
+    wt_path: std::path::PathBuf,
+    git_root: std::path::PathBuf,
+) {
+    {
+        let tab = app.active_tab_mut();
+        run_git_show(tab, &wt_path, &["add", "-A"]);
+        run_git_show(tab, &wt_path, &["commit", "-m", &message]);
+    }
+    app.active_tab_mut().dialog = Dialog::WorktreeMergeConfirm {
+        branch,
+        worktree_path: wt_path,
+        git_root,
+    };
+}
+
+/// Squash-merge the worktree branch into the current HEAD, show git output, then show delete-confirm dialog.
+async fn handle_worktree_merge_confirmed(
+    app: &mut App,
+    branch: String,
+    wt_path: std::path::PathBuf,
+    git_root: std::path::PathBuf,
+) {
+    let commit_msg = format!("Implement {}", branch);
+    {
+        let tab = app.active_tab_mut();
+        let merge_ok = run_git_show(tab, &git_root, &["merge", "--squash", &branch]);
+        if merge_ok {
+            run_git_show(tab, &git_root, &["commit", "-m", &commit_msg]);
         }
-        Ok(())
-    });
+    }
+    app.active_tab_mut().dialog = Dialog::WorktreeDeleteConfirm {
+        branch,
+        worktree_path: wt_path,
+        git_root,
+    };
+}
+
+/// Remove the worktree directory and delete the branch, showing all git output.
+fn handle_worktree_delete_confirmed(
+    app: &mut App,
+    branch: String,
+    wt_path: std::path::PathBuf,
+    git_root: std::path::PathBuf,
+) {
+    let wt_str = wt_path.to_string_lossy().to_string();
+    let tab = app.active_tab_mut();
+    run_git_show(tab, &git_root, &["worktree", "remove", "--force", &wt_str]);
+    run_git_show(tab, &git_root, &["branch", "-D", &branch]);
 }
 
 /// Discard the worktree branch and remove the worktree directory.

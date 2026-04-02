@@ -70,6 +70,27 @@ pub enum Action {
     WorktreeDiscard,
     /// Worktree merge prompt: keep the worktree branch as-is without merging.
     WorktreeSkip,
+    /// Worktree commit prompt: commit uncommitted files with the given message.
+    WorktreeCommitFiles {
+        message: String,
+        branch: String,
+        worktree_path: PathBuf,
+        git_root: PathBuf,
+    },
+    /// Worktree merge confirm: proceed with squash-merge into current HEAD.
+    WorktreeMergeConfirmed {
+        branch: String,
+        worktree_path: PathBuf,
+        git_root: PathBuf,
+    },
+    /// Worktree delete confirm: remove the worktree directory and branch.
+    WorktreeDeleteConfirmed {
+        branch: String,
+        worktree_path: PathBuf,
+        git_root: PathBuf,
+    },
+    /// Worktree delete confirm: keep the worktree and branch as-is after merging.
+    WorktreeKeepAfterMerge,
 }
 
 /// Dispatch a key press to the correct handler based on application state.
@@ -136,6 +157,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         Dialog::WorktreeMergePrompt { .. } => {
             return handle_worktree_merge_prompt(app.active_tab_mut(), key)
+        }
+        Dialog::WorktreeCommitPrompt { branch, worktree_path, git_root, uncommitted_files, message, cursor_pos } => {
+            return handle_worktree_commit_prompt(
+                app.active_tab_mut(), key, branch, worktree_path, git_root,
+                uncommitted_files, message, cursor_pos,
+            )
+        }
+        Dialog::WorktreeMergeConfirm { branch, worktree_path, git_root } => {
+            return handle_worktree_merge_confirm(app.active_tab_mut(), key, branch, worktree_path, git_root)
+        }
+        Dialog::WorktreeDeleteConfirm { branch, worktree_path, git_root } => {
+            return handle_worktree_delete_confirm(app.active_tab_mut(), key, branch, worktree_path, git_root)
         }
         Dialog::None => {}
     }
@@ -980,6 +1013,136 @@ fn handle_worktree_merge_prompt(tab: &mut TabState, key: KeyEvent) -> Action {
         KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Esc => {
             tab.dialog = Dialog::None;
             Action::WorktreeSkip
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_worktree_commit_prompt(
+    tab: &mut TabState,
+    key: KeyEvent,
+    branch: String,
+    worktree_path: PathBuf,
+    git_root: PathBuf,
+    uncommitted_files: Vec<String>,
+    mut message: String,
+    mut cursor_pos: usize,
+) -> Action {
+    // Ctrl+Enter or Ctrl+S → submit commit
+    let is_submit = (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL))
+        || (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL));
+    if is_submit {
+        let trimmed = message.trim().to_string();
+        if !trimmed.is_empty() {
+            tab.dialog = Dialog::None;
+            return Action::WorktreeCommitFiles { message: trimmed, branch, worktree_path, git_root };
+        }
+        return Action::None;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::None
+        }
+        KeyCode::Backspace => {
+            if cursor_pos > 0 {
+                let mut char_start = cursor_pos - 1;
+                while char_start > 0 && !message.is_char_boundary(char_start) {
+                    char_start -= 1;
+                }
+                message.remove(char_start);
+                cursor_pos = char_start;
+            }
+            tab.dialog = Dialog::WorktreeCommitPrompt { branch, worktree_path, git_root, uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::Delete => {
+            if cursor_pos < message.len() {
+                let mut char_end = cursor_pos + 1;
+                while char_end < message.len() && !message.is_char_boundary(char_end) {
+                    char_end += 1;
+                }
+                message.remove(cursor_pos);
+            }
+            tab.dialog = Dialog::WorktreeCommitPrompt { branch, worktree_path, git_root, uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::Left => {
+            if cursor_pos > 0 {
+                cursor_pos -= 1;
+                while cursor_pos > 0 && !message.is_char_boundary(cursor_pos) {
+                    cursor_pos -= 1;
+                }
+            }
+            tab.dialog = Dialog::WorktreeCommitPrompt { branch, worktree_path, git_root, uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::Right => {
+            if cursor_pos < message.len() {
+                cursor_pos += 1;
+                while cursor_pos < message.len() && !message.is_char_boundary(cursor_pos) {
+                    cursor_pos += 1;
+                }
+            }
+            tab.dialog = Dialog::WorktreeCommitPrompt { branch, worktree_path, git_root, uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::Home => {
+            cursor_pos = 0;
+            tab.dialog = Dialog::WorktreeCommitPrompt { branch, worktree_path, git_root, uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::End => {
+            cursor_pos = message.len();
+            tab.dialog = Dialog::WorktreeCommitPrompt { branch, worktree_path, git_root, uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            message.insert(cursor_pos, c);
+            cursor_pos += c.len_utf8();
+            tab.dialog = Dialog::WorktreeCommitPrompt { branch, worktree_path, git_root, uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_worktree_merge_confirm(
+    tab: &mut TabState,
+    key: KeyEvent,
+    branch: String,
+    worktree_path: PathBuf,
+    git_root: PathBuf,
+) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            tab.dialog = Dialog::None;
+            Action::WorktreeMergeConfirmed { branch, worktree_path, git_root }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_worktree_delete_confirm(
+    tab: &mut TabState,
+    key: KeyEvent,
+    branch: String,
+    worktree_path: PathBuf,
+    git_root: PathBuf,
+) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            tab.dialog = Dialog::None;
+            Action::WorktreeDeleteConfirmed { branch, worktree_path, git_root }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::WorktreeKeepAfterMerge
         }
         _ => Action::None,
     }

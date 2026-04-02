@@ -711,6 +711,10 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
         draw_workflow_control_board(frame, area, current_step, error.as_deref());
         return;
     }
+    if let Dialog::WorktreeCommitPrompt { branch, uncommitted_files, message, cursor_pos, .. } = &tab.dialog {
+        draw_worktree_commit_prompt(frame, area, branch, uncommitted_files, message, *cursor_pos);
+        return;
+    }
 
     let (title, body) = match &tab.dialog {
         Dialog::CloseTabConfirm => (
@@ -841,13 +845,33 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
                 if *had_error { "finished with errors" } else { "completed" }
             ),
         ),
+        Dialog::WorktreeMergeConfirm { branch, .. } => (
+            " Worktree: Confirm Merge ",
+            format!(
+                "  Squash-merge branch '{}' into the current branch?\n\n  \
+                 [y/Enter] Proceed with merge\n  \
+                 [n/Esc]   Cancel  ",
+                branch,
+            ),
+        ),
+        Dialog::WorktreeDeleteConfirm { branch, .. } => (
+            " Worktree: Delete Branch & Worktree? ",
+            format!(
+                "  Delete worktree and branch '{}'?\n\n  \
+                 [y/Enter] Yes, delete\n  \
+                 [n/Esc]   No, keep worktree  ",
+                branch,
+            ),
+        ),
         Dialog::None => return,
         // NewInterviewSummary is handled by the early return above — this arm is unreachable.
         Dialog::NewInterviewSummary { .. } => return,
         Dialog::WorkflowControlBoard { .. } => {
-            // Handled by the special-case early return below — unreachable here.
+            // Handled by the special-case early return above — unreachable here.
             return;
         }
+        // WorktreeCommitPrompt is handled by the early return above — unreachable here.
+        Dialog::WorktreeCommitPrompt { .. } => return,
     };
 
     let popup_width = 72u16.min(area.width.saturating_sub(4));
@@ -1015,6 +1039,122 @@ fn draw_interview_summary_dialog(
         Span::styled("  Ctrl+S / Ctrl+Enter to submit", Style::default().fg(Color::Green)),
         Span::raw("  ·  "),
         Span::styled("Esc to cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+    frame.render_widget(footer, footer_area);
+}
+
+fn draw_worktree_commit_prompt(
+    frame: &mut Frame,
+    area: Rect,
+    branch: &str,
+    uncommitted_files: &[String],
+    message: &str,
+    cursor_pos: usize,
+) {
+    // Size: 80% width, enough height for header + file list + input box + footer
+    let max_files_shown = 8usize;
+    let files_shown = uncommitted_files.len().min(max_files_shown);
+    let overflow = uncommitted_files.len().saturating_sub(max_files_shown);
+    // header(3) + files + overflow(0..1) + blank(1) + input block(3) + footer(1) + borders(2)
+    let extra = if overflow > 0 { 1 } else { 0 };
+    let needed_h = (3 + files_shown + extra + 1 + 3 + 1 + 2) as u16;
+    let popup_width = ((area.width as u32 * 80 / 100) as u16).min(82).max(50);
+    let popup_height = needed_h.max(14).min(area.height.saturating_sub(4));
+    let popup = centered_rect(popup_width, popup_height, area);
+
+    frame.render_widget(Clear, popup);
+
+    let outer_block = Block::default()
+        .title(" Worktree: Commit Uncommitted Files ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = outer_block.inner(popup);
+    frame.render_widget(outer_block, popup);
+
+    if inner.height < 6 {
+        return;
+    }
+
+    let footer_height = 1u16;
+    let input_block_height = 3u16;
+    let header_height = (3 + files_shown as u16 + extra as u16 + 1).max(3);
+    let header_height = header_height.min(inner.height.saturating_sub(input_block_height + footer_height));
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Length(input_block_height),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+
+    let header_area = layout[0];
+    let input_area = layout[1];
+    let footer_area = layout[2];
+
+    // Header: branch name + uncommitted files list
+    let mut header_lines = vec![
+        Line::from(vec![
+            Span::raw("  Branch "),
+            Span::styled(branch, Style::default().fg(Color::Cyan)),
+            Span::raw(" has uncommitted files:"),
+        ]),
+        Line::from(""),
+    ];
+    for f in uncommitted_files.iter().take(max_files_shown) {
+        header_lines.push(Line::from(vec![
+            Span::styled(format!("  {}", f), Style::default().fg(Color::Yellow)),
+        ]));
+    }
+    if overflow > 0 {
+        header_lines.push(Line::from(vec![
+            Span::styled(
+                format!("  … and {} more", overflow),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    header_lines.push(Line::from(""));
+    frame.render_widget(Paragraph::new(header_lines), header_area);
+
+    // Input box: render text with cursor
+    let input_block = Block::default()
+        .title(" Commit message ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::White));
+    let input_inner = input_block.inner(input_area);
+    frame.render_widget(input_block, input_area);
+
+    // Build display string with a block-cursor character inserted at cursor_pos
+    let cursor_char_pos = message[..cursor_pos.min(message.len())].chars().count();
+    let chars: Vec<char> = message.chars().collect();
+    let before: String = chars[..cursor_char_pos].iter().collect();
+    let cursor_ch = chars.get(cursor_char_pos).copied().unwrap_or(' ');
+    let after: String = chars[cursor_char_pos + if chars.get(cursor_char_pos).is_some() { 1 } else { 0 }..].iter().collect();
+
+    let spans = vec![
+        Span::raw(format!(" {}", before)),
+        Span::styled(
+            cursor_ch.to_string(),
+            Style::default().bg(Color::White).fg(Color::Black),
+        ),
+        Span::raw(after),
+    ];
+    frame.render_widget(Paragraph::new(Line::from(spans)), input_inner);
+
+    // Footer
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("Ctrl+Enter", Style::default().fg(Color::Green)),
+        Span::raw(" / "),
+        Span::styled("Ctrl+S", Style::default().fg(Color::Green)),
+        Span::raw(" to commit  ·  "),
+        Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+        Span::raw(" to cancel"),
     ]));
     frame.render_widget(footer, footer_area);
 }
