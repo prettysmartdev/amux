@@ -59,7 +59,8 @@
       "Bash(find ~/.cargo/registry -name *.rs -path */vt100*)",
       "Bash(find /root/.cargo -name *.rs)",
       "Bash(grep:*)",
-      "Bash(find /workspace/tests -name *.rs -type f)"
+      "Bash(find /workspace/tests -name *.rs -type f)",
+      "Bash(find /workspace/aspec -name *0033* -o -name *auto*advance*)"
     ]
   }
 }

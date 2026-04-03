@@ -993,7 +993,7 @@ fn handle_workflow_control_board(tab: &mut TabState, key: KeyEvent) -> Action {
             Action::WorkflowNextInCurrentContainer
         }
         KeyCode::Esc => {
-            tab.dialog = Dialog::None;
+            tab.dismiss_stuck_dialog();
             Action::None
         }
         _ => Action::None, // dialog stays open

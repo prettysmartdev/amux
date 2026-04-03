@@ -15,6 +15,10 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 /// Duration of container output inactivity before a tab is considered "stuck".
 pub const STUCK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// After the user dismisses the auto-advance dialog with Esc, wait this long
+/// before showing it again for the same stuck episode.
+pub const STUCK_DIALOG_BACKOFF: Duration = Duration::from_secs(60);
+
 /// Which widget currently receives keyboard input.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Focus {
@@ -418,6 +422,10 @@ pub struct TabState {
     /// current stuck episode, preventing it from re-opening on every subsequent tick.
     /// Reset to `false` by `acknowledge_stuck()` and `finish_command()`.
     pub workflow_stuck_dialog_opened: bool,
+    /// Timestamp of the last time the user dismissed the `WorkflowControlBoard` dialog
+    /// with Esc. While within `STUCK_DIALOG_BACKOFF` of this instant the dialog will not
+    /// be auto-opened again, even if the tab remains stuck.
+    pub workflow_stuck_dialog_dismissed_at: Option<Instant>,
 
     // --- Worktree state (set when --worktree is active) ---
     /// The branch name created for this worktree session.
@@ -493,6 +501,7 @@ impl TabState {
             workflow_current_step: None,
             workflow_git_root: None,
             workflow_stuck_dialog_opened: false,
+            workflow_stuck_dialog_dismissed_at: None,
             worktree_branch: None,
             worktree_active_path: None,
             worktree_git_root: None,
@@ -603,6 +612,7 @@ impl TabState {
         // Clear the stuck-detection timer; the container is no longer running.
         self.last_output_time = None;
         self.workflow_stuck_dialog_opened = false;
+        self.workflow_stuck_dialog_dismissed_at = None;
 
         // Close the container window and generate a summary if applicable.
         if self.container_window != ContainerWindowState::Hidden {
@@ -785,9 +795,19 @@ impl TabState {
     /// is deferred for another full `STUCK_TIMEOUT` window.
     pub fn acknowledge_stuck(&mut self) {
         self.workflow_stuck_dialog_opened = false;
+        self.workflow_stuck_dialog_dismissed_at = None;
         if self.last_output_time.is_some() {
             self.last_output_time = Some(Instant::now());
         }
+    }
+
+    /// Record that the user dismissed the `WorkflowControlBoard` dialog with Esc.
+    /// The dialog will not auto-open again for `STUCK_DIALOG_BACKOFF` (60 s), after
+    /// which it becomes eligible to re-open if the tab is still stuck.
+    pub fn dismiss_stuck_dialog(&mut self) {
+        self.dialog = Dialog::None;
+        self.workflow_stuck_dialog_opened = false;
+        self.workflow_stuck_dialog_dismissed_at = Some(Instant::now());
     }
 
     /// Color for the tab indicator based on current phase and container state.
@@ -1064,10 +1084,15 @@ impl App {
         let active = self.active_tab_idx;
         if active < self.tabs.len() {
             let tab = &mut self.tabs[active];
+            let backoff_elapsed = tab
+                .workflow_stuck_dialog_dismissed_at
+                .map(|t| t.elapsed() >= STUCK_DIALOG_BACKOFF)
+                .unwrap_or(true);
             if tab.is_stuck()
                 && tab.workflow_current_step.is_some()
                 && tab.dialog == Dialog::None
                 && !tab.workflow_stuck_dialog_opened
+                && backoff_elapsed
             {
                 let step = tab.workflow_current_step.clone().unwrap();
                 tab.dialog = Dialog::WorkflowControlBoard {
@@ -1935,6 +1960,67 @@ mod tests {
         assert!(
             matches!(app.active_tab().dialog, Dialog::WorkflowControlBoard { .. }),
             "expected WorkflowControlBoard after switching to stuck background tab"
+        );
+    }
+
+    // --- Unit: dismiss_stuck_dialog / STUCK_DIALOG_BACKOFF ---
+
+    #[test]
+    fn stuck_dialog_backoff_is_60s() {
+        assert_eq!(STUCK_DIALOG_BACKOFF, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn dismiss_stuck_dialog_clears_dialog_and_sets_dismissed_at() {
+        let mut tab = new_tab();
+        tab.dialog = Dialog::WorkflowControlBoard {
+            current_step: "step-one".into(),
+            error: None,
+        };
+        tab.workflow_stuck_dialog_opened = true;
+        tab.dismiss_stuck_dialog();
+        assert_eq!(tab.dialog, Dialog::None);
+        assert!(!tab.workflow_stuck_dialog_opened);
+        assert!(tab.workflow_stuck_dialog_dismissed_at.is_some());
+    }
+
+    #[test]
+    fn finish_command_resets_workflow_stuck_dialog_dismissed_at() {
+        let mut tab = new_tab();
+        tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        tab.workflow_stuck_dialog_dismissed_at = Some(Instant::now());
+        tab.finish_command(0);
+        assert!(tab.workflow_stuck_dialog_dismissed_at.is_none());
+    }
+
+    #[test]
+    fn acknowledge_stuck_resets_workflow_stuck_dialog_dismissed_at() {
+        let mut tab = new_tab();
+        tab.workflow_stuck_dialog_dismissed_at = Some(Instant::now());
+        tab.acknowledge_stuck();
+        assert!(tab.workflow_stuck_dialog_dismissed_at.is_none());
+    }
+
+    #[test]
+    fn tick_all_does_not_reopen_dialog_within_backoff_after_esc_dismiss() {
+        let mut app = setup_stuck_workflow_app();
+        // Simulate: user dismissed with Esc just now.
+        app.active_tab_mut().workflow_stuck_dialog_dismissed_at = Some(Instant::now());
+        app.tick_all();
+        // Dialog must stay closed during backoff window.
+        assert_eq!(app.active_tab().dialog, Dialog::None);
+    }
+
+    #[test]
+    fn tick_all_reopens_dialog_after_backoff_expires() {
+        let mut app = setup_stuck_workflow_app();
+        // Simulate: user dismissed with Esc STUCK_DIALOG_BACKOFF ago.
+        app.active_tab_mut().workflow_stuck_dialog_dismissed_at =
+            Some(Instant::now() - STUCK_DIALOG_BACKOFF);
+        app.tick_all();
+        assert!(
+            matches!(app.active_tab().dialog, Dialog::WorkflowControlBoard { .. }),
+            "dialog must reopen once the 60 s backoff has elapsed"
         );
     }
 }
