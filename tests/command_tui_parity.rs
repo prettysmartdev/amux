@@ -861,7 +861,7 @@ fn auth_reads_project_local_config() {
     // Check that the config file is at the correct path.
     let config_path = amux::config::repo_config_path(tmp.path());
     assert!(config_path.exists());
-    assert!(config_path.to_str().unwrap().contains("aspec/.amux.json"));
+    assert!(config_path.to_str().unwrap().contains(".amux/config.json"));
 
     // Decline → saved as false.
     apply_auth_decision(tmp.path(), "claude", false).unwrap();

@@ -1138,6 +1138,26 @@ pub fn start_container(container_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Gracefully stop a running container using `docker stop`.
+///
+/// Sends SIGTERM to the main process, then SIGKILL after the default timeout.
+pub fn stop_container(container_id: &str) -> anyhow::Result<()> {
+    let output = Command::new("docker")
+        .args(["stop", container_id])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("Failed to invoke `docker stop`")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            bail!("Failed to stop container {}", container_id);
+        }
+        bail!("Failed to stop container {}: {}", container_id, stderr);
+    }
+    Ok(())
+}
+
 /// Remove (delete) a container by ID or name using `docker rm -f`.
 ///
 /// Uses `-f` to force-remove even if the container is running.

@@ -361,6 +361,10 @@ async fn handle_action(app: &mut App, action: Action) {
             advance_workflow_next_current_container(app).await;
         }
 
+        Action::WorkflowFinish => {
+            finish_workflow(app).await;
+        }
+
         Action::WorktreeMerge => {
             handle_worktree_merge(app).await;
         }
@@ -2703,6 +2707,31 @@ fn init_workflow_tui(
     Some(state)
 }
 
+/// Mark the last workflow step Done, clean up workflow state, and stop the container.
+///
+/// Used when the user explicitly finishes the workflow from the control board
+/// (Ctrl+Enter) while on the final step.
+async fn finish_workflow(app: &mut App) {
+    let current_step = match app.active_tab().workflow_current_step.clone() {
+        Some(s) => s,
+        None => return,
+    };
+
+    if let Some(ref mut wf) = app.active_tab_mut().workflow {
+        wf.set_status(&current_step, StepStatus::Done);
+    }
+
+    // Clean up workflow state (prints "All steps done!", removes state file, clears current_step).
+    mark_workflow_complete_if_needed(app, &current_step);
+
+    // Stop the running container so the PTY exits and the session summary is shown.
+    if let Some(name) = app.active_tab().container_info.as_ref().map(|i| i.container_name.clone()) {
+        tokio::task::spawn_blocking(move || {
+            let _ = docker::stop_container(&name);
+        });
+    }
+}
+
 /// Called after a command completes: if a workflow step just finished, show the
 /// confirm/error dialog for the next step.
 async fn check_workflow_step_completion(app: &mut App) {
@@ -3065,8 +3094,8 @@ async fn launch_next_workflow_step_in_current_container(app: &mut App) {
 
     let prompt = workflow::substitute_prompt(&step_state.prompt_template, work_item, &work_item_content);
 
-    // Send prompt to the existing PTY, followed by a newline (acts as Enter).
-    let bytes = format!("{}\n", prompt).into_bytes();
+    // Send prompt to the existing PTY, followed by CR (carriage return = Enter in a PTY).
+    let bytes = format!("{}\r", prompt).into_bytes();
     if let Some(ref pty) = app.active_tab().pty {
         pty.write_bytes(&bytes);
     }

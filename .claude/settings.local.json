@@ -60,7 +60,9 @@
       "Bash(find /root/.cargo -name *.rs)",
       "Bash(grep:*)",
       "Bash(find /workspace/tests -name *.rs -type f)",
-      "Bash(find /workspace/aspec -name *0033* -o -name *auto*advance*)"
+      "Bash(find /workspace/aspec -name *0033* -o -name *auto*advance*)",
+      "Bash(pkill -f \"cargo test\")",
+      "Bash(xargs -I{} cat /proc/{}/cmdline)"
     ]
   }
 }

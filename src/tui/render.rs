@@ -715,7 +715,8 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
     }
     if let Dialog::WorkflowControlBoard { current_step, error } = &tab.dialog {
         let container_minimized = tab.container_window == ContainerWindowState::Minimized;
-        draw_workflow_control_board(frame, area, current_step, error.as_deref(), container_minimized);
+        let is_last_step = tab.is_last_workflow_step();
+        draw_workflow_control_board(frame, area, current_step, error.as_deref(), container_minimized, is_last_step);
         return;
     }
     if let Dialog::WorktreeCommitPrompt { branch, uncommitted_files, message, cursor_pos, .. } = &tab.dialog {
@@ -1305,9 +1306,10 @@ fn draw_worktree_pre_commit_message(
     frame.render_widget(footer, footer_area);
 }
 
-fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, error: Option<&str>, container_minimized: bool) {
+fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, error: Option<&str>, container_minimized: bool, is_last_step: bool) {
     let popup_width = 52u16.min(area.width.saturating_sub(4));
-    let popup_height = if error.is_some() { 13u16 } else { 11u16 }.min(area.height.saturating_sub(4));
+    let base_height: u16 = if is_last_step { 13 } else { 11 };
+    let popup_height = (if error.is_some() { base_height + 2 } else { base_height }).min(area.height.saturating_sub(4));
     let popup = centered_rect(popup_width, popup_height, area);
 
     frame.render_widget(Clear, popup);
@@ -1324,9 +1326,11 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
 
     let arrow_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     let label_style = Style::default();
+    let dimmed_style = Style::default().fg(Color::DarkGray);
     let step_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
     let error_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
     let hint_style = Style::default().fg(Color::DarkGray);
+    let finish_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
 
     // Truncate step name if too long.
     let max_step_len = popup_width.saturating_sub(10) as usize;
@@ -1334,6 +1338,13 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
         format!("{}…", &step_name[..max_step_len.saturating_sub(1)])
     } else {
         step_name.to_string()
+    };
+
+    // Right/down arrows are dimmed and inactive on the last step.
+    let (right_arrow_style, right_label_style, down_arrow_style, down_label_style) = if is_last_step {
+        (dimmed_style, dimmed_style, dimmed_style, dimmed_style)
+    } else {
+        (arrow_style, label_style, arrow_style, label_style)
     };
 
     let mut lines: Vec<Line> = vec![
@@ -1352,17 +1363,26 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
             Span::styled("←", arrow_style),
             Span::styled(" Cancel to prev", label_style),
             Span::raw("   "),
-            Span::styled("→", arrow_style),
-            Span::styled(" Next: new container", label_style),
+            Span::styled("→", right_arrow_style),
+            Span::styled(" Next: new container", right_label_style),
         ]),
         Line::raw(""),
         Line::from(vec![
             Span::raw("         "),
-            Span::styled("↓", arrow_style),
-            Span::styled(" Next: same container", label_style),
+            Span::styled("↓", down_arrow_style),
+            Span::styled(" Next: same container", down_label_style),
         ]),
         Line::raw(""),
     ];
+
+    if is_last_step {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("⏎", finish_style),
+            Span::styled(" Ctrl+Enter  Finish workflow", finish_style),
+        ]));
+        lines.push(Line::raw(""));
+    }
 
     if let Some(err) = error {
         lines.push(Line::from(vec![Span::styled(
@@ -1372,7 +1392,13 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
         lines.push(Line::raw(""));
     }
 
-    let hint = if container_minimized {
+    let hint = if is_last_step {
+        if container_minimized {
+            " [↑←] select  [Ctrl+Enter] finish  [c] restore  [Esc] dismiss"
+        } else {
+            " [↑←] select  [Ctrl+Enter] finish  [Esc] dismiss"
+        }
+    } else if container_minimized {
         " [Arrow] select  [c] restore container  [Esc] dismiss"
     } else {
         " [Arrow] select  [Esc] dismiss"

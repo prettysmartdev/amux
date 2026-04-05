@@ -3,7 +3,7 @@ use crate::commands::ready::{ReadyContext, ReadyOptions, ReadySummary};
 use crate::commands::status::TuiTabInfo;
 use crate::docker;
 use crate::tui::pty::PtySession;
-use crate::workflow::WorkflowState;
+use crate::workflow::{StepStatus, WorkflowState};
 use ratatui::style::Color;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -823,6 +823,22 @@ impl TabState {
         self.dialog = Dialog::None;
         self.workflow_stuck_dialog_opened = false;
         self.workflow_stuck_dialog_dismissed_at = Some(Instant::now());
+    }
+
+    /// Returns `true` if the currently running workflow step is the last one —
+    /// i.e. marking it Done would leave no further ready steps.
+    pub fn is_last_workflow_step(&self) -> bool {
+        let wf = match &self.workflow {
+            Some(w) => w,
+            None => return false,
+        };
+        let current = match &self.workflow_current_step {
+            Some(s) => s.as_str(),
+            None => return false,
+        };
+        let mut wf_clone = wf.clone();
+        wf_clone.set_status(current, StepStatus::Done);
+        wf_clone.next_ready().is_empty()
     }
 
     /// Color for the tab indicator based on current phase and container state.

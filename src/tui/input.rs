@@ -64,6 +64,8 @@ pub enum Action {
     WorkflowNextInNewContainer,
     /// Workflow control board: mark current step done, send next step prompt to the existing PTY.
     WorkflowNextInCurrentContainer,
+    /// Workflow control board: mark the last step done and terminate the container.
+    WorkflowFinish,
     /// Worktree merge prompt: merge the worktree branch into the current branch.
     WorktreeMerge,
     /// Worktree merge prompt: discard the worktree branch and remove the worktree.
@@ -996,6 +998,7 @@ fn handle_workflow_step_error(
 }
 
 fn handle_workflow_control_board(tab: &mut TabState, key: KeyEvent) -> Action {
+    let last_step = tab.is_last_workflow_step();
     match key.code {
         KeyCode::Up => {
             tab.dialog = Dialog::None;
@@ -1006,12 +1009,22 @@ fn handle_workflow_control_board(tab: &mut TabState, key: KeyEvent) -> Action {
             Action::WorkflowCancelToPrevious
         }
         KeyCode::Right => {
+            if last_step {
+                return Action::None; // disabled on last step
+            }
             tab.dialog = Dialog::None;
             Action::WorkflowNextInNewContainer
         }
         KeyCode::Down => {
+            if last_step {
+                return Action::None; // disabled on last step
+            }
             tab.dialog = Dialog::None;
             Action::WorkflowNextInCurrentContainer
+        }
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            tab.dialog = Dialog::None;
+            Action::WorkflowFinish
         }
         KeyCode::Esc => {
             tab.dismiss_stuck_dialog();
@@ -1028,6 +1041,7 @@ fn handle_workflow_control_board(tab: &mut TabState, key: KeyEvent) -> Action {
         _ => Action::None, // dialog stays open
     }
 }
+
 
 fn handle_worktree_merge_prompt(tab: &mut TabState, key: KeyEvent) -> Action {
     match key.code {
