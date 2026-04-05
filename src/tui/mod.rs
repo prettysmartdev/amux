@@ -390,6 +390,19 @@ async fn handle_action(app: &mut App, action: Action) {
                 "Worktree kept. Use 'git worktree list' to see active worktrees.".to_string(),
             );
         }
+
+        Action::WorktreePreCommitAbort => {
+            app.active_tab_mut().pending_command = PendingCommand::None;
+        }
+
+        Action::WorktreePreCommitUse => {
+            app.active_tab_mut().worktree_skip_precommit_check = true;
+            launch_pending_command(app).await;
+        }
+
+        Action::WorktreePreCommitCommit { message } => {
+            handle_worktree_pre_commit_commit(app, message).await;
+        }
     }
 }
 
@@ -609,6 +622,23 @@ async fn handle_worktree_discard(app: &mut App) {
         }
         Ok(())
     });
+}
+
+/// Stage all uncommitted files in the main branch (git_root) and create a commit,
+/// then proceed with the pending implement command.
+async fn handle_worktree_pre_commit_commit(app: &mut App, message: String) {
+    let git_root = match find_git_root_from(&app.active_tab().cwd) {
+        Some(r) => r,
+        None => return,
+    };
+    {
+        let tab = app.active_tab_mut();
+        run_git_show(tab, &git_root, &["add", "-A"]);
+    }
+    if !run_git_interactive(app, &git_root, &["commit", "-m", &message]) {
+        return;
+    }
+    launch_pending_command(app).await;
 }
 
 /// Keep the worktree branch as-is (no merge, no delete).
@@ -1238,6 +1268,28 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         if wt_path.exists() {
             app.active_tab_mut().push_output(format!("Resuming existing worktree at {}", wt_path.display()));
         } else {
+            // Check for uncommitted files on the main branch before creating the worktree.
+            if !app.active_tab().worktree_skip_precommit_check {
+                let files = crate::git::uncommitted_files(&git_root).unwrap_or_default();
+                if !files.is_empty() {
+                    // Save parameters so the dialog can resume the command after resolution.
+                    app.active_tab_mut().pending_command = PendingCommand::Implement {
+                        work_item,
+                        non_interactive,
+                        plan,
+                        allow_docker,
+                        workflow: workflow_path,
+                        worktree,
+                        mount_ssh,
+                    };
+                    app.active_tab_mut().dialog = Dialog::WorktreePreCommitWarning {
+                        uncommitted_files: files,
+                    };
+                    return;
+                }
+            }
+            app.active_tab_mut().worktree_skip_precommit_check = false;
+
             if let Err(e) = crate::git::create_worktree(&git_root, &wt_path, &branch) {
                 app.active_tab_mut().push_output(format!("Error creating worktree: {}", e));
                 app.active_tab_mut().finish_command(1);

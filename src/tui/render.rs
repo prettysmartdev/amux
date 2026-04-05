@@ -708,11 +708,16 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
         return;
     }
     if let Dialog::WorkflowControlBoard { current_step, error } = &tab.dialog {
-        draw_workflow_control_board(frame, area, current_step, error.as_deref());
+        let container_minimized = tab.container_window == ContainerWindowState::Minimized;
+        draw_workflow_control_board(frame, area, current_step, error.as_deref(), container_minimized);
         return;
     }
     if let Dialog::WorktreeCommitPrompt { branch, uncommitted_files, message, cursor_pos, .. } = &tab.dialog {
         draw_worktree_commit_prompt(frame, area, branch, uncommitted_files, message, *cursor_pos);
+        return;
+    }
+    if let Dialog::WorktreePreCommitMessage { uncommitted_files, message, cursor_pos, .. } = &tab.dialog {
+        draw_worktree_pre_commit_message(frame, area, uncommitted_files, message, *cursor_pos);
         return;
     }
 
@@ -863,6 +868,32 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
                 branch,
             ),
         ),
+        Dialog::WorktreePreCommitWarning { uncommitted_files } => {
+            let max_shown = 8usize;
+            let files_str = uncommitted_files
+                .iter()
+                .take(max_shown)
+                .map(|f| format!("  {}", f))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let overflow = uncommitted_files.len().saturating_sub(max_shown);
+            let overflow_str = if overflow > 0 {
+                format!("\n  … and {} more", overflow)
+            } else {
+                String::new()
+            };
+            (
+                " Worktree: Uncommitted Changes ",
+                format!(
+                    "  The current branch has uncommitted files that\n  will NOT be included in the new worktree:\n\n{}{}\n\n  \
+                     [c] Commit files before creating worktree\n  \
+                     [u] Use last commit (proceed without uncommitted files)\n  \
+                     [a/Esc] Abort  ",
+                    files_str,
+                    overflow_str,
+                ),
+            )
+        }
         Dialog::None => return,
         // NewInterviewSummary is handled by the early return above — this arm is unreachable.
         Dialog::NewInterviewSummary { .. } => return,
@@ -872,6 +903,8 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
         }
         // WorktreeCommitPrompt is handled by the early return above — unreachable here.
         Dialog::WorktreeCommitPrompt { .. } => return,
+        // WorktreePreCommitMessage is handled by the early return above — unreachable here.
+        Dialog::WorktreePreCommitMessage { .. } => return,
     };
 
     let popup_width = 72u16.min(area.width.saturating_sub(4));
@@ -1159,7 +1192,114 @@ fn draw_worktree_commit_prompt(
     frame.render_widget(footer, footer_area);
 }
 
-fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, error: Option<&str>) {
+fn draw_worktree_pre_commit_message(
+    frame: &mut Frame,
+    area: Rect,
+    uncommitted_files: &[String],
+    message: &str,
+    cursor_pos: usize,
+) {
+    let max_files_shown = 8usize;
+    let files_shown = uncommitted_files.len().min(max_files_shown);
+    let overflow = uncommitted_files.len().saturating_sub(max_files_shown);
+    let extra = if overflow > 0 { 1 } else { 0 };
+    let needed_h = (3 + files_shown + extra + 1 + 3 + 1 + 2) as u16;
+    let popup_width = ((area.width as u32 * 80 / 100) as u16).min(82).max(50);
+    let popup_height = needed_h.max(14).min(area.height.saturating_sub(4));
+    let popup = centered_rect(popup_width, popup_height, area);
+
+    frame.render_widget(Clear, popup);
+
+    let outer_block = Block::default()
+        .title(" Commit Changes Before Creating Worktree ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = outer_block.inner(popup);
+    frame.render_widget(outer_block, popup);
+
+    if inner.height < 6 {
+        return;
+    }
+
+    let footer_height = 1u16;
+    let input_block_height = 3u16;
+    let header_height = (3 + files_shown as u16 + extra as u16 + 1).max(3);
+    let header_height = header_height.min(inner.height.saturating_sub(input_block_height + footer_height));
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Length(input_block_height),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+
+    let header_area = layout[0];
+    let input_area = layout[1];
+    let footer_area = layout[2];
+
+    let mut header_lines = vec![
+        Line::from(vec![
+            Span::raw("  The current branch has uncommitted files:"),
+        ]),
+        Line::from(""),
+    ];
+    for f in uncommitted_files.iter().take(max_files_shown) {
+        header_lines.push(Line::from(vec![
+            Span::styled(format!("  {}", f), Style::default().fg(Color::Yellow)),
+        ]));
+    }
+    if overflow > 0 {
+        header_lines.push(Line::from(vec![
+            Span::styled(
+                format!("  … and {} more", overflow),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    header_lines.push(Line::from(""));
+    frame.render_widget(Paragraph::new(header_lines), header_area);
+
+    let input_block = Block::default()
+        .title(" Commit message ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::White));
+    let input_inner = input_block.inner(input_area);
+    frame.render_widget(input_block, input_area);
+
+    let cursor_char_pos = message[..cursor_pos.min(message.len())].chars().count();
+    let chars: Vec<char> = message.chars().collect();
+    let before: String = chars[..cursor_char_pos].iter().collect();
+    let cursor_ch = chars.get(cursor_char_pos).copied().unwrap_or(' ');
+    let after: String = chars[cursor_char_pos + if chars.get(cursor_char_pos).is_some() { 1 } else { 0 }..].iter().collect();
+
+    let spans = vec![
+        Span::raw(format!(" {}", before)),
+        Span::styled(
+            cursor_ch.to_string(),
+            Style::default().bg(Color::White).fg(Color::Black),
+        ),
+        Span::raw(after),
+    ];
+    frame.render_widget(Paragraph::new(Line::from(spans)), input_inner);
+
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("Ctrl+Enter", Style::default().fg(Color::Green)),
+        Span::raw(" / "),
+        Span::styled("Ctrl+S", Style::default().fg(Color::Green)),
+        Span::raw(" to commit  ·  "),
+        Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+        Span::raw(" back"),
+    ]));
+    frame.render_widget(footer, footer_area);
+}
+
+fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, error: Option<&str>, container_minimized: bool) {
     let popup_width = 52u16.min(area.width.saturating_sub(4));
     let popup_height = if error.is_some() { 13u16 } else { 11u16 }.min(area.height.saturating_sub(4));
     let popup = centered_rect(popup_width, popup_height, area);
@@ -1226,10 +1366,12 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
         lines.push(Line::raw(""));
     }
 
-    lines.push(Line::from(vec![Span::styled(
-        " [Arrow] select  [Esc] dismiss",
-        hint_style,
-    )]));
+    let hint = if container_minimized {
+        " [Arrow] select  [c] restore container  [Esc] dismiss"
+    } else {
+        " [Arrow] select  [Esc] dismiss"
+    };
+    lines.push(Line::from(vec![Span::styled(hint, hint_style)]));
 
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);

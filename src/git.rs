@@ -149,6 +149,30 @@ pub fn merge_branch(git_root: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Stage all changes with `git add -A` and commit them with the given message.
+pub fn commit_all(path: &Path, message: &str) -> Result<()> {
+    let add_output = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(path)
+        .output()
+        .context("Failed to invoke `git add -A`")?;
+    if !add_output.status.success() {
+        let stderr = String::from_utf8_lossy(&add_output.stderr);
+        bail!("`git add -A` failed: {}", stderr.trim());
+    }
+
+    let commit_output = Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(path)
+        .output()
+        .context("Failed to invoke `git commit`")?;
+    if !commit_output.status.success() {
+        let stderr = String::from_utf8_lossy(&commit_output.stderr);
+        bail!("`git commit` failed: {}", stderr.trim());
+    }
+    Ok(())
+}
+
 /// Returns a list of uncommitted file status lines in the given worktree path.
 ///
 /// Runs `git status --porcelain` and returns each non-empty line (e.g. `" M src/foo.rs"`).

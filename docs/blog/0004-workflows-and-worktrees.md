@@ -5,19 +5,20 @@ Running multiple agents in parallel has been pretty addicting as I've been worki
 ---
 
 ```sh
-# amux is an agent multiplexer for your terminal; run parallel containerized code and claw agents.
+# amux is an agent multiplexer for your terminal.
+# run parallel containerized code and claw agents!
 curl -s https://prettysmart.dev/install/amux.sh | sh
 ```
 
 ---
 
-## Long agent runs from huge prompts was pissing me off
+## Long agent runs from huge prompts were pissing me off
 
-The longer the task you hand to an agent, the more likely it is to go sideways somewhere in the middle. You either split the work into many small items (and babysit each one), or hand over a big spec and hope it stays on track. Neither is satisfying.
+The longer the task you hand to an agent, the more likely it is to go sideways somewhere in the middle. You either split the work into many small items (and babysit each one), or hand over a big spec and hope it stays on track. Neither was quite working for me.
 
-What I actually wanted was a way to break a complex task into phases — plan, implement, review, docs — and have the agent run each phase separately, pausing between them so I could check the work before it continued. Not one huge prompt, not five disconnected sessions. A pipeline I can define once and reuse.
+What I actually wanted was a way to break a complex task into phases — plan, implement, tests, docs, review, push, etc. — and have the agent run each phase separately, pausing between them so they are forced to break the work into more achievable pieces and give me chances to check in. Not one huge prompt, not successive random prompts I have to type out. A pipeline I can define once and reuse.
 
-That's what `--workflow` is.
+Amux v0.4 can do that with `--workflow`.
 
 ## Multi-step workflows
 
@@ -34,22 +35,26 @@ Prompt: Implement work item {{work_item_number}} according to the plan.
 
 ## Step: review
 Depends-on: implement
-Prompt: Review the changes for correctness and style.
+Prompt: Review the changes for security, correctness, completeness, and style.
 ```
 
 Run it:
 
 ```sh
-amux implement 0042 --workflow aspec/workflows/implement-feature.md
+amux implement 0042 --workflow ./aspec/workflows/implement-feature.md
 ```
 
-amux parses the file into a dependency graph, runs each step in its own container, and pauses after each one. The TUI shows a live step strip so you always know where you are. State is saved to disk, so you can quit and resume later without losing progress.
+amux parses the file into a DAG, runs each step in its own container (or successively in the same container if you wish), and pauses after each one. The TUI shows a live workflow overview so you always know where you are. State is saved to disk, so you can quit and resume later without losing progress.
 
-If a step goes silent for more than 10 seconds, amux auto-opens the workflow control board — a popup where you can advance, restart, skip, or cancel without waiting. You can also open it manually with **Ctrl+W** at any time.
+TUI SCREENSHOT
+
+When the agent is done working on its current step, amux auto-opens the workflow control board — a popup where you can advance, restart, skip, or cancel without waiting. You can also open it manually with **Ctrl+W** at any time.
+
+WORKFLOW CONTROL SCREENSHOT
 
 ## Worktree isolation
 
-The other thing I wanted: a way to let an agent loose on a task without it touching my working tree until I'm ready to review.
+The other thing you need to really embrace parallel agents: a way to let an agent loose in its own git-isolated sandbox. So amux v0.4 adds support for Git worktrees:
 
 ```sh
 amux implement 0042 --worktree
@@ -63,13 +68,15 @@ Worktree branch amux/work-item-0042 is ready. Merge into current branch? [y/n/s]
 
 Merge it, discard it, or keep the branch for manual review — your choice. If you combine `--worktree` with `--workflow`, every step in the workflow runs in the same isolated worktree, so the full pipeline produces one coherent diff at the end.
 
-For agents that need to push branches or clone private repos, add `--mount-ssh` to give the container access to your host SSH keys.
+For agents that need to push branches or clone private repos, add the new `--mount-ssh` to give the container access to your host SSH keys.
 
 ## Commit signing
 
-One annoyance I ran into while building this: if you have GPG commit signing enabled, the `git commit` that happens during the worktree merge flow would steal the terminal and destroy the TUI. The passphrase prompt (pinentry, ssh-askpass, etc.) opens `/dev/tty` directly, which fights with Ratatui's alternate screen.
+One annoyance I ran into while building this: if you have GPG commit signing enabled, the `git commit` that happens during the worktree merge flow would steal the terminal and destroy the TUI. The passphrase prompt (pinentry, ssh-askpass, etc.) opens `/dev/tty` directly, which fights with amux's fullscreen TUI.
 
 The fix is the same pattern lazygit and vim use: suspend the TUI before the command, restore it after. That's what amux does now — regardless of whether you use GPG, SSH-format, or S/MIME signing.
+
+Please give v0.4 a try and let me know how it goes! v0.5, `alog` v0.2`, and another adjacent project are coming soon!
 
 ---
 

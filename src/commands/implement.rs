@@ -41,6 +41,45 @@ pub async fn run(
     let (mount_path, worktree_branch) = if worktree {
         let wt_path = crate::git::worktree_path(&git_root, work_item)?;
         let branch = crate::git::worktree_branch_name(work_item);
+
+        // Before creating a new worktree, check for uncommitted files on the main branch.
+        if !wt_path.exists() {
+            let files = crate::git::uncommitted_files(&git_root).unwrap_or_default();
+            if !files.is_empty() {
+                use std::io::{BufRead, Write};
+                eprintln!("WARNING: The current branch has uncommitted changes:");
+                for f in &files {
+                    eprintln!("  {}", f);
+                }
+                eprintln!("\nThe worktree will be created from the latest commit.");
+                eprintln!("Uncommitted files will NOT be included in the worktree.\n");
+                print!("[c]ommit files  [u]se last commit  [a]bort: ");
+                std::io::stdout().flush()?;
+                let stdin = std::io::stdin();
+                let mut lines = stdin.lock().lines();
+                let answer = lines.next().unwrap_or(Ok(String::new()))?;
+                match answer.trim().to_lowercase().as_str() {
+                    "c" | "commit" => {
+                        print!("Commit message: ");
+                        std::io::stdout().flush()?;
+                        let msg = lines.next().unwrap_or(Ok(String::new()))?;
+                        let msg = msg.trim().to_string();
+                        if msg.is_empty() {
+                            anyhow::bail!("Commit message cannot be empty.");
+                        }
+                        crate::git::commit_all(&git_root, &msg)?;
+                        println!("Changes committed.");
+                    }
+                    "u" | "use" => {
+                        println!("Proceeding with last commit (uncommitted changes will not be in the worktree).");
+                    }
+                    _ => {
+                        anyhow::bail!("Aborting: uncommitted changes on current branch.");
+                    }
+                }
+            }
+        }
+
         let wt_path = prepare_worktree_cmd(&git_root, &wt_path, &branch)?;
         (wt_path, Some(branch))
     } else {

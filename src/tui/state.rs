@@ -149,6 +149,17 @@ pub enum Dialog {
         worktree_path: PathBuf,
         git_root: PathBuf,
     },
+    /// Before creating a worktree: main branch has uncommitted files.
+    /// Options: (c)ommit, (u)se last commit, (a)bort.
+    WorktreePreCommitWarning {
+        uncommitted_files: Vec<String>,
+    },
+    /// Before creating a worktree: enter a commit message to commit main branch changes.
+    WorktreePreCommitMessage {
+        uncommitted_files: Vec<String>,
+        message: String,
+        cursor_pos: usize,
+    },
 }
 
 /// Tracks which command is waiting for dialog answers (mount scope, auth).
@@ -434,6 +445,9 @@ pub struct TabState {
     pub worktree_active_path: Option<PathBuf>,
     /// The git root captured when the worktree was created.
     pub worktree_git_root: Option<PathBuf>,
+    /// When `true`, skip the uncommitted-files pre-check on the next worktree creation.
+    /// Set by the pre-commit warning dialog when the user chooses "use last commit".
+    pub worktree_skip_precommit_check: bool,
 
     // --- Workflow launch context (persisted so step-advancement uses identical settings) ---
     /// Resolved `~/.ssh` path when `--mount-ssh` was passed for this workflow.
@@ -505,6 +519,7 @@ impl TabState {
             worktree_branch: None,
             worktree_active_path: None,
             worktree_git_root: None,
+            worktree_skip_precommit_check: false,
             workflow_ssh_dir: None,
             workflow_mount_path: None,
             workflow_allow_docker: false,

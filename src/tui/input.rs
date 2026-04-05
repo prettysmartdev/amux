@@ -91,6 +91,12 @@ pub enum Action {
     },
     /// Worktree delete confirm: keep the worktree and branch as-is after merging.
     WorktreeKeepAfterMerge,
+    /// Pre-worktree-creation: abort the implement command entirely.
+    WorktreePreCommitAbort,
+    /// Pre-worktree-creation: proceed using the last commit (ignore uncommitted files).
+    WorktreePreCommitUse,
+    /// Pre-worktree-creation: commit all files with the given message, then proceed.
+    WorktreePreCommitCommit { message: String },
 }
 
 /// Dispatch a key press to the correct handler based on application state.
@@ -169,6 +175,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         Dialog::WorktreeDeleteConfirm { branch, worktree_path, git_root } => {
             return handle_worktree_delete_confirm(app.active_tab_mut(), key, branch, worktree_path, git_root)
+        }
+        Dialog::WorktreePreCommitWarning { uncommitted_files } => {
+            return handle_worktree_pre_commit_warning(app.active_tab_mut(), key, uncommitted_files)
+        }
+        Dialog::WorktreePreCommitMessage { uncommitted_files, message, cursor_pos } => {
+            return handle_worktree_pre_commit_message(
+                app.active_tab_mut(), key, uncommitted_files, message, cursor_pos,
+            )
         }
         Dialog::None => {}
     }
@@ -333,6 +347,13 @@ fn handle_input_key(tab: &mut TabState, key: KeyEvent, num_tabs: usize) -> Actio
 
     // When a command is running, the command box is view-only (block editing input).
     if matches!(tab.phase, ExecutionPhase::Running { .. }) {
+        // 'c' restores the minimized container window from any focus state.
+        if key.code == KeyCode::Char('c')
+            && tab.container_window == ContainerWindowState::Minimized
+        {
+            tab.container_window = ContainerWindowState::Maximized;
+            tab.focus = Focus::ExecutionWindow;
+        }
         return Action::None;
     }
 
@@ -996,6 +1017,14 @@ fn handle_workflow_control_board(tab: &mut TabState, key: KeyEvent) -> Action {
             tab.dismiss_stuck_dialog();
             Action::None
         }
+        KeyCode::Char('c') => {
+            // Dismiss the dialog (with backoff) and restore the container window if minimized.
+            tab.dismiss_stuck_dialog();
+            if tab.container_window == ContainerWindowState::Minimized {
+                tab.container_window = ContainerWindowState::Maximized;
+            }
+            Action::None
+        }
         _ => Action::None, // dialog stays open
     }
 }
@@ -1143,6 +1172,120 @@ fn handle_worktree_delete_confirm(
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             tab.dialog = Dialog::None;
             Action::WorktreeKeepAfterMerge
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_worktree_pre_commit_warning(
+    tab: &mut TabState,
+    key: KeyEvent,
+    uncommitted_files: Vec<String>,
+) -> Action {
+    match key.code {
+        KeyCode::Char('c') | KeyCode::Char('C') => {
+            let default_msg = "WIP: pre-worktree commit".to_string();
+            let cursor_pos = default_msg.len();
+            tab.dialog = Dialog::WorktreePreCommitMessage {
+                uncommitted_files,
+                message: default_msg,
+                cursor_pos,
+            };
+            Action::None
+        }
+        KeyCode::Char('u') | KeyCode::Char('U') => {
+            tab.dialog = Dialog::None;
+            Action::WorktreePreCommitUse
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::WorktreePreCommitAbort
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_worktree_pre_commit_message(
+    tab: &mut TabState,
+    key: KeyEvent,
+    uncommitted_files: Vec<String>,
+    mut message: String,
+    mut cursor_pos: usize,
+) -> Action {
+    let is_submit = (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL))
+        || (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL));
+    if is_submit {
+        let trimmed = message.trim().to_string();
+        if !trimmed.is_empty() {
+            tab.dialog = Dialog::None;
+            return Action::WorktreePreCommitCommit { message: trimmed };
+        }
+        return Action::None;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            tab.dialog = Dialog::WorktreePreCommitWarning { uncommitted_files };
+            Action::None
+        }
+        KeyCode::Backspace => {
+            if cursor_pos > 0 {
+                let mut char_start = cursor_pos - 1;
+                while char_start > 0 && !message.is_char_boundary(char_start) {
+                    char_start -= 1;
+                }
+                message.remove(char_start);
+                cursor_pos = char_start;
+            }
+            tab.dialog = Dialog::WorktreePreCommitMessage { uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::Delete => {
+            if cursor_pos < message.len() {
+                let mut char_end = cursor_pos + 1;
+                while char_end < message.len() && !message.is_char_boundary(char_end) {
+                    char_end += 1;
+                }
+                message.remove(cursor_pos);
+            }
+            tab.dialog = Dialog::WorktreePreCommitMessage { uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::Left => {
+            if cursor_pos > 0 {
+                cursor_pos -= 1;
+                while cursor_pos > 0 && !message.is_char_boundary(cursor_pos) {
+                    cursor_pos -= 1;
+                }
+            }
+            tab.dialog = Dialog::WorktreePreCommitMessage { uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::Right => {
+            if cursor_pos < message.len() {
+                cursor_pos += 1;
+                while cursor_pos < message.len() && !message.is_char_boundary(cursor_pos) {
+                    cursor_pos += 1;
+                }
+            }
+            tab.dialog = Dialog::WorktreePreCommitMessage { uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::Home => {
+            cursor_pos = 0;
+            tab.dialog = Dialog::WorktreePreCommitMessage { uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::End => {
+            cursor_pos = message.len();
+            tab.dialog = Dialog::WorktreePreCommitMessage { uncommitted_files, message, cursor_pos };
+            Action::None
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            message.insert(cursor_pos, c);
+            cursor_pos += c.len_utf8();
+            tab.dialog = Dialog::WorktreePreCommitMessage { uncommitted_files, message, cursor_pos };
+            Action::None
         }
         _ => Action::None,
     }
@@ -1780,6 +1923,46 @@ mod tests {
         assert_eq!(app.active_tab().dialog, Dialog::None);
     }
 
+    #[test]
+    fn c_key_in_workflow_control_board_dismisses_dialog_and_restores_minimized_container() {
+        let mut app = setup_running_workflow_app();
+        // setup_running_workflow_app sets container_window = Minimized
+        app.active_tab_mut().dialog = Dialog::WorkflowControlBoard {
+            current_step: "step-one".to_string(),
+            error: None,
+        };
+
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty());
+        handle_key(&mut app, key);
+
+        assert_eq!(app.active_tab().dialog, Dialog::None, "Dialog should be dismissed");
+        assert_eq!(
+            app.active_tab().container_window,
+            ContainerWindowState::Maximized,
+            "Container window should be restored to Maximized"
+        );
+    }
+
+    #[test]
+    fn c_key_in_workflow_control_board_dismisses_dialog_when_container_not_minimized() {
+        let mut app = setup_running_workflow_app();
+        app.active_tab_mut().container_window = ContainerWindowState::Maximized;
+        app.active_tab_mut().dialog = Dialog::WorkflowControlBoard {
+            current_step: "step-one".to_string(),
+            error: None,
+        };
+
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty());
+        handle_key(&mut app, key);
+
+        assert_eq!(app.active_tab().dialog, Dialog::None, "Dialog should be dismissed");
+        assert_eq!(
+            app.active_tab().container_window,
+            ContainerWindowState::Maximized,
+            "Container window should remain Maximized"
+        );
+    }
+
     /// Confirm the same holds for an arrow key (↑ = WorkflowRestartStep).
     #[test]
     fn arrow_key_routes_to_dialog_not_pty_when_dialog_open_over_maximized_container() {
@@ -1800,5 +1983,30 @@ mod tests {
             "Up arrow should not be forwarded to the PTY when a dialog is open"
         );
         assert!(matches!(action, Action::WorkflowRestartStep));
+    }
+
+    /// 'c' from CommandBox focus (e.g. after pressing Esc from minimized container)
+    /// must restore the container window even when no dialog is open.
+    #[test]
+    fn c_key_from_command_box_restores_minimized_container_during_workflow() {
+        let mut app = setup_running_workflow_app();
+        // Simulate user having pressed Esc to move focus to CommandBox
+        app.active_tab_mut().focus = Focus::CommandBox;
+        assert_eq!(app.active_tab().container_window, ContainerWindowState::Minimized);
+        assert_eq!(app.active_tab().dialog, Dialog::None);
+
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty());
+        handle_key(&mut app, key);
+
+        assert_eq!(
+            app.active_tab().container_window,
+            ContainerWindowState::Maximized,
+            "'c' should restore the minimized container"
+        );
+        assert_eq!(
+            app.active_tab().focus,
+            Focus::ExecutionWindow,
+            "focus should move back to ExecutionWindow"
+        );
     }
 }
