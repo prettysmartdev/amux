@@ -664,38 +664,44 @@ fn draw_command_box(frame: &mut Frame, tab: &TabState, area: Rect) {
 // --- Autocomplete suggestions ---
 
 fn draw_suggestions(frame: &mut Frame, tab: &TabState, area: Rect) {
-    if tab.focus != Focus::CommandBox {
-        return;
-    }
-    if tab.suggestions.is_empty() {
-        // Show the current working directory when no suggestions.
-        let cwd_str = tab.cwd.to_string_lossy();
-        let para = Paragraph::new(Line::from(vec![
-            Span::styled("  cwd: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(cwd_str.as_ref().to_string(), Style::default().fg(Color::DarkGray)),
-        ]));
+    // Show autocomplete suggestions when the command box is focused and suggestions exist.
+    if tab.focus == Focus::CommandBox && !tab.suggestions.is_empty() {
+        let spans: Vec<Span> = tab
+            .suggestions
+            .iter()
+            .enumerate()
+            .flat_map(|(i, s)| {
+                let sep = if i == 0 {
+                    Span::raw("  ")
+                } else {
+                    Span::styled("  ·  ", Style::default().fg(Color::DarkGray))
+                };
+                vec![
+                    sep,
+                    Span::styled(s.as_str(), Style::default().fg(Color::Cyan)),
+                ]
+            })
+            .collect();
+        let para = Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(para, area);
         return;
     }
 
-    let spans: Vec<Span> = tab
-        .suggestions
-        .iter()
-        .enumerate()
-        .flat_map(|(i, s)| {
-            let sep = if i == 0 {
-                Span::raw("  ")
-            } else {
-                Span::styled("  ·  ", Style::default().fg(Color::DarkGray))
-            };
-            vec![
-                sep,
-                Span::styled(s.as_str(), Style::default().fg(Color::Cyan)),
-            ]
-        })
-        .collect();
-
-    let para = Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray));
+    // Always show directory context below the command box.
+    let para = if let Some(ref worktree_path) = tab.worktree_active_path {
+        let path_str = worktree_path.to_string_lossy().into_owned();
+        Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Using Worktree: ", Style::default().fg(Color::Blue)),
+            Span::styled(path_str, Style::default().fg(Color::DarkGray)),
+        ]))
+    } else {
+        let cwd_str = tab.cwd.to_string_lossy().into_owned();
+        Paragraph::new(Line::from(vec![
+            Span::styled("  CWD: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(cwd_str, Style::default().fg(Color::DarkGray)),
+        ]))
+    };
     frame.render_widget(para, area);
 }
 
