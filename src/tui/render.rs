@@ -311,17 +311,29 @@ fn draw_container_window(frame: &mut Frame, tab: &mut TabState, outer_area: Rect
         );
     }
 
-    let inner = block.inner(container_area);
-    frame.render_widget(block, container_area);
-
-    // Store the inner area so the mouse handler can map terminal coordinates to vt100 cells.
-    tab.container_inner_area = Some(inner);
-
     // Build selection range for highlight rendering (normalised so start <= end).
     let selection = match (tab.terminal_selection_start, tab.terminal_selection_end) {
         (Some(s), Some(e)) => Some((s, e)),
         _ => None,
     };
+
+    // Show copy hint in bottom border when text is selected.
+    // CMD+C is not supported: macOS terminal emulators intercept it before the app receives it.
+    if selection.is_some() {
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                " CTRL-Y to copy/yank text ",
+                Style::default().fg(Color::Yellow),
+            ))
+            .alignment(Alignment::Center),
+        );
+    }
+
+    let inner = block.inner(container_area);
+    frame.render_widget(block, container_area);
+
+    // Store the inner area so the mouse handler can map terminal coordinates to vt100 cells.
+    tab.container_inner_area = Some(inner);
 
     // Render the vt100 terminal emulator screen into the inner area.
     if let Some(ref mut parser) = tab.vt100_parser {
