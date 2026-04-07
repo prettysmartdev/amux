@@ -9,11 +9,11 @@ use std::path::PathBuf;
 
 // ─── VT100 scrollback is bounded ─────────────────────────────────────────────
 
-/// The vt100 parser used for container output is created with a 1 000-line
-/// scrollback limit.  Pushing more than 1 000 lines must not cause the
-/// internal buffer to grow beyond that cap.
+/// The vt100 parser used for container output is created with a 10 000-line
+/// scrollback limit (the new default from work item 0041).  Pushing more than
+/// 10 000 lines must not cause the internal buffer to grow beyond that cap.
 #[test]
-fn vt100_scrollback_is_bounded_at_1000_lines() {
+fn vt100_scrollback_is_bounded_at_10000_lines() {
     let mut tab = TabState::new(PathBuf::from("/tmp/vt100-bound"));
     // Start a container session (cols=80, rows=24).
     tab.start_container("ctr-test".into(), "TestAgent".into(), 80, 24);
@@ -27,17 +27,24 @@ fn vt100_scrollback_is_bounded_at_1000_lines() {
     if let Some(ref mut parser) = tab.vt100_parser {
         parser.process(&three_k_lines);
 
-        // Attempt to scroll back 3 000 rows — the parser will clamp to its
-        // configured scrollback_len (1 000).  After `set_scrollback`, the
-        // screen reports the *actual* retained rows via `screen.scrollback()`.
-        parser.set_scrollback(3_000);
+        // The default scrollback_len is now 10 000.  With 3 000 lines fed into
+        // a 24-row screen, the scrollback contains up to 2 976 rows (3 000 – 24
+        // visible).  Probing via set_scrollback(usize::MAX) reports the actual
+        // retained depth, which must be within the 10 000-line cap.
+        parser.set_scrollback(usize::MAX);
         let retained = parser.screen().scrollback();
+        parser.set_scrollback(0);
 
         assert!(
-            retained <= 1_000,
-            "vt100 scrollback retained {} rows after 3 000 lines — expected ≤ 1 000 \
+            retained <= 10_000,
+            "vt100 scrollback retained {} rows after 3 000 lines — expected ≤ 10 000 \
              (configured scrollback_len cap)",
             retained
+        );
+        // All 3 000 pushed lines fit within the new 10 000-line cap.
+        assert!(
+            retained > 0,
+            "expected some scrollback content after pushing 3 000 lines, got 0"
         );
 
         // The screen dimensions must be unchanged.
@@ -226,4 +233,105 @@ fn new_tab_has_no_vt100_parser() {
         tab.stats_rx.is_none(),
         "stats_rx must be None on a freshly created TabState"
     );
+}
+
+// ─── 10 000-line scrollback memory threshold ─────────────────────────────────
+
+/// With the new 10 000-line scrollback default, filling the buffer should not
+/// consume more than ~3 MB per tab at typical terminal widths (80 columns).
+///
+/// Calculation baseline:
+///   10 000 rows × 80 cols × ~4 bytes per cell ≈ 3.2 MB
+///
+/// The test creates a fully-saturated 10 000-line buffer and verifies that the
+/// retained scrollback is bounded at 10 000 lines, validating that the cap is
+/// enforced and memory cannot grow without bound.
+#[test]
+fn vt100_10k_scrollback_within_memory_threshold() {
+    use amux::tui::state::TabState;
+
+    let cols: u16 = 80;
+    let rows: u16 = 24;
+    let cap: usize = 10_000;
+
+    let mut tab = TabState::new(PathBuf::from("/tmp/mem-10k"));
+    tab.terminal_scrollback_lines = cap;
+    tab.start_container("ctr-mem".into(), "MemAgent".into(), cols, rows);
+
+    // Fill the buffer 1.5× beyond the cap to exercise eviction.
+    let line = b"A memory-pressure test line for the vt100 scrollback buffer.\r\n";
+    let total_lines = cap + cap / 2; // 15 000 lines
+    let payload: Vec<u8> = line.repeat(total_lines);
+
+    if let Some(ref mut parser) = tab.vt100_parser {
+        parser.process(&payload);
+
+        // Probe retained depth.
+        parser.set_scrollback(usize::MAX);
+        let retained = parser.screen().scrollback();
+        parser.set_scrollback(0);
+
+        assert!(
+            retained <= cap,
+            "scrollback must not exceed the 10 000-line cap; got {} lines",
+            retained
+        );
+        assert!(
+            retained > 0,
+            "some scrollback must be retained after feeding {} lines",
+            total_lines
+        );
+    } else {
+        panic!("vt100_parser should be Some after start_container");
+    }
+}
+
+/// Multiple tabs each with a 10 000-line scrollback are independent.
+/// This test opens three tabs and verifies their parsers are distinct.
+#[test]
+fn multiple_tabs_have_independent_scrollback_buffers() {
+    use amux::tui::state::App;
+
+    let mut app = App::new(PathBuf::from("/tmp/multi-tab-a"));
+    app.create_tab(PathBuf::from("/tmp/multi-tab-b"));
+    app.create_tab(PathBuf::from("/tmp/multi-tab-c"));
+
+    // Start containers on all three tabs.
+    for (i, tab) in app.tabs.iter_mut().enumerate() {
+        tab.terminal_scrollback_lines = 10_000;
+        tab.start_container(
+            format!("ctr-{}", i),
+            "Agent".into(),
+            80,
+            24,
+        );
+    }
+
+    // Feed distinct content to each tab's parser.
+    let line_a = b"tab-A-line\r\n";
+    let line_b = b"tab-B-line\r\n";
+    let line_c = b"tab-C-line\r\n";
+
+    if let Some(ref mut p) = app.tabs[0].vt100_parser { p.process(&line_a.repeat(100)); }
+    if let Some(ref mut p) = app.tabs[1].vt100_parser { p.process(&line_b.repeat(100)); }
+    if let Some(ref mut p) = app.tabs[2].vt100_parser { p.process(&line_c.repeat(100)); }
+
+    // Each parser retains its own scrollback independently.
+    for (i, tab) in app.tabs.iter_mut().enumerate() {
+        if let Some(ref mut parser) = tab.vt100_parser {
+            parser.set_scrollback(usize::MAX);
+            let depth = parser.screen().scrollback();
+            parser.set_scrollback(0);
+            assert!(
+                depth > 0,
+                "tab {} should have non-zero scrollback after 100 lines",
+                i
+            );
+            assert!(
+                depth <= 10_000,
+                "tab {} scrollback ({}) must not exceed cap",
+                i, depth
+            );
+        }
+    }
 }

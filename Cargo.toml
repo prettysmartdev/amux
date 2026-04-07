@@ -29,6 +29,7 @@ unicode-width = "0.2"
 flate2 = "1"
 tar = "0.4"
 sha2 = "0.10"
+arboard = "3"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

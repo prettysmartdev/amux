@@ -10,12 +10,34 @@ pub struct RepoConfig {
     /// Saved once per Git root; None means the user has not been asked yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_agent_auth_accepted: Option<bool>,
+    /// Number of scrollback lines for the container terminal emulator.
+    /// Overrides the global config value and the built-in default (10,000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_scrollback_lines: Option<usize>,
 }
 
 /// Global configuration stored at `$HOME/.amux/config.json`.
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct GlobalConfig {
     pub default_agent: Option<String>,
+    /// Default number of scrollback lines for the container terminal emulator.
+    /// Applied to all repos unless overridden by per-repo config. Built-in default: 10,000.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_scrollback_lines: Option<usize>,
+}
+
+/// Built-in default number of scrollback lines for the container terminal emulator.
+pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+
+/// Resolve the effective scrollback line count for a given git root.
+/// Checks per-repo config first, then global config, then falls back to the built-in default.
+pub fn effective_scrollback_lines(git_root: &Path) -> usize {
+    let repo = load_repo_config(git_root).unwrap_or_default();
+    if let Some(lines) = repo.terminal_scrollback_lines {
+        return lines;
+    }
+    let global = load_global_config().unwrap_or_default();
+    global.terminal_scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK_LINES)
 }
 
 pub fn repo_config_path(git_root: &Path) -> PathBuf {
@@ -177,6 +199,7 @@ mod tests {
         let config = RepoConfig {
             agent: Some("claude".to_string()),
             auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -188,5 +211,85 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = load_repo_config(tmp.path()).unwrap();
         assert_eq!(config, RepoConfig::default());
+    }
+
+    // ─── effective_scrollback_lines ─────────────────────────────────────────
+
+    #[test]
+    fn effective_scrollback_lines_returns_default_when_no_config() {
+        let tmp = TempDir::new().unwrap();
+        let lines = effective_scrollback_lines(tmp.path());
+        assert_eq!(
+            lines, DEFAULT_SCROLLBACK_LINES,
+            "should return DEFAULT_SCROLLBACK_LINES when no config file exists"
+        );
+    }
+
+    #[test]
+    fn effective_scrollback_lines_reads_repo_config() {
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: Some(2_000),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+
+        let lines = effective_scrollback_lines(tmp.path());
+        assert_eq!(lines, 2_000, "should read terminal_scrollback_lines from repo config");
+    }
+
+    #[test]
+    fn effective_scrollback_lines_repo_config_takes_precedence_over_global() {
+        // We can only test the repo-wins path by providing a repo config with the value set.
+        // (Global config writes to HOME which we cannot override in tests without unsafe tricks.)
+        let tmp = TempDir::new().unwrap();
+        let repo_cfg = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: Some(999),
+        };
+        save_repo_config(tmp.path(), &repo_cfg).unwrap();
+
+        let lines = effective_scrollback_lines(tmp.path());
+        assert_eq!(
+            lines, 999,
+            "repo config value must win over any global/default value"
+        );
+    }
+
+    #[test]
+    fn effective_scrollback_lines_falls_back_to_default_when_repo_field_absent() {
+        let tmp = TempDir::new().unwrap();
+        // Repo config exists but has no terminal_scrollback_lines field.
+        let config = RepoConfig {
+            agent: Some("claude".to_string()),
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+
+        // Without a global config the result must equal the built-in default.
+        // (We can't control ~/.amux/config.json in tests, so only assert on the fallback chain.)
+        let lines = effective_scrollback_lines(tmp.path());
+        // It will be either global config value or DEFAULT_SCROLLBACK_LINES.
+        assert!(
+            lines >= 1,
+            "effective_scrollback_lines must return a positive value; got {}",
+            lines
+        );
+    }
+
+    #[test]
+    fn terminal_scrollback_lines_round_trips_through_repo_config() {
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: Some(5_000),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        let loaded = load_repo_config(tmp.path()).unwrap();
+        assert_eq!(loaded.terminal_scrollback_lines, Some(5_000));
     }
 }

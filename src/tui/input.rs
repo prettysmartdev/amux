@@ -99,6 +99,8 @@ pub enum Action {
     WorktreePreCommitUse,
     /// Pre-worktree-creation: commit all files with the given message, then proceed.
     WorktreePreCommitCommit { message: String },
+    /// Copy the current terminal text selection to the system clipboard.
+    CopyToClipboard,
 }
 
 /// Dispatch a key press to the correct handler based on application state.
@@ -233,7 +235,15 @@ fn handle_window_key(tab: &mut TabState, key: KeyEvent) -> Action {
             if tab.container_window == ContainerWindowState::Maximized {
                 if key.code == KeyCode::Esc {
                     tab.container_window = ContainerWindowState::Minimized;
+                    tab.clear_terminal_selection();
                     return Action::None;
+                }
+                // Ctrl+Y: copy terminal selection to clipboard (Ctrl+C is reserved for PTY interrupt).
+                if key.code == KeyCode::Char('y') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    if tab.terminal_selection_start.is_some() {
+                        return Action::CopyToClipboard;
+                    }
+                    // No selection — fall through and forward to PTY.
                 }
                 // All other keys forwarded to the PTY for full interactivity.
                 if let Some(bytes) = key_to_bytes(&key) {

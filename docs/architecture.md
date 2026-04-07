@@ -28,7 +28,8 @@ src/
   lib.rs                   Re-exports public API for integration tests
   cli.rs                   clap CLI: Cli, Command, Agent enums
   config/
-    mod.rs                 RepoConfig, GlobalConfig, load/save helpers
+    mod.rs                 RepoConfig, GlobalConfig, load/save helpers,
+                           DEFAULT_SCROLLBACK_LINES, effective_scrollback_lines()
   commands/
     mod.rs                 Public run() dispatcher
     output.rs              OutputSink: routes output to stdout or TUI channel
@@ -61,13 +62,19 @@ src/
                            ContainerStats, generate_container_name,
                            query_container_stats
   tui/
-    mod.rs                 run() entry point; event loop; action dispatcher
+    mod.rs                 run() entry point; event loop; action dispatcher;
+                           ClipboardWriter trait; copy_selection_to_clipboard();
+                           capture_vt100_snapshot(); extract_selection_text()
     state.rs               App struct; Focus/ExecutionPhase/Dialog enums;
                            PendingCommand (Ready/Implement/Chat with flags);
                            ContainerWindowState, ContainerInfo,
-                           LastContainerSummary
-    input.rs               handle_key(); Action enum; autocomplete; key→bytes
-    render.rs              draw(); draw_exec_window/command_box/dialog etc.
+                           LastContainerSummary; terminal selection state fields;
+                           terminal_scrollback_lines; container_inner_area
+    input.rs               handle_key(); Action enum (incl. CopyToClipboard);
+                           autocomplete; key→bytes; Ctrl+Y copy keybinding
+    render.rs              draw(); draw_exec_window/command_box/dialog etc.;
+                           render_vt100_screen/no_cursor (selection highlight);
+                           cell_in_selection(); scrollback depth probe + indicator
     pty.rs                 PtySession; PtyEvent; spawn_text_command helper
 templates/
   Dockerfile.claude        Bundled fallback via include_str! (debian:bookworm-slim base)
@@ -79,6 +86,9 @@ tests/
   command_tui_parity.rs    Verifies command/TUI mode share the same logic
   dockerfile_build.rs      Builds each agent template Dockerfile to verify validity
   download_integration.rs  GitHub download tests: templates, aspec folder, fallback
+  memory_bounds.rs         vt100 scrollback cap, tab cleanup, memory-per-tab bounds
+  terminal_selection.rs    Text selection, clipboard (MockClipboard), scrollback depth,
+                           coordinate mapping, resize-clears-selection integration tests
 docs/
   usage.md                 End-user reference
   architecture.md          This file
@@ -549,22 +559,122 @@ After the container **exits**, a summary bar with dashed border shows:
 
 ### Container Scrollback
 
-When the container window is maximized, the mouse scroll wheel allows the user
-to scroll through the vt100 terminal's scrollback buffer, viewing recent output
-that has scrolled off the screen. This is implemented using the vt100 crate's
-`set_scrollback()` API:
+When the container window is maximized, the mouse scroll wheel scrolls through
+the vt100 terminal's scrollback buffer at 5 lines per tick. The view is
+controlled via the vt100 crate's `set_scrollback()` API:
 
-- **Scroll up**: increases `container_scroll_offset`, which calls
-  `parser.set_scrollback(offset)` to shift the view into scrollback
-- **Scroll down**: decreases the offset; at 0 the live screen is shown
-- **Indicator**: a centered yellow title ("↑ scrollback (N lines up)") appears
-  on the container border when scrolled
+- **Scroll up**: increases `container_scroll_offset` (capped at the actual
+  scrollback depth). `parser.set_scrollback(offset)` shifts the rendered view
+  into the buffer; `render_vt100_screen_no_cursor()` displays that slice.
+- **Scroll down**: decreases the offset; at 0 the live screen is shown and
+  `render_vt100_screen()` (with cursor) is used instead.
+- **Indicator**: a centered yellow title (`↑ scrollback (N / M lines)`) appears
+  in the container border when scrolled — `N` is the current offset and `M` is
+  the total scrollback depth available.
 
-The maximum scroll depth is capped at the screen row count due to a limitation
-in the vt100 crate's `set_scrollback()` implementation (its internal
-`visible_rows()` iterator underflows when offset > rows_len). The cursor is
-hidden when viewing scrollback. Scrollback state resets to 0 when a new
-container starts.
+**Scrollback depth probe:**
+
+The `vt100::Screen` does not expose a direct `scrollback_len()` accessor. The
+actual depth is probed by calling `parser.set_scrollback(usize::MAX)` (which
+internally clamps to the real length) and then reading `screen.scrollback()`:
+
+```rust
+parser.set_scrollback(usize::MAX);
+let max = parser.screen().scrollback();
+parser.set_scrollback(0);
+```
+
+This probe is performed in both the scroll handler (to cap the offset) and the
+renderer (to compute the `M` value for the scrollback indicator). The parser is
+reset to `0` (live view) before any rendering begins.
+
+**Configurable scrollback capacity:**
+
+The parser is created with `vt100::Parser::new(rows, cols, scrollback_lines)`,
+where `scrollback_lines` comes from `tab.terminal_scrollback_lines`. This field
+defaults to `DEFAULT_SCROLLBACK_LINES` (10,000) and is loaded from config before
+each `start_container()` call via `config::effective_scrollback_lines()`.
+
+Config precedence: per-repo (`GITROOT/.amux/config.json`) → global
+(`$HOME/.amux/config.json`) → built-in default (10,000). A 10,000-line buffer at
+80 columns uses approximately 3 MB per tab.
+
+Scrollback state (`container_scroll_offset`) resets to 0 when a new container starts.
+
+### Terminal Text Selection
+
+When the container window is maximized, users can select terminal output with
+the mouse and copy it to the clipboard with **Ctrl+Y**.
+
+**Selection state (`TabState`):**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `terminal_selection_start` | `Option<(u16, u16)>` | Anchor cell in vt100 (row, col) space; set on `MouseDown` |
+| `terminal_selection_end` | `Option<(u16, u16)>` | End cell; extended on `MouseDrag`, finalized on `MouseUp` |
+| `terminal_selection_snapshot` | `Option<Vec<Vec<String>>>` | Grid of cell strings captured at `MouseDown`; isolated from live output |
+| `container_inner_area` | `Option<Rect>` | Inner content area recorded each render frame; used for mouse→vt100 coordinate conversion |
+
+**Coordinate conversion:**
+
+Mouse terminal coordinates are converted to vt100 cell positions using the
+stored `container_inner_area`:
+
+```
+vt100_col = mouse.column - inner.x
+vt100_row = mouse.row   - inner.y
+```
+
+Drag events clamp to `inner.width - 1` / `inner.height - 1` to stay within
+bounds. Any click outside the `container_inner_area` rectangle is ignored.
+
+**Output snapshot isolation:**
+
+When `MouseDown` fires, `capture_vt100_snapshot()` captures the current
+`vt100::Screen` cell contents into `terminal_selection_snapshot`. Subsequent
+drag and copy operations read from this snapshot instead of the live parser,
+preventing live output from shifting cell coordinates under the selection.
+
+**Text extraction:**
+
+`extract_selection_text()` normalises the selection so start ≤ end in row-major
+order, iterates the snapshot rows and columns within the range, strips trailing
+spaces from each row, and joins rows with `\n`. ANSI attributes are not present
+in the snapshot — cell contents are already plain text.
+
+**Clipboard abstraction:**
+
+Clipboard writes go through the `ClipboardWriter` trait (defined in
+`tui/mod.rs`), which has a single method `set_text(&str) -> Result<(), String>`.
+The production implementation wraps `arboard::Clipboard`. A `MockClipboard` is
+provided in tests. The public `copy_selection_to_clipboard(tab, clipboard)`
+function drives extraction and write; it returns `true` if non-empty text was
+written successfully.
+
+In headless environments (no X11/Wayland display server), `arboard::Clipboard::new()`
+returns an error; `amux` logs a warning and degrades gracefully — the copy
+keybinding does nothing rather than panicking.
+
+**Selection lifecycle:**
+
+| Event | Effect |
+|-------|--------|
+| `MouseDown` inside inner area | Sets `terminal_selection_start`, `terminal_selection_end`, captures snapshot |
+| `MouseDrag` (left button) | Updates `terminal_selection_end` (clamped) |
+| `MouseUp` | No-op; selection already set |
+| Ctrl+Y (selection active) | Calls `copy_selection_to_clipboard`; clears selection |
+| Ctrl+Y (no selection) | Forwarded to PTY (byte 0x19) |
+| Esc | Minimizes window; clears selection via `clear_terminal_selection()` |
+| Terminal resize | `clear_terminal_selection()` on all tabs (vt100 re-wraps on resize) |
+| `start_container()` | Clears selection |
+
+**Rendering:**
+
+`render_vt100_screen()` and `render_vt100_screen_no_cursor()` accept a
+`selection: Option<((u16, u16), (u16, u16))>`. Selected cells have
+`Modifier::REVERSED` applied on top of their normal style, matching standard
+terminal selection appearance. The selection is normalised inside each render
+function before the `cell_in_selection()` helper is called per cell.
 
 ### PTY Output Routing
 

@@ -62,7 +62,18 @@
       "Bash(find /workspace/tests -name *.rs -type f)",
       "Bash(find /workspace/aspec -name *0033* -o -name *auto*advance*)",
       "Bash(pkill -f \"cargo test\")",
-      "Bash(xargs -I{} cat /proc/{}/cmdline)"
+      "Bash(xargs -I{} cat /proc/{}/cmdline)",
+      "Bash(ls ~/.cargo/registry/src/*/vt100-0.15.*/src/)",
+      "Bash(find ~/.cargo -name screen.rs -path */vt100*)",
+      "Bash(find ~/.cargo /root/.cargo -name *.rs -path */vt100*)",
+      "Bash(dpkg -l libxcb*)",
+      "Bash(ldconfig -p)",
+      "Bash(apt list:*)",
+      "Bash(cat /usr/local/cargo/registry/src/*/arboard-3*/Cargo.toml)",
+      "Bash(awk 'NR>=2490 && NR<=2580 && /^async fn |^fn /' /workspace/src/tui/mod.rs)",
+      "Bash(awk 'NR>=2590 && NR<=2690 && /^async fn |^fn /' /workspace/src/tui/mod.rs)",
+      "Bash(ls -lah /workspace/tests/*.rs)",
+      "Bash(find /workspace -type f -newer /workspace/CLAUDE.md -not -path */target/* -not -path */.claude/* -not -path */.amux/*)"
     ]
   }
 }

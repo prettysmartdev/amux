@@ -150,14 +150,18 @@ In the TUI, the nanoclaw tab is shown in purple.
 
 ## Container window controls
 
-| Key | Action |
-|-----|--------|
+| Key / Action | Behavior |
+|---|---|
 | (typing) | Forwarded directly to the agent |
 | **Esc** | Minimize container window (agent keeps running) |
 | **c** | Restore minimized container window |
-| Mouse scroll | Scroll terminal history |
+| Mouse scroll | Scroll terminal scrollback history (5 lines per tick, up to 10,000 lines) |
+| Mouse drag | Select text in the terminal |
+| **Ctrl+Y** | Copy the current selection to the clipboard as plain text |
 
 When minimized, the container collapses to a 1-line status bar showing agent name, CPU, memory, and runtime. The outer execution window becomes fully visible for reading command output.
+
+The scrollback title bar shows `↑ scrollback (N / M lines)` when scrolled — `N` is the current offset and `M` is the total depth available. Scroll back to the bottom to return to the live view.
 
 ---
 

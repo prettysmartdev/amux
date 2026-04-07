@@ -279,9 +279,32 @@ fn draw_container_window(frame: &mut Frame, tab: &mut TabState, outer_area: Rect
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Green));
 
+    // Probe the actual scrollback depth (only when scrolled) and build the indicator.
+    // We probe by clamping set_scrollback to usize::MAX and reading back the capped value.
+    let (effective_scroll_offset, max_scrollback) = if tab.container_scroll_offset > 0 {
+        if let Some(ref mut parser) = tab.vt100_parser {
+            // Compute effective (clamped) offset.
+            parser.set_scrollback(tab.container_scroll_offset);
+            let eff = parser.screen().scrollback();
+            // Probe total scrollback depth.
+            parser.set_scrollback(usize::MAX);
+            let max = parser.screen().scrollback();
+            // Reset to live view before rendering.
+            parser.set_scrollback(0);
+            (eff, max)
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+
     // Show scroll indicator when viewing scrollback.
-    if tab.container_scroll_offset > 0 {
-        let scroll_hint = format!(" \u{2191} scrollback ({} lines up) ", tab.container_scroll_offset);
+    if effective_scroll_offset > 0 {
+        let scroll_hint = format!(
+            " \u{2191} scrollback ({} / {} lines) ",
+            effective_scroll_offset, max_scrollback
+        );
         block = block.title(
             Line::from(Span::styled(scroll_hint, Style::default().fg(Color::Yellow)))
                 .alignment(Alignment::Center),
@@ -291,34 +314,49 @@ fn draw_container_window(frame: &mut Frame, tab: &mut TabState, outer_area: Rect
     let inner = block.inner(container_area);
     frame.render_widget(block, container_area);
 
+    // Store the inner area so the mouse handler can map terminal coordinates to vt100 cells.
+    tab.container_inner_area = Some(inner);
+
+    // Build selection range for highlight rendering (normalised so start <= end).
+    let selection = match (tab.terminal_selection_start, tab.terminal_selection_end) {
+        (Some(s), Some(e)) => Some((s, e)),
+        _ => None,
+    };
+
     // Render the vt100 terminal emulator screen into the inner area.
     if let Some(ref mut parser) = tab.vt100_parser {
-        if tab.container_scroll_offset > 0 {
-            // set_scrollback() supports offsets up to the screen row count.
-            // Cap to the screen row count to avoid overflow in the vt100 grid.
-            let max_safe = parser.screen().size().0 as usize;
-            let offset = tab.container_scroll_offset.min(max_safe);
-            if offset > 0 {
-                parser.set_scrollback(offset);
-                render_vt100_screen_no_cursor(frame, parser.screen(), inner);
-                parser.set_scrollback(0);
-            } else {
-                render_vt100_screen(frame, parser.screen(), inner);
-            }
+        if effective_scroll_offset > 0 {
+            parser.set_scrollback(effective_scroll_offset);
+            render_vt100_screen_no_cursor(frame, parser.screen(), inner, selection);
+            parser.set_scrollback(0);
         } else {
-            render_vt100_screen(frame, parser.screen(), inner);
+            render_vt100_screen(frame, parser.screen(), inner, selection);
         }
     }
 }
 
 /// Render a vt100 screen into a ratatui buffer area, preserving colors,
 /// bold/italic/underline, and cursor position.
-fn render_vt100_screen(frame: &mut Frame, screen: &vt100::Screen, area: Rect) {
+///
+/// `selection` optionally specifies a text selection range as `(start, end)` where each
+/// element is `(row, col)` in vt100 screen coordinates. Selected cells are highlighted
+/// with `Modifier::REVERSED` (inverted colours), matching standard terminal selection style.
+fn render_vt100_screen(
+    frame: &mut Frame,
+    screen: &vt100::Screen,
+    area: Rect,
+    selection: Option<((u16, u16), (u16, u16))>,
+) {
     let buf = frame.buffer_mut();
     let rows = area.height as usize;
     let cols = area.width as usize;
     let screen_rows = screen.size().0 as usize;
     let screen_cols = screen.size().1 as usize;
+
+    // Normalise selection so (sr, sc) is always before (er, ec).
+    let norm_sel = selection.map(|(s, e)| {
+        if s.0 < e.0 || (s.0 == e.0 && s.1 <= e.1) { (s, e) } else { (e, s) }
+    });
 
     for row in 0..rows.min(screen_rows) {
         let mut col = 0;
@@ -342,6 +380,11 @@ fn render_vt100_screen(frame: &mut Frame, screen: &vt100::Screen, area: Rect) {
                     style = style.add_modifier(Modifier::UNDERLINED);
                 }
                 if cell.inverse() {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+
+                // Apply selection highlight.
+                if cell_in_selection(norm_sel, row as u16, col as u16) {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
 
@@ -369,12 +412,24 @@ fn render_vt100_screen(frame: &mut Frame, screen: &vt100::Screen, area: Rect) {
 
 /// Render a vt100 screen into a ratatui buffer area without showing the cursor.
 /// Used when viewing scrollback history.
-fn render_vt100_screen_no_cursor(frame: &mut Frame, screen: &vt100::Screen, area: Rect) {
+///
+/// `selection` works the same as in `render_vt100_screen`.
+fn render_vt100_screen_no_cursor(
+    frame: &mut Frame,
+    screen: &vt100::Screen,
+    area: Rect,
+    selection: Option<((u16, u16), (u16, u16))>,
+) {
     let buf = frame.buffer_mut();
     let rows = area.height as usize;
     let cols = area.width as usize;
     let screen_rows = screen.size().0 as usize;
     let screen_cols = screen.size().1 as usize;
+
+    // Normalise selection so (sr, sc) is always before (er, ec).
+    let norm_sel = selection.map(|(s, e)| {
+        if s.0 < e.0 || (s.0 == e.0 && s.1 <= e.1) { (s, e) } else { (e, s) }
+    });
 
     for row in 0..rows.min(screen_rows) {
         let mut col = 0;
@@ -401,6 +456,11 @@ fn render_vt100_screen_no_cursor(frame: &mut Frame, screen: &vt100::Screen, area
                     style = style.add_modifier(Modifier::REVERSED);
                 }
 
+                // Apply selection highlight.
+                if cell_in_selection(norm_sel, row as u16, col as u16) {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+
                 if contents.is_empty() {
                     buf[(x, y)].set_symbol(" ").set_style(style);
                 } else {
@@ -411,6 +471,25 @@ fn render_vt100_screen_no_cursor(frame: &mut Frame, screen: &vt100::Screen, area
             col += 1;
         }
     }
+}
+
+/// Check whether a cell at `(row, col)` falls within a normalised selection range.
+///
+/// `norm_sel` must already be normalised so `start <= end` in row-major order.
+/// Returns `false` when `norm_sel` is `None`.
+#[inline]
+fn cell_in_selection(norm_sel: Option<((u16, u16), (u16, u16))>, row: u16, col: u16) -> bool {
+    let Some(((sr, sc), (er, ec))) = norm_sel else { return false };
+    if row < sr || row > er {
+        return false;
+    }
+    if row == sr && col < sc {
+        return false;
+    }
+    if row == er && col > ec {
+        return false;
+    }
+    true
 }
 
 /// Convert a vt100 color to a ratatui color.
@@ -2370,5 +2449,154 @@ mod tests {
             "Status bar should not mention ctrl-w when maximized without workflow"
         );
         assert!(text.contains("minimize"), "Minimize hint should still appear");
+    }
+
+    // ─── cell_in_selection ───────────────────────────────────────────────────
+
+    #[test]
+    fn cell_in_selection_returns_false_when_none() {
+        assert!(!cell_in_selection(None, 0, 0));
+        assert!(!cell_in_selection(None, 5, 10));
+    }
+
+    #[test]
+    fn cell_in_selection_single_row_range() {
+        // Selection from (2, 3) to (2, 7) — single row, cols 3–7.
+        let sel = Some(((2, 3), (2, 7)));
+        assert!(cell_in_selection(sel, 2, 3), "start cell should be included");
+        assert!(cell_in_selection(sel, 2, 5), "middle cell should be included");
+        assert!(cell_in_selection(sel, 2, 7), "end cell should be included");
+        assert!(!cell_in_selection(sel, 2, 2), "col before start should be excluded");
+        assert!(!cell_in_selection(sel, 2, 8), "col after end should be excluded");
+        assert!(!cell_in_selection(sel, 1, 5), "row above should be excluded");
+        assert!(!cell_in_selection(sel, 3, 5), "row below should be excluded");
+    }
+
+    #[test]
+    fn cell_in_selection_multi_row_range() {
+        // Selection from (1, 2) to (3, 5).
+        let sel = Some(((1, 2), (3, 5)));
+        // First row: only cols >= 2
+        assert!(cell_in_selection(sel, 1, 2));
+        assert!(!cell_in_selection(sel, 1, 1));
+        assert!(cell_in_selection(sel, 1, 79), "whole first row after sc is included");
+        // Middle row: all cols
+        assert!(cell_in_selection(sel, 2, 0));
+        assert!(cell_in_selection(sel, 2, 79));
+        // Last row: only cols <= 5
+        assert!(cell_in_selection(sel, 3, 0));
+        assert!(cell_in_selection(sel, 3, 5));
+        assert!(!cell_in_selection(sel, 3, 6));
+        // Outside row range
+        assert!(!cell_in_selection(sel, 0, 5));
+        assert!(!cell_in_selection(sel, 4, 0));
+    }
+
+    #[test]
+    fn cell_in_selection_normalises_reversed_selection() {
+        // When start > end, the renderer normalises before calling cell_in_selection.
+        // Test that a normalised reversed selection works correctly.
+        let (s, e) = ((5u16, 3u16), (2u16, 7u16));
+        let norm = if s.0 < e.0 || (s.0 == e.0 && s.1 <= e.1) { (s, e) } else { (e, s) };
+        let sel = Some(norm);
+        // After normalisation: start=(2,7), end=(5,3)
+        assert!(cell_in_selection(sel, 3, 0));
+        assert!(cell_in_selection(sel, 2, 7));
+        assert!(!cell_in_selection(sel, 5, 4));
+        assert!(!cell_in_selection(sel, 1, 0));
+    }
+
+    // ─── scrollback indicator rendering ─────────────────────────────────────
+
+    #[test]
+    fn scrollback_indicator_appears_when_scrolled() {
+        use crate::tui::state::ContainerWindowState;
+
+        let mut app = new_app();
+        app.active_tab_mut().container_window = ContainerWindowState::Maximized;
+
+        // Create a parser and feed enough lines to populate scrollback.
+        let rows: u16 = 10;
+        let cols: u16 = 40;
+        app.active_tab_mut().terminal_scrollback_lines = 500;
+        app.active_tab_mut().start_container("ctr".into(), "Agent".into(), cols, rows);
+
+        if let Some(ref mut parser) = app.active_tab_mut().vt100_parser {
+            for i in 0u32..100 {
+                let line = format!("output line {:03}\r\n", i);
+                parser.process(line.as_bytes());
+            }
+        }
+
+        // Set a non-zero scroll offset so the indicator should appear.
+        let scroll_offset: usize = 5;
+        app.active_tab_mut().container_scroll_offset = scroll_offset;
+
+        // Probe the effective N and max M values using the same logic as the renderer,
+        // so we can assert the exact text shown in the indicator.
+        let (effective_n, max_m) = {
+            let parser = app.active_tab_mut().vt100_parser.as_mut().unwrap();
+            parser.set_scrollback(scroll_offset);
+            let n = parser.screen().scrollback();
+            parser.set_scrollback(usize::MAX);
+            let m = parser.screen().scrollback();
+            parser.set_scrollback(0);
+            (n, m)
+        };
+
+        let text = render_all_text(&mut app, 80, 40);
+
+        // The scrollback indicator must contain ↑ and "scrollback".
+        assert!(
+            text.contains("scrollback"),
+            "scrollback indicator should appear when container_scroll_offset > 0; got:\n{}",
+            &text[..text.len().min(500)]
+        );
+        assert!(
+            text.contains('↑'),
+            "scrollback indicator should contain ↑ arrow"
+        );
+        // Verify the exact N / M line counts are rendered.
+        let expected_counts = format!("{} / {} lines", effective_n, max_m);
+        assert!(
+            text.contains(&expected_counts),
+            "indicator should show '{expected_counts}'; got:\n{}",
+            &text[..text.len().min(500)]
+        );
+        assert!(
+            effective_n > 0,
+            "effective scroll position must be > 0 when offset={scroll_offset}"
+        );
+        assert!(
+            max_m >= effective_n,
+            "max scrollback ({max_m}) must be >= effective position ({effective_n})"
+        );
+    }
+
+    #[test]
+    fn scrollback_indicator_absent_at_live_tail() {
+        use crate::tui::state::ContainerWindowState;
+
+        let mut app = new_app();
+        app.active_tab_mut().container_window = ContainerWindowState::Maximized;
+        app.active_tab_mut().terminal_scrollback_lines = 500;
+        app.active_tab_mut().start_container("ctr".into(), "Agent".into(), 40, 10);
+
+        if let Some(ref mut parser) = app.active_tab_mut().vt100_parser {
+            for i in 0u32..20 {
+                let line = format!("line {}\r\n", i);
+                parser.process(line.as_bytes());
+            }
+        }
+
+        // scroll_offset = 0 (live tail).
+        app.active_tab_mut().container_scroll_offset = 0;
+
+        let text = render_all_text(&mut app, 80, 40);
+
+        assert!(
+            !text.contains("scrollback"),
+            "scrollback indicator should be absent at live tail"
+        );
     }
 }

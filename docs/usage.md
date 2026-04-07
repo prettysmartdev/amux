@@ -745,11 +745,27 @@ Docker daemon every 5 seconds and displayed in the title bar.
 - All keyboard input is forwarded to the running container process
 - Arrow keys, Ctrl+C, Ctrl+O, and all other shortcuts work natively
 - **Mouse scroll wheel** scrolls through the container's terminal scrollback
-  history, allowing you to review recent output from the agent. A centered
-  yellow indicator ("scrollback (N lines up)") appears in the title bar when
-  scrolled up. Scroll back to the bottom to return to the live view.
-- Press **Esc** to minimize the container window
-- A status hint shows: "Esc minimize  ·  scroll ↕ history"
+  history (up to 10,000 lines by default), advancing 5 lines per tick. A
+  centered yellow indicator showing `↑ scrollback (N / M lines)` appears in
+  the title bar when scrolled up — `N` is your current position and `M` is the
+  total scrollback depth. Scroll back to the bottom to return to the live view.
+- **Mouse drag** selects text in the terminal. Click and drag across the output
+  you want to copy; the selected region is highlighted with inverted colours.
+- **Ctrl+Y** copies the current selection to the system clipboard as plain text
+  (ANSI colour codes stripped). Pressing Ctrl+Y with no active selection
+  forwards the key to the agent instead.
+- **Esc** minimizes the container window (clears any active selection)
+- A status hint shows: "Esc minimize  ·  scroll ↕ history  ·  drag select  ·  Ctrl+Y copy"
+
+**Selection behaviour:**
+
+| Event | Effect on selection |
+|-------|-------------------|
+| Mouse drag | Creates / extends selection |
+| Ctrl+Y | Copies selection to clipboard; clears selection |
+| Esc | Minimizes window; clears selection |
+| Terminal resize | Clears selection (vt100 re-wraps lines on resize) |
+| New container session | Clears selection |
 
 **When the container window is minimized:**
 
@@ -1312,21 +1328,41 @@ $ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_O
 
 ## Configuration
 
-### Per-repository: `GITROOT/aspec/.amux.json`
+### Per-repository: `GITROOT/.amux/config.json`
 
 ```json
 {
-  "agent": "claude"
+  "agent": "claude",
+  "terminal_scrollback_lines": 10000
 }
 ```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `agent` | string | `"claude"` | Agent to use for this repository (`claude`, `codex`, `opencode`) |
+| `terminal_scrollback_lines` | integer | `10000` | Number of scrollback lines for the container terminal emulator. Overrides the global config value |
 
 ### Global: `$HOME/.amux/config.json`
 
 ```json
 {
-  "default_agent": "claude"
+  "default_agent": "claude",
+  "terminal_scrollback_lines": 10000
 }
 ```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `default_agent` | string | `"claude"` | Default agent used when no per-repo agent is configured |
+| `terminal_scrollback_lines` | integer | `10000` | Default number of scrollback lines for the container terminal emulator. Applied to all repos unless overridden by per-repo config |
+
+**Config precedence for `terminal_scrollback_lines`:**
+
+Per-repo config → Global config → Built-in default (10,000 lines)
+
+A 10,000-line scrollback buffer at 80 columns uses approximately 3 MB per tab.
+Increase this value for long-running build or test sessions; decrease it to
+reduce memory usage when running many tabs simultaneously.
 
 ---
 

@@ -4,6 +4,7 @@ use crate::commands::status::TuiTabInfo;
 use crate::docker;
 use crate::tui::pty::PtySession;
 use crate::workflow::{StepStatus, WorkflowState};
+use ratatui::layout::Rect;
 use ratatui::style::Color;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -375,6 +376,25 @@ pub struct TabState {
     /// Held here so the temp dir lives as long as the container runs; dropped on finish.
     pub host_settings: Option<docker::HostSettings>,
 
+    /// Number of scrollback lines for the vt100 parser. Loaded from config before
+    /// `start_container` is called; defaults to `crate::config::DEFAULT_SCROLLBACK_LINES`.
+    pub terminal_scrollback_lines: usize,
+
+    // --- Terminal text selection state ---
+    /// Anchor cell of the in-progress or completed text selection, in vt100 screen
+    /// coordinates (row, col). Set on mouse button down; cleared on Esc or new container.
+    pub terminal_selection_start: Option<(u16, u16)>,
+    /// Current end cell of the text selection, in vt100 screen coordinates (row, col).
+    /// Extended on mouse drag; finalized on mouse button up.
+    pub terminal_selection_end: Option<(u16, u16)>,
+    /// Snapshot of the vt100 cell contents captured at MouseDown. Used for text extraction
+    /// on copy, isolating the selection from live output that may shift cell contents.
+    pub terminal_selection_snapshot: Option<Vec<Vec<String>>>,
+
+    /// Inner content area of the container window, updated each frame by the renderer.
+    /// Used to convert mouse terminal coordinates into vt100 cell (row, col) positions.
+    pub container_inner_area: Option<Rect>,
+
     /// Timestamp of the most recent PTY byte received from the running container.
     /// `None` when no container is active. Used to detect stuck (idle) containers:
     /// if the elapsed time exceeds `STUCK_TIMEOUT`, `is_stuck()` returns `true`
@@ -496,6 +516,11 @@ impl TabState {
             last_container_summary: None,
             stats_rx: None,
             host_settings: None,
+            terminal_scrollback_lines: crate::config::DEFAULT_SCROLLBACK_LINES,
+            terminal_selection_start: None,
+            terminal_selection_end: None,
+            terminal_selection_snapshot: None,
+            container_inner_area: None,
             claws_phase: ClawsPhase::Inactive,
             claws_container_id: None,
             claws_container_id_rx: None,
@@ -567,8 +592,11 @@ impl TabState {
     ) {
         self.container_window = ContainerWindowState::Maximized;
         self.container_scroll_offset = 0;
-        self.vt100_parser = Some(vt100::Parser::new(rows, cols, 1000));
+        self.vt100_parser = Some(vt100::Parser::new(rows, cols, self.terminal_scrollback_lines));
         self.last_container_summary = None;
+        self.terminal_selection_start = None;
+        self.terminal_selection_end = None;
+        self.terminal_selection_snapshot = None;
         self.last_output_time = Some(Instant::now());
         self.container_info = Some(ContainerInfo {
             container_name,
@@ -577,6 +605,13 @@ impl TabState {
             latest_stats: None,
             stats_history: Vec::new(),
         });
+    }
+
+    /// Clear any active terminal text selection.
+    pub fn clear_terminal_selection(&mut self) {
+        self.terminal_selection_start = None;
+        self.terminal_selection_end = None;
+        self.terminal_selection_snapshot = None;
     }
 
     /// Transition to the next phase of a multi-step workflow (e.g. ready).
