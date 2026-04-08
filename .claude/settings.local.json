@@ -75,7 +75,8 @@
       "Bash(ls -lah /workspace/tests/*.rs)",
       "Bash(find /workspace -type f -newer /workspace/CLAUDE.md -not -path */target/* -not -path */.claude/* -not -path */.amux/*)",
       "Bash(find ~/.cargo/registry/src -name *.rs -path */ratatui-0.30*)",
-      "Bash(find ~/.cargo -name mod.rs -path */ratatui*)"
+      "Bash(find ~/.cargo -name mod.rs -path */ratatui*)",
+      "Bash(ls -la /workspace/aspec/*.md /workspace/aspec/*/*.md)"
     ]
   }
 }
