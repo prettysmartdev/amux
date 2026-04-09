@@ -76,12 +76,9 @@
       "Bash(find /workspace -type f -newer /workspace/CLAUDE.md -not -path */target/* -not -path */.claude/* -not -path */.amux/*)",
       "Bash(find ~/.cargo/registry/src -name *.rs -path */ratatui-0.30*)",
       "Bash(find ~/.cargo -name mod.rs -path */ratatui*)",
-<<<<<<< HEAD
-      "Bash(ls -la /workspace/aspec/*.md /workspace/aspec/*/*.md)"
-=======
+      "Bash(ls -la /workspace/aspec/*.md /workspace/aspec/*/*.md)",
       "Bash(echo \"Exit: $?\")",
       "Bash(find /workspace/tests -type f -name *.rs)"
->>>>>>> amux/work-item-0042
     ]
   }
 }
