@@ -29,4 +29,10 @@ RUN curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/dock
 RUN curl -fsSL https://claude.ai/install.sh | bash \
     && cp /root/.local/bin/claude /usr/local/bin/claude
 
+# Create non-root user and set up workspace
+RUN useradd -m -s /bin/bash amux \
+    && mkdir -p /workspace \
+    && chown amux:amux /workspace
+
+USER amux
 WORKDIR /workspace
