@@ -154,7 +154,10 @@ pub fn print_summary(out: &OutputSink, runtime_name: &str, summary: &ReadySummar
     out.println("┌───────────────────────────────────────────────────┐");
     out.println("│                   Ready Summary                   │");
     out.println("├───────────────────┬───────────────────────────────┤");
-    let runtime_row_label = format!("{} runtime", runtime_name);
+    let runtime_row_label = match runtime_name {
+        "apple-containers" => "apple-container".to_string(),
+        name => format!("{} runtime", name),
+    };
     print_summary_row(out, &runtime_row_label, &summary.docker_daemon);
     print_summary_row(out, "Dockerfile.dev", &summary.dockerfile);
     print_summary_row(out, "aspec folder", &summary.aspec_folder);
@@ -535,9 +538,9 @@ pub async fn run_pre_audit(
         };
         out.println(&reason);
         let build_cmd_display = if opts.no_cache {
-            docker::format_build_cmd_no_cache(&image_tag, &dockerfile_str, &git_root_str)
+            docker::format_build_cmd_no_cache(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str)
         } else {
-            docker::format_build_cmd(&image_tag, &dockerfile_str, &git_root_str)
+            docker::format_build_cmd(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str)
         };
         out.println(format!("$ {}", build_cmd_display));
         let out_clone = out.clone();
@@ -579,9 +582,9 @@ pub async fn run_post_audit(
         ctx.image_tag
     ));
     let build_cmd_display = if opts.no_cache {
-        docker::format_build_cmd_no_cache(&ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
+        docker::format_build_cmd_no_cache(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
     } else {
-        docker::format_build_cmd(&ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
+        docker::format_build_cmd(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
     };
     out.println(format!("$ {}", build_cmd_display));
     let out_clone = out.clone();
@@ -611,9 +614,9 @@ async fn run_force_build(
         ctx.image_tag
     ));
     let build_cmd_display = if opts.no_cache {
-        docker::format_build_cmd_no_cache(&ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
+        docker::format_build_cmd_no_cache(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
     } else {
-        docker::format_build_cmd(&ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
+        docker::format_build_cmd(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
     };
     out.println(format!("$ {}", build_cmd_display));
     let out_clone = out.clone();

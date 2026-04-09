@@ -189,14 +189,14 @@ fn append_env_args_display(args: &mut Vec<String>, env_vars: &[(String, String)]
 }
 
 
-/// Formats a `docker build` invocation as a single-line CLI string for display.
-pub fn format_build_cmd(tag: &str, dockerfile: &str, context: &str) -> String {
-    format!("docker build -t {} -f {} {}", tag, dockerfile, context)
+/// Formats a build invocation as a single-line CLI string for display.
+pub fn format_build_cmd(binary: &str, tag: &str, dockerfile: &str, context: &str) -> String {
+    format!("{} build -t {} -f {} {}", binary, tag, dockerfile, context)
 }
 
-/// Formats a `docker build --no-cache` invocation as a single-line CLI string for display.
-pub fn format_build_cmd_no_cache(tag: &str, dockerfile: &str, context: &str) -> String {
-    format!("docker build --no-cache -t {} -f {} {}", tag, dockerfile, context)
+/// Formats a build `--no-cache` invocation as a single-line CLI string for display.
+pub fn format_build_cmd_no_cache(binary: &str, tag: &str, dockerfile: &str, context: &str) -> String {
+    format!("{} build --no-cache -t {} -f {} {}", binary, tag, dockerfile, context)
 }
 
 /// Formats a `docker run` invocation (from pre-built args) as a CLI string for display.
@@ -1441,7 +1441,7 @@ mod tests {
 
     #[test]
     fn format_build_cmd_produces_valid_string() {
-        let cmd = format_build_cmd("amux-test:latest", "Dockerfile.dev", "/repo");
+        let cmd = format_build_cmd("docker", "amux-test:latest", "Dockerfile.dev", "/repo");
         assert_eq!(
             cmd,
             "docker build -t amux-test:latest -f Dockerfile.dev /repo"
@@ -1450,7 +1450,7 @@ mod tests {
 
     #[test]
     fn format_build_cmd_no_cache_produces_valid_string() {
-        let cmd = format_build_cmd_no_cache("amux-test:latest", "Dockerfile.dev", "/repo");
+        let cmd = format_build_cmd_no_cache("docker", "amux-test:latest", "Dockerfile.dev", "/repo");
         assert_eq!(
             cmd,
             "docker build --no-cache -t amux-test:latest -f Dockerfile.dev /repo"

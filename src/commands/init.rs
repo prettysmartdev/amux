@@ -182,7 +182,7 @@ pub async fn run_with_sink(
 
             // Build the image before running audit.
             out.println(format!("Building image {}...", image_tag));
-            let build_cmd = docker::format_build_cmd(&image_tag, &dockerfile_str, &git_root_str);
+            let build_cmd = docker::format_build_cmd("docker", &image_tag, &dockerfile_str, &git_root_str);
             out.println(format!("$ {}", build_cmd));
             let out_clone = out.clone();
             match docker::build_image_streaming(
@@ -268,7 +268,7 @@ pub async fn run_with_sink(
             let git_root_str = git_root.to_str().unwrap().to_string();
             out.println(format!("Building image {}...", image_tag));
             let build_cmd =
-                docker::format_build_cmd(&image_tag, &dockerfile_str, &git_root_str);
+                docker::format_build_cmd("docker", &image_tag, &dockerfile_str, &git_root_str);
             out.println(format!("$ {}", build_cmd));
             let out_clone = out.clone();
             match docker::build_image_streaming(
