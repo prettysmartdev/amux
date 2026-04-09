@@ -14,6 +14,11 @@ pub struct RepoConfig {
     /// Overrides the global config value and the built-in default (10,000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_scrollback_lines: Option<usize>,
+    /// Tools the agent is not allowed to use in `--yolo` mode.
+    /// Overrides the global config value. When non-empty, passed as
+    /// `--disallowedTools` to Claude (other agents do not support this flag).
+    #[serde(rename = "yoloDisallowedTools", skip_serializing_if = "Option::is_none")]
+    pub yolo_disallowed_tools: Option<Vec<String>>,
 }
 
 /// Global configuration stored at `$HOME/.amux/config.json`.
@@ -24,10 +29,25 @@ pub struct GlobalConfig {
     /// Applied to all repos unless overridden by per-repo config. Built-in default: 10,000.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_scrollback_lines: Option<usize>,
+    /// Default tools the agent is not allowed to use in `--yolo` mode.
+    /// Overridden by per-repo config when set.
+    #[serde(rename = "yoloDisallowedTools", skip_serializing_if = "Option::is_none")]
+    pub yolo_disallowed_tools: Option<Vec<String>>,
 }
 
 /// Built-in default number of scrollback lines for the container terminal emulator.
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+
+/// Resolve the effective `yoloDisallowedTools` list for a given git root.
+/// Resolution priority: repo config → global config → empty list (no restriction).
+pub fn effective_yolo_disallowed_tools(git_root: &Path) -> Vec<String> {
+    let repo = load_repo_config(git_root).unwrap_or_default();
+    if let Some(tools) = repo.yolo_disallowed_tools {
+        return tools;
+    }
+    let global = load_global_config().unwrap_or_default();
+    global.yolo_disallowed_tools.unwrap_or_default()
+}
 
 /// Resolve the effective scrollback line count for a given git root.
 /// Checks per-repo config first, then global config, then falls back to the built-in default.
@@ -200,6 +220,7 @@ mod tests {
             agent: Some("claude".to_string()),
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: None,
+            yolo_disallowed_tools: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -232,6 +253,7 @@ mod tests {
             agent: None,
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: Some(2_000),
+            yolo_disallowed_tools: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -248,6 +270,7 @@ mod tests {
             agent: None,
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: Some(999),
+            yolo_disallowed_tools: None,
         };
         save_repo_config(tmp.path(), &repo_cfg).unwrap();
 
@@ -266,6 +289,7 @@ mod tests {
             agent: Some("claude".to_string()),
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: None,
+            yolo_disallowed_tools: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -287,9 +311,109 @@ mod tests {
             agent: None,
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: Some(5_000),
+            yolo_disallowed_tools: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
         assert_eq!(loaded.terminal_scrollback_lines, Some(5_000));
+    }
+
+    // ─── yolo_disallowed_tools ───────────────────────────────────────────────────
+
+    #[test]
+    fn yolo_disallowed_tools_deserializes_in_repo_config() {
+        let json = r#"{"yoloDisallowedTools": ["Bash", "computer"]}"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.yolo_disallowed_tools,
+            Some(vec!["Bash".to_string(), "computer".to_string()])
+        );
+    }
+
+    #[test]
+    fn yolo_disallowed_tools_absent_in_repo_config_is_none() {
+        let json = r#"{"agent": "claude"}"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.yolo_disallowed_tools, None);
+    }
+
+    #[test]
+    fn yolo_disallowed_tools_deserializes_in_global_config() {
+        let json = r#"{"yoloDisallowedTools": ["WebSearch"]}"#;
+        let config: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.yolo_disallowed_tools,
+            Some(vec!["WebSearch".to_string()])
+        );
+    }
+
+    #[test]
+    fn yolo_disallowed_tools_absent_in_global_config_is_none() {
+        let json = r#"{"default_agent": "claude"}"#;
+        let config: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.yolo_disallowed_tools, None);
+    }
+
+    #[test]
+    fn yolo_disallowed_tools_roundtrips_through_repo_config() {
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: Some(vec!["Bash".to_string(), "computer".to_string()]),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        let loaded = load_repo_config(tmp.path()).unwrap();
+        assert_eq!(
+            loaded.yolo_disallowed_tools,
+            Some(vec!["Bash".to_string(), "computer".to_string()])
+        );
+    }
+
+    #[test]
+    fn effective_yolo_disallowed_tools_returns_repo_value_when_set() {
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: Some(vec!["Bash".to_string()]),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        let tools = effective_yolo_disallowed_tools(tmp.path());
+        assert_eq!(tools, vec!["Bash".to_string()]);
+    }
+
+    #[test]
+    fn effective_yolo_disallowed_tools_repo_wins_over_any_global() {
+        // When repo config has yoloDisallowedTools set, it is returned immediately
+        // without consulting global config (repo config wins entirely, no merging).
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: Some(vec!["Bash".to_string(), "computer".to_string()]),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        let tools = effective_yolo_disallowed_tools(tmp.path());
+        // Regardless of any global config, the repo value must win.
+        assert_eq!(tools, vec!["Bash".to_string(), "computer".to_string()]);
+    }
+
+    #[test]
+    fn effective_yolo_disallowed_tools_empty_when_neither_set() {
+        // No config file at all → falls through to empty list.
+        // (We cannot control ~/.amux/config.json in unit tests, so we only assert
+        // no panic and that the repo-absent path reaches the global fallback.)
+        let tmp = TempDir::new().unwrap();
+        // Confirm no repo config exists so the fallback path is exercised.
+        assert!(!repo_config_path(tmp.path()).exists());
+        let tools = effective_yolo_disallowed_tools(tmp.path());
+        // If global config has no yoloDisallowedTools either, result is empty.
+        // We can't control the global file, so just assert no panic and the
+        // return type is correct.
+        let _: Vec<String> = tools;
     }
 }

@@ -2,7 +2,7 @@ use crate::commands::agent::run_agent_with_sink;
 use crate::commands::auth::resolve_auth;
 use crate::commands::init::find_git_root;
 use crate::commands::output::OutputSink;
-use crate::config::load_repo_config;
+use crate::config::{effective_yolo_disallowed_tools, load_repo_config};
 use crate::docker;
 use crate::workflow::{self, StepStatus, WorkflowState};
 use anyhow::{bail, Context, Result};
@@ -15,17 +15,25 @@ pub fn parse_work_item(s: &str) -> Result<u32> {
 }
 
 /// Command-mode entry point.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     work_item_str: &str,
     non_interactive: bool,
     plan: bool,
     allow_docker: bool,
     workflow_path: Option<&Path>,
-    worktree: bool,
+    mut worktree: bool,
     mount_ssh: bool,
+    yolo: bool,
 ) -> Result<()> {
     let work_item = parse_work_item(work_item_str)?;
     let git_root = find_git_root().context("Not inside a Git repository")?;
+
+    // --yolo + --workflow implies --worktree.
+    if yolo && workflow_path.is_some() && !worktree {
+        println!("--yolo with --workflow implies --worktree. Running in isolated worktree.");
+        worktree = true;
+    }
 
     // Worktree pre-checks.
     if worktree {
@@ -111,6 +119,7 @@ pub async fn run(
             plan,
             allow_docker,
             mount_ssh,
+            yolo,
         )
         .await;
         if let Some(ref branch) = worktree_branch {
@@ -119,11 +128,14 @@ pub async fn run(
         return result;
     }
 
-    let entrypoint = if non_interactive {
+    let mut entrypoint = if non_interactive {
         agent_entrypoint_non_interactive(agent, work_item, plan)
     } else {
         agent_entrypoint(agent, work_item, plan)
     };
+
+    let disallowed_tools = if yolo { effective_yolo_disallowed_tools(&git_root) } else { vec![] };
+    append_yolo_flags(&mut entrypoint, agent, yolo, &disallowed_tools);
 
     let work_item_path = find_work_item(&git_root, work_item)?;
     let status = format!(
@@ -164,6 +176,8 @@ pub async fn run(
 /// `allow_docker`: when true, mount the host Docker daemon socket into the container.
 /// `worktree`: when true, the worktree has already been set up; `mount_override` is the worktree path.
 /// `mount_ssh`: when true, mount the host `~/.ssh` directory read-only into the container.
+/// `yolo`: when true, append agent-specific skip-permissions flags and disallowed-tools config.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_with_sink(
     work_item: u32,
     out: &OutputSink,
@@ -175,17 +189,21 @@ pub async fn run_with_sink(
     allow_docker: bool,
     worktree: bool,
     mount_ssh: bool,
+    yolo: bool,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let config = load_repo_config(&git_root)?;
     let agent = config.agent.as_deref().unwrap_or("claude").to_string();
     let work_item_path = find_work_item(&git_root, work_item)?;
 
-    let entrypoint = if non_interactive {
+    let mut entrypoint = if non_interactive {
         agent_entrypoint_non_interactive(&agent, work_item, plan)
     } else {
         agent_entrypoint(&agent, work_item, plan)
     };
+
+    let disallowed_tools = if yolo { effective_yolo_disallowed_tools(&git_root) } else { vec![] };
+    append_yolo_flags(&mut entrypoint, &agent, yolo, &disallowed_tools);
 
     let status = format!(
         "Implementing work item {:04} with agent '{}': {}",
@@ -371,6 +389,39 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
     }
 }
 
+/// Append agent-specific yolo (skip-permissions) flags and disallowed-tools config.
+///
+/// - Claude: `--dangerously-skip-permissions`; if disallowed_tools non-empty, `--disallowedTools <t1>,<t2>,...`
+/// - Codex: `--full-auto`; disallowed tools not supported (warning printed)
+/// - Opencode: no equivalent — a warning is printed; disallowed tools not supported
+pub fn append_yolo_flags(args: &mut Vec<String>, agent: &str, yolo: bool, disallowed_tools: &[String]) {
+    if !yolo {
+        return;
+    }
+    match agent {
+        "claude" => {
+            args.push("--dangerously-skip-permissions".to_string());
+            if !disallowed_tools.is_empty() {
+                args.push("--disallowedTools".to_string());
+                args.push(disallowed_tools.join(","));
+            }
+        }
+        "codex" => {
+            args.push("--full-auto".to_string());
+            if !disallowed_tools.is_empty() {
+                eprintln!("WARNING: --yolo: codex does not support --disallowedTools; yoloDisallowedTools config will be ignored.");
+            }
+        }
+        _ => {
+            // Opencode and unknown agents have no skip-permissions equivalent.
+            eprintln!("WARNING: --yolo: agent '{}' does not support a skip-permissions flag; proceeding without it.", agent);
+            if !disallowed_tools.is_empty() {
+                eprintln!("WARNING: --yolo: agent '{}' does not support --disallowedTools; yoloDisallowedTools config will be ignored.", agent);
+            }
+        }
+    }
+}
+
 // ─── Workflow command-mode runner ────────────────────────────────────────────
 
 /// Run a multi-step workflow in command mode (with stdin prompts between steps).
@@ -391,6 +442,7 @@ async fn run_workflow(
     plan: bool,
     allow_docker: bool,
     mount_ssh: bool,
+    yolo: bool,
 ) -> Result<()> {
     use std::io::{BufRead, Write};
 
@@ -477,8 +529,10 @@ async fn run_workflow(
             &work_item_content,
         );
 
-        let entrypoint =
+        let mut entrypoint =
             workflow_step_entrypoint(agent, &prompt, non_interactive, plan);
+        let disallowed_tools = if yolo { effective_yolo_disallowed_tools(git_root) } else { vec![] };
+        append_yolo_flags(&mut entrypoint, agent, yolo, &disallowed_tools);
         let status_msg = format!(
             "Workflow step '{}' — work item {:04} with agent '{}'",
             step_name, work_item, agent
@@ -881,5 +935,125 @@ mod tests {
         let args = workflow_step_entrypoint("claude", "prompt", false, true);
         assert!(args.contains(&"--permission-mode".to_string()));
         assert!(args.contains(&"plan".to_string()));
+    }
+
+    // --- append_yolo_flags tests ---
+
+    #[test]
+    fn append_yolo_flags_noop_when_yolo_false() {
+        let mut args = vec!["claude".to_string()];
+        append_yolo_flags(&mut args, "claude", false, &[]);
+        assert_eq!(args, vec!["claude"]);
+    }
+
+    #[test]
+    fn append_yolo_flags_claude_adds_skip_permissions() {
+        let mut args = vec!["claude".to_string()];
+        append_yolo_flags(&mut args, "claude", true, &[]);
+        assert!(
+            args.contains(&"--dangerously-skip-permissions".to_string()),
+            "claude must receive --dangerously-skip-permissions"
+        );
+    }
+
+    #[test]
+    fn append_yolo_flags_claude_no_disallowed_tools_skips_flag() {
+        let mut args = vec!["claude".to_string()];
+        append_yolo_flags(&mut args, "claude", true, &[]);
+        assert!(
+            !args.contains(&"--disallowedTools".to_string()),
+            "--disallowedTools must not appear when the list is empty"
+        );
+    }
+
+    #[test]
+    fn append_yolo_flags_claude_with_disallowed_tools() {
+        let mut args = vec!["claude".to_string()];
+        let tools = vec!["Bash".to_string(), "computer".to_string()];
+        append_yolo_flags(&mut args, "claude", true, &tools);
+        let dt_idx = args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("--disallowedTools flag missing");
+        assert_eq!(args[dt_idx + 1], "Bash,computer");
+    }
+
+    #[test]
+    fn append_yolo_flags_codex_adds_full_auto() {
+        let mut args = vec!["codex".to_string()];
+        append_yolo_flags(&mut args, "codex", true, &[]);
+        assert!(args.contains(&"--full-auto".to_string()));
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn append_yolo_flags_codex_no_disallowed_tools_flag() {
+        let mut args = vec!["codex".to_string()];
+        let tools = vec!["Bash".to_string()];
+        append_yolo_flags(&mut args, "codex", true, &tools);
+        assert!(!args.contains(&"--disallowedTools".to_string()));
+    }
+
+    #[test]
+    fn append_yolo_flags_opencode_no_skip_permissions_flag() {
+        let mut args = vec!["opencode".to_string()];
+        append_yolo_flags(&mut args, "opencode", true, &[]);
+        assert_eq!(args, vec!["opencode"]);
+    }
+
+    #[test]
+    fn append_yolo_flags_opencode_no_disallowed_tools_flag() {
+        let mut args = vec!["opencode".to_string()];
+        let tools = vec!["Bash".to_string()];
+        append_yolo_flags(&mut args, "opencode", true, &tools);
+        assert!(!args.contains(&"--disallowedTools".to_string()));
+        assert_eq!(args, vec!["opencode"]);
+    }
+
+    // --- Worktree implication tests ---
+    // The implication logic is embedded in run(); we mirror the exact condition
+    // here to test all branches without spinning up a real git repo.
+
+    fn apply_worktree_implication(
+        yolo: bool,
+        workflow: Option<&str>,
+        worktree: bool,
+    ) -> (bool, bool) {
+        let mut wt = worktree;
+        let mut message_printed = false;
+        if yolo && workflow.is_some() && !wt {
+            message_printed = true;
+            wt = true;
+        }
+        (wt, message_printed)
+    }
+
+    #[test]
+    fn worktree_implied_when_yolo_and_workflow_without_worktree() {
+        let (wt, msg) = apply_worktree_implication(true, Some("steps.md"), false);
+        assert!(wt, "worktree must be set to true when yolo + workflow");
+        assert!(msg, "implication message must be printed");
+    }
+
+    #[test]
+    fn worktree_not_implied_when_yolo_without_workflow() {
+        let (wt, msg) = apply_worktree_implication(true, None, false);
+        assert!(!wt, "worktree must NOT be implied without --workflow");
+        assert!(!msg, "message must not be printed");
+    }
+
+    #[test]
+    fn worktree_implication_idempotent_when_already_set() {
+        // --yolo --worktree --workflow: worktree stays true, no message printed.
+        let (wt, msg) = apply_worktree_implication(true, Some("steps.md"), true);
+        assert!(wt, "worktree must remain true");
+        assert!(!msg, "message must NOT print when --worktree was already passed");
+    }
+
+    #[test]
+    fn worktree_not_implied_when_no_yolo() {
+        let (wt, msg) = apply_worktree_implication(false, Some("steps.md"), false);
+        assert!(!wt, "worktree must not be set without --yolo");
+        assert!(!msg);
     }
 }

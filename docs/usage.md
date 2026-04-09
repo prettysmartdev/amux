@@ -46,10 +46,13 @@ amux implement 0001 --allow-docker
 amux implement 0001 --workflow aspec/workflows/implement-feature.md
 amux implement 0001 --worktree
 amux implement 0001 --worktree --mount-ssh
+amux implement 0001 --yolo
+amux implement 0001 --yolo --workflow aspec/workflows/implement-feature.md
 amux chat
 amux chat --plan
 amux chat --allow-docker
 amux chat --mount-ssh
+amux chat --yolo
 amux new
 amux specs new
 amux specs new --interview
@@ -245,7 +248,7 @@ amux ready --refresh --allow-docker       # audit with Docker daemon access in c
 
 ---
 
-### `amux implement <NNNN> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>]`
+### `amux implement <NNNN> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>] [--yolo]`
 
 Launches the dev container to implement a work item.
 
@@ -255,6 +258,7 @@ amux implement 0003    # implements aspec/work-items/0003-*.md
 amux implement 0027 --workflow aspec/workflows/implement-feature.md
 amux implement 0030 --worktree
 amux implement 0030 --worktree --mount-ssh
+amux implement 0027 --yolo --workflow aspec/workflows/implement-feature.md
 ```
 
 The work item number is a 4-digit identifier (e.g. `0001`). Both `0001` and
@@ -275,10 +279,13 @@ The work item number is a 4-digit identifier (e.g. `0001`). Both `0001` and
 | `--workflow=<path>` | Path to a workflow Markdown file for multi-step execution (see [Workflows](workflows.md)) |
 | `--worktree` | Run in an isolated Git worktree under `~/.amux/worktrees/` (see [Worktree Isolation](#worktree-isolation)) |
 | `--mount-ssh` | Mount host `~/.ssh` read-only into the container (see [SSH Key Mounting](#ssh-key-mounting)) |
+| `--yolo` | Enable fully autonomous mode (see [Yolo Mode](#yolo-mode)) |
 
 When `--workflow` is provided, amux runs the work item through a series of agent steps defined in the workflow file, pausing between each step for your review. State is persisted so interrupted workflows can be resumed.
 
 When `--worktree` is provided, the agent runs against an isolated Git worktree instead of your main working tree. After the agent finishes you are prompted to merge, discard, or keep the worktree branch.
+
+When `--yolo` is provided, the agent runs in fully autonomous mode — all permission prompts are skipped and any configured `yoloDisallowedTools` restrictions are applied. When combined with `--workflow`, `--worktree` is implied automatically.
 
 **Interactive Mode (default)**
 
@@ -326,7 +333,7 @@ depends on the agent:
 
 ---
 
-### `amux chat [--non-interactive] [--plan] [--allow-docker] [--mount-ssh]`
+### `amux chat [--non-interactive] [--plan] [--allow-docker] [--mount-ssh] [--yolo]`
 
 Starts a freeform chat session with the configured agent in a container.
 
@@ -339,6 +346,7 @@ amux chat --non-interactive    # start in non-interactive mode
 amux chat --plan               # start in plan mode (read-only)
 amux chat --allow-docker       # start with Docker daemon access in container
 amux chat --mount-ssh          # start with host ~/.ssh mounted read-only
+amux chat --yolo               # start in fully autonomous mode
 ```
 
 - Prompts to confirm the Docker mount scope (Git root vs CWD) if needed
@@ -353,6 +361,7 @@ amux chat --mount-ssh          # start with host ~/.ssh mounted read-only
 | `--plan` | Run the agent in plan mode (read-only, no file modifications) |
 | `--allow-docker` | Mount the host Docker daemon socket into the container (see [Docker Socket Access](#docker-socket-access)) |
 | `--mount-ssh` | Mount host `~/.ssh` read-only into the container (see [SSH Key Mounting](#ssh-key-mounting)) |
+| `--yolo` | Enable fully autonomous mode (see [Yolo Mode](#yolo-mode)) |
 
 **Interactive Mode (default)**
 
@@ -916,10 +925,10 @@ ready --
   ready --refresh  ·  ready --build  ·  ready --no-cache  ·  ready --build --no-cache  ·  ready --non-interactive  ·  ready --refresh --non-interactive  ·  ready --refresh --allow-docker
 
 implement --
-  implement <NNNN>  e.g. implement 0001  ·  implement <NNNN> --non-interactive  ·  implement <NNNN> --plan  ·  implement <NNNN> --allow-docker  ·  implement <NNNN> --worktree  ·  implement <NNNN> --mount-ssh
+  implement <NNNN>  e.g. implement 0001  ·  implement <NNNN> --non-interactive  ·  implement <NNNN> --plan  ·  implement <NNNN> --allow-docker  ·  implement <NNNN> --worktree  ·  implement <NNNN> --mount-ssh  ·  implement <NNNN> --yolo  ·  implement <NNNN> --yolo --workflow <path>
 
 chat --
-  chat  (start a freeform agent session)  ·  chat --non-interactive  ·  chat --plan  ·  chat --allow-docker  ·  chat --mount-ssh
+  chat  (start a freeform agent session)  ·  chat --non-interactive  ·  chat --plan  ·  chat --allow-docker  ·  chat --mount-ssh  ·  chat --yolo
 
 status --
   status         (show all running agents and nanoclaw containers)
@@ -1232,9 +1241,11 @@ Parent directories are created automatically.
 ### Examples
 
 ```sh
-amux implement 0030 --worktree                          # isolated run; prompt to merge after
-amux implement 0030 --worktree --workflow wf.md         # multi-step workflow in one worktree
-amux implement 0030 --worktree --mount-ssh              # worktree + SSH keys in container
+amux implement 0030 --worktree                              # isolated run; prompt to merge after
+amux implement 0030 --worktree --workflow wf.md             # multi-step workflow in one worktree
+amux implement 0030 --worktree --mount-ssh                  # worktree + SSH keys in container
+amux implement 0027 --yolo --workflow wf.md                 # fully autonomous workflow (implies --worktree)
+amux implement 0027 --yolo --worktree --workflow wf.md      # explicit; identical to above
 ```
 
 ---
@@ -1309,6 +1320,103 @@ amux chat --mount-ssh                 # freeform session with SSH access
 
 ---
 
+## Yolo Mode
+
+The `--yolo` flag enables **fully autonomous agent operation** — the agent skips all permission prompts and proceeds without pausing for confirmation. This is the flag to use when you want to walk away and return to a finished result.
+
+```sh
+amux implement 0027 --yolo                            # autonomous single-step implementation
+amux chat --yolo                                      # autonomous freeform session
+amux implement 0027 --yolo --workflow wf.md           # fully autonomous multi-step workflow
+```
+
+### What `--yolo` does
+
+1. **Skips all agent permission prompts** — the agent-specific skip-permissions flag is appended to the container entrypoint before launch:
+
+   | Agent | Flag appended |
+   |-------|--------------|
+   | `claude` | `--dangerously-skip-permissions` |
+   | `codex` | `--full-auto` |
+   | `opencode` | *(no equivalent — a warning is printed and the flag is omitted)* |
+
+2. **Applies `yoloDisallowedTools`** — any tools listed in the active config are passed to the agent as a deny list, preventing those specific operations even under full autonomy (Claude only; see [Configuration](#configuration)):
+
+   | Agent | Flag appended (when list is non-empty) |
+   |-------|--------------------------------------|
+   | `claude` | `--disallowedTools tool1,tool2,...` |
+   | `codex` | *(no equivalent — a warning is printed)* |
+   | `opencode` | *(no equivalent — a warning is printed)* |
+
+3. **Implies `--worktree` when combined with `--workflow`** — amux automatically creates an isolated Git worktree so the multi-step workflow operates on a separate branch. A message is printed at startup:
+   ```
+   --yolo with --workflow implies --worktree. Running in isolated worktree.
+   ```
+   If `--worktree` is also passed explicitly, it is silently accepted — no message is printed and no duplicate worktree is created.
+
+4. **Auto-advances stuck workflow steps** — instead of opening the manual [workflow control board](workflows.md#workflow-control-board-tui-only), amux opens a **countdown dialog** that automatically advances to the next step after 60 seconds of inactivity. See [Yolo countdown dialog](#yolo-countdown-dialog) below.
+
+### Yolo countdown dialog
+
+When `--yolo` is active and a workflow step produces no output for 10 seconds, amux opens the yolo countdown dialog instead of the normal workflow control board:
+
+```
+╭─────── Yolo: Auto-Advance ──────────────╮
+│ Step: implement                          │
+│                                          │
+│  No activity detected.                   │
+│  Advancing to next step in  47s...       │
+│                                          │
+│                    [Esc] cancel          │
+╰──────────────────────────────────────────╯
+```
+
+The countdown runs for **60 seconds**. When it expires:
+- If the current step is **not the last step** — the workflow advances to the next step in a new container.
+- If the current step **is the last step** — the workflow transitions to the workflow-complete state.
+
+**Cancellation:**
+- Any PTY output received from the container during the countdown **immediately cancels the dialog** — the agent has resumed activity, so no action is needed.
+- Press **Esc** to dismiss the dialog manually. The same 10-second backoff applies as for the normal control board: if the container remains silent, the dialog re-opens after another 10 seconds.
+
+### `--yolo` without `--workflow`
+
+When `--yolo` is used without `--workflow`, `--worktree` is **not** implied. The flag only affects the agent's permission flags and disallowed tools. Yolo mode operates on your current working tree unless you also pass `--worktree` explicitly.
+
+### `yoloDisallowedTools` config
+
+Add `yoloDisallowedTools` to your per-repo or global config to restrict which tools the agent may use when `--yolo` is active. This lets you grant broad autonomy while still preventing specific dangerous operations.
+
+```json
+{
+  "yoloDisallowedTools": ["Bash", "computer"]
+}
+```
+
+The per-repo config takes precedence and replaces the global list entirely (lists are not merged). See [Configuration](#configuration) for details.
+
+### Security considerations
+
+- `--yolo` is designed for trusted agents and known-good work items. The agent will proceed without asking for permission on any action it would normally pause for.
+- Use `yoloDisallowedTools` to provide a safety net for operations you never want the agent to perform autonomously (e.g. `Bash` for shell commands, `computer` for GUI automation).
+- Combine `--yolo` with `--workflow` and `--worktree` (implied automatically) to contain the agent's changes to an isolated branch, making it easy to review the full diff before merging.
+
+### Examples
+
+```sh
+# Implement a work item with no prompts, changes in an isolated worktree
+amux implement 0027 --yolo --workflow aspec/workflows/implement-feature.md
+
+# Autonomous chat session with Bash tool blocked
+# (add to aspec/.amux.json: "yoloDisallowedTools": ["Bash"])
+amux chat --yolo
+
+# Explicit worktree flag with yolo — identical to omitting it when --workflow is present
+amux implement 0027 --yolo --worktree --workflow aspec/workflows/implement-feature.md
+```
+
+---
+
 ## Docker Command Visibility
 
 Every time amux runs a Docker command (`docker build` or `docker run`), the
@@ -1333,7 +1441,8 @@ $ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_O
 ```json
 {
   "agent": "claude",
-  "terminal_scrollback_lines": 10000
+  "terminal_scrollback_lines": 10000,
+  "yoloDisallowedTools": ["Bash", "computer"]
 }
 ```
 
@@ -1341,13 +1450,15 @@ $ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_O
 |-------|------|---------|-------------|
 | `agent` | string | `"claude"` | Agent to use for this repository (`claude`, `codex`, `opencode`) |
 | `terminal_scrollback_lines` | integer | `10000` | Number of scrollback lines for the container terminal emulator. Overrides the global config value |
+| `yoloDisallowedTools` | string array | `[]` | Tools the agent is forbidden from using when `--yolo` is active. Overrides the global config value entirely |
 
 ### Global: `$HOME/.amux/config.json`
 
 ```json
 {
   "default_agent": "claude",
-  "terminal_scrollback_lines": 10000
+  "terminal_scrollback_lines": 10000,
+  "yoloDisallowedTools": ["Bash"]
 }
 ```
 
@@ -1355,10 +1466,17 @@ $ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_O
 |-------|------|---------|-------------|
 | `default_agent` | string | `"claude"` | Default agent used when no per-repo agent is configured |
 | `terminal_scrollback_lines` | integer | `10000` | Default number of scrollback lines for the container terminal emulator. Applied to all repos unless overridden by per-repo config |
+| `yoloDisallowedTools` | string array | `[]` | Global fallback list of tools forbidden when `--yolo` is active. Applied to all repos unless overridden by per-repo config |
 
 **Config precedence for `terminal_scrollback_lines`:**
 
 Per-repo config → Global config → Built-in default (10,000 lines)
+
+**Config precedence for `yoloDisallowedTools`:**
+
+Per-repo config → Global config → Empty list (no restriction)
+
+If a per-repo `yoloDisallowedTools` is set, it **replaces** the global list entirely (lists are not merged). To inherit the global list for a repo, omit the field from the repo config.
 
 A 10,000-line scrollback buffer at 80 columns uses approximately 3 MB per tab.
 Increase this value for long-running build or test sessions; decrease it to

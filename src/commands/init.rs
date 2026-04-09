@@ -97,6 +97,7 @@ pub async fn run_with_sink(
         agent: Some(agent.as_str().to_string()),
         auto_agent_auth_accepted: None,
         terminal_scrollback_lines: None,
+        yolo_disallowed_tools: None,
     };
     save_repo_config(&git_root, &config)?;
     out.println(format!(

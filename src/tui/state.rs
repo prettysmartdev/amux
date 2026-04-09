@@ -20,6 +20,9 @@ pub const STUCK_TIMEOUT: Duration = Duration::from_secs(10);
 /// before showing it again for the same stuck episode.
 pub const STUCK_DIALOG_BACKOFF: Duration = Duration::from_secs(60);
 
+/// In yolo mode, the countdown duration before automatically advancing a stuck workflow step.
+pub const YOLO_COUNTDOWN_DURATION: Duration = Duration::from_secs(60);
+
 /// Which widget currently receives keyboard input.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Focus {
@@ -119,6 +122,16 @@ pub enum Dialog {
         /// Optional error message (e.g. "No previous step to return to").
         error: Option<String>,
     },
+    /// Yolo mode: countdown dialog shown when a workflow step is stuck.
+    /// When the countdown expires the step is automatically advanced.
+    WorkflowYoloCountdown {
+        /// Name of the currently running step.
+        current_step: String,
+        /// When the countdown began.
+        started_at: Instant,
+        /// How long to wait before auto-advancing.
+        duration: Duration,
+    },
     /// After `implement --worktree` completes: ask whether to merge, discard, or keep the branch.
     WorktreeMergePrompt {
         branch: String,
@@ -185,6 +198,8 @@ pub enum PendingCommand {
         worktree: bool,
         /// Mount host ~/.ssh read-only into the container.
         mount_ssh: bool,
+        /// Enable fully autonomous mode.
+        yolo: bool,
     },
     Chat {
         non_interactive: bool,
@@ -192,6 +207,8 @@ pub enum PendingCommand {
         allow_docker: bool,
         /// Mount host ~/.ssh read-only into the container.
         mount_ssh: bool,
+        /// Enable fully autonomous mode.
+        yolo: bool,
     },
     ClawsReady,
     /// specs amend: run amend agent for a work item.
@@ -479,6 +496,19 @@ pub struct TabState {
     pub workflow_mount_path: Option<PathBuf>,
     /// Whether `--allow-docker` was passed for this workflow session.
     pub workflow_allow_docker: bool,
+
+    // --- Yolo mode state ---
+    /// When `true`, the agent was launched with `--yolo` (fully autonomous mode).
+    pub yolo_mode: bool,
+    /// Resolved `yoloDisallowedTools` list for the current session.
+    /// Empty when yolo mode is not active or no tools are configured.
+    pub yolo_disallowed_tools: Vec<String>,
+    /// When `true`, the stuck-dialog auto-popup is disabled for the current workflow step.
+    /// Set by pressing `d` in the `WorkflowControlBoard` dialog; reset when the step changes.
+    pub auto_workflow_disabled_for_step: bool,
+    /// Set to `true` by `tick_all()` when a yolo countdown dialog expires.
+    /// The event loop reads this flag and dispatches the appropriate workflow-advance action.
+    pub yolo_countdown_expired: bool,
 }
 
 impl TabState {
@@ -548,6 +578,10 @@ impl TabState {
             workflow_ssh_dir: None,
             workflow_mount_path: None,
             workflow_allow_docker: false,
+            yolo_mode: false,
+            yolo_disallowed_tools: Vec::new(),
+            auto_workflow_disabled_for_step: false,
+            yolo_countdown_expired: false,
         }
     }
 
@@ -663,6 +697,15 @@ impl TabState {
         self.last_output_time = None;
         self.workflow_stuck_dialog_opened = false;
         self.workflow_stuck_dialog_dismissed_at = None;
+        self.auto_workflow_disabled_for_step = false;
+        self.yolo_countdown_expired = false;
+        // Close the yolo countdown dialog defensively: the container has exited so there
+        // is nothing left to count down for.  In normal yolo+workflow runs the worktree
+        // merge prompt or WorkflowStepConfirm will overwrite this anyway, but if
+        // worktree_branch is somehow unset the dialog would otherwise persist on screen.
+        if matches!(self.dialog, Dialog::WorkflowYoloCountdown { .. }) {
+            self.dialog = Dialog::None;
+        }
 
         // Close the container window and generate a summary if applicable.
         if self.container_window != ContainerWindowState::Hidden {
@@ -986,6 +1029,11 @@ impl TabState {
                         }
                         // Any output from the container resets the stuck timer.
                         self.last_output_time = Some(Instant::now());
+                        // Cancel the yolo countdown dialog: the agent is active again.
+                        if matches!(self.dialog, Dialog::WorkflowYoloCountdown { .. }) {
+                            self.dialog = Dialog::None;
+                            self.workflow_stuck_dialog_opened = false;
+                        }
                     } else {
                         self.process_pty_data(&bytes);
                     }
@@ -1143,7 +1191,7 @@ impl App {
             tab.tick();
         }
 
-        // Auto-open WorkflowControlBoard on the active tab when it becomes stuck.
+        // Auto-open stuck dialog on the active tab when it becomes stuck.
         // Uses an index rather than the loop above to avoid a split-borrow conflict.
         // Intentionally no `container_window != Maximized` guard here — unlike Ctrl+W,
         // the auto-open must work even when the container is fullscreen.
@@ -1154,18 +1202,53 @@ impl App {
                 .workflow_stuck_dialog_dismissed_at
                 .map(|t| t.elapsed() >= STUCK_DIALOG_BACKOFF)
                 .unwrap_or(true);
-            if tab.is_stuck()
-                && tab.workflow_current_step.is_some()
-                && tab.dialog == Dialog::None
-                && !tab.workflow_stuck_dialog_opened
-                && backoff_elapsed
-            {
-                let step = tab.workflow_current_step.clone().unwrap();
-                tab.dialog = Dialog::WorkflowControlBoard {
-                    current_step: step,
-                    error: None,
-                };
-                tab.workflow_stuck_dialog_opened = true;
+
+            if tab.is_stuck() && tab.workflow_current_step.is_some() {
+                if tab.yolo_mode {
+                    // Yolo mode: open countdown dialog instead of control board.
+                    if tab.dialog == Dialog::None
+                        && !tab.workflow_stuck_dialog_opened
+                        && backoff_elapsed
+                    {
+                        let step = tab.workflow_current_step.clone().unwrap();
+                        tab.dialog = Dialog::WorkflowYoloCountdown {
+                            current_step: step,
+                            started_at: Instant::now(),
+                            duration: YOLO_COUNTDOWN_DURATION,
+                        };
+                        tab.workflow_stuck_dialog_opened = true;
+                    }
+                    // Check if the countdown has expired → signal auto-advance.
+                    let countdown_expired = if let Dialog::WorkflowYoloCountdown {
+                        ref started_at,
+                        ref duration,
+                        ..
+                    } = tab.dialog
+                    {
+                        started_at.elapsed() >= *duration
+                    } else {
+                        false
+                    };
+                    if countdown_expired {
+                        tab.yolo_countdown_expired = true;
+                        tab.dialog = Dialog::None;
+                        tab.workflow_stuck_dialog_opened = false;
+                    }
+                } else {
+                    // Non-yolo mode: open WorkflowControlBoard unless auto-popup is disabled.
+                    if tab.dialog == Dialog::None
+                        && !tab.workflow_stuck_dialog_opened
+                        && backoff_elapsed
+                        && !tab.auto_workflow_disabled_for_step
+                    {
+                        let step = tab.workflow_current_step.clone().unwrap();
+                        tab.dialog = Dialog::WorkflowControlBoard {
+                            current_step: step,
+                            error: None,
+                        };
+                        tab.workflow_stuck_dialog_opened = true;
+                    }
+                }
             }
         }
 
@@ -2087,6 +2170,159 @@ mod tests {
         assert!(
             matches!(app.active_tab().dialog, Dialog::WorkflowControlBoard { .. }),
             "dialog must reopen once the 60 s backoff has elapsed"
+        );
+    }
+
+    // ─── Yolo countdown tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn yolo_countdown_duration_constant_is_60s() {
+        assert_eq!(YOLO_COUNTDOWN_DURATION, Duration::from_secs(60));
+    }
+
+    fn setup_yolo_stuck_workflow_app() -> App {
+        let mut app = new_app();
+        let tab = app.active_tab_mut();
+        tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
+        tab.workflow_current_step = Some("step-one".to_string());
+        tab.yolo_mode = true;
+        tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
+        app
+    }
+
+    #[test]
+    fn tick_all_yolo_opens_countdown_dialog_when_stuck() {
+        let mut app = setup_yolo_stuck_workflow_app();
+        app.tick_all();
+        assert!(
+            matches!(app.active_tab().dialog, Dialog::WorkflowYoloCountdown { .. }),
+            "expected WorkflowYoloCountdown, got {:?}",
+            app.active_tab().dialog
+        );
+        assert!(app.active_tab().workflow_stuck_dialog_opened);
+    }
+
+    #[test]
+    fn tick_all_yolo_does_not_open_control_board() {
+        let mut app = setup_yolo_stuck_workflow_app();
+        app.tick_all();
+        assert!(
+            !matches!(app.active_tab().dialog, Dialog::WorkflowControlBoard { .. }),
+            "yolo mode must never open WorkflowControlBoard"
+        );
+    }
+
+    #[test]
+    fn tick_all_yolo_sets_expired_flag_after_countdown() {
+        let mut app = setup_yolo_stuck_workflow_app();
+        // Place an already-expired countdown dialog.
+        app.active_tab_mut().dialog = Dialog::WorkflowYoloCountdown {
+            current_step: "step-one".to_string(),
+            started_at: Instant::now() - YOLO_COUNTDOWN_DURATION,
+            duration: YOLO_COUNTDOWN_DURATION,
+        };
+        app.active_tab_mut().workflow_stuck_dialog_opened = true;
+        app.tick_all();
+        assert!(
+            app.active_tab().yolo_countdown_expired,
+            "yolo_countdown_expired must be set when the countdown elapses"
+        );
+        assert_eq!(
+            app.active_tab().dialog,
+            Dialog::None,
+            "countdown dialog must be closed after expiry"
+        );
+        assert!(!app.active_tab().workflow_stuck_dialog_opened);
+    }
+
+    #[test]
+    fn finish_command_closes_yolo_countdown_dialog() {
+        let mut tab = new_tab();
+        tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
+        tab.dialog = Dialog::WorkflowYoloCountdown {
+            current_step: "step-one".to_string(),
+            started_at: Instant::now(),
+            duration: YOLO_COUNTDOWN_DURATION,
+        };
+        tab.finish_command(0);
+        assert_eq!(
+            tab.dialog,
+            Dialog::None,
+            "finish_command must close the yolo countdown dialog"
+        );
+    }
+
+    #[test]
+    fn tick_pty_output_closes_yolo_countdown_dialog() {
+        use std::sync::mpsc;
+        use crate::tui::pty::PtyEvent;
+
+        let mut tab = new_tab();
+        tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
+        tab.dialog = Dialog::WorkflowYoloCountdown {
+            current_step: "step-one".to_string(),
+            started_at: Instant::now(),
+            duration: YOLO_COUNTDOWN_DURATION,
+        };
+        tab.workflow_stuck_dialog_opened = true;
+
+        // Wire a fake PTY channel and send one byte of data.
+        let (tx, rx) = mpsc::channel::<PtyEvent>();
+        tab.pty_rx = Some(rx);
+        tx.send(PtyEvent::Data(b"x".to_vec())).unwrap();
+
+        tab.tick();
+
+        assert_eq!(
+            tab.dialog,
+            Dialog::None,
+            "any PTY byte must close the yolo countdown dialog"
+        );
+        assert!(
+            !tab.workflow_stuck_dialog_opened,
+            "workflow_stuck_dialog_opened must be cleared when countdown is cancelled"
+        );
+    }
+
+    // ─── auto_workflow_disabled_for_step tests ────────────────────────────────────
+
+    #[test]
+    fn auto_workflow_disabled_suppresses_control_board_auto_open() {
+        let mut app = setup_stuck_workflow_app();
+        app.active_tab_mut().auto_workflow_disabled_for_step = true;
+        app.tick_all();
+        assert_eq!(
+            app.active_tab().dialog,
+            Dialog::None,
+            "auto_workflow_disabled_for_step must suppress auto-open of WorkflowControlBoard"
+        );
+    }
+
+    #[test]
+    fn finish_command_resets_auto_workflow_disabled_for_step() {
+        let mut tab = new_tab();
+        tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        tab.auto_workflow_disabled_for_step = true;
+        tab.finish_command(0);
+        assert!(
+            !tab.auto_workflow_disabled_for_step,
+            "finish_command must reset auto_workflow_disabled_for_step"
+        );
+    }
+
+    #[test]
+    fn yolo_countdown_opens_even_when_auto_workflow_disabled() {
+        // auto_workflow_disabled_for_step only affects the non-yolo code path;
+        // the yolo countdown must still open regardless.
+        let mut app = setup_yolo_stuck_workflow_app();
+        app.active_tab_mut().auto_workflow_disabled_for_step = true;
+        app.tick_all();
+        assert!(
+            matches!(app.active_tab().dialog, Dialog::WorkflowYoloCountdown { .. }),
+            "yolo countdown must open even when auto_workflow_disabled_for_step is set"
         );
     }
 }

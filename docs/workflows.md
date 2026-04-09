@@ -86,6 +86,7 @@ Flags work identically to the regular `implement` command:
 | `--allow-docker` | Mount the host Docker socket into each step's container |
 | `--worktree` | Run all steps in an isolated Git worktree (see [Worktree Isolation](usage.md#worktree-isolation)) |
 | `--mount-ssh` | Mount host `~/.ssh` read-only into each step's container (see [SSH Key Mounting](usage.md#ssh-key-mounting)) |
+| `--yolo` | Enable fully autonomous mode: skip all permission prompts, apply disallowed-tool config, and auto-advance stuck steps via countdown. Implies `--worktree` (see [Yolo Mode](usage.md#yolo-mode)) |
 
 Between steps amux prints the step summary and prompts:
 
@@ -138,7 +139,7 @@ While a workflow step is **running**, press **Ctrl+W** (with the container windo
 │                                  │
 │         ↓ Next: same container   │
 │                                  │
-│  [Arrow] select   [Esc] dismiss  │
+│  [Arrow] select  [d]isable  [Esc] dismiss  │
 ╰──────────────────────────────────╯
 ```
 
@@ -150,26 +151,58 @@ While a workflow step is **running**, press **Ctrl+W** (with the container windo
 | **←** | **Cancel to previous step** — marks the current step Pending and rolls back the most recently completed step so it runs again |
 | **→** | **Next step: new container** — marks the current step Done and advances to the next step in a brand-new container |
 | **↓** | **Next step: same container** — marks the current step Done and sends the next step's prompt to the existing container via its open PTY session |
+| **d** | **Disable auto-popup for this step** — dismisses the control board and suppresses the auto-open for the remainder of the current step. The dialog will not re-open automatically unless the workflow advances to the next step. Ctrl+W still works for manual access |
 | **Esc** | Dismiss the control board without changing anything |
 
 Each action persists workflow state to disk before launching any new execution, so an unexpected exit mid-action leaves the state consistent.
 
 ### Auto-advance when stuck
 
-If a running workflow step produces no container output for **10 seconds**, amux considers it stuck and **automatically opens the workflow control board** so you can take action without having to notice the yellow indicator and manually press Ctrl+W.
+If a running workflow step produces no container output for **10 seconds**, amux considers it stuck and automatically opens a dialog so you can take action without having to notice the yellow indicator.
 
-The auto-open fires only when all of the following are true:
+**Without `--yolo`** — the [workflow control board](#workflow-control-board-tui-only) opens so you can choose what to do. The auto-open fires only when:
 
 - The stuck tab is the **currently active tab** (background tabs are deferred)
 - A workflow step is currently running
 - No other dialog is already open
 - The control board has not already been auto-opened for this stuck episode
+- Auto-open has not been **disabled for this step** via the `d` key (see [Controls](#controls))
 
 The auto-open works even when the container window is **maximized** — the dialog appears over the full-screen terminal view and keyboard input is routed to the dialog rather than the PTY.
 
 **After you dismiss with Esc**, the stuck timer resets. If the container remains silent for another 10 seconds, the dialog re-opens. This prevents a rapid re-open loop while still keeping you informed.
 
+**After you press `d`**, the auto-open is suppressed for the remainder of the current step — the dialog will not re-open until the workflow advances. You can still open it manually with Ctrl+W.
+
 **Background tab deferral** — if a workflow step goes silent on a tab you are not currently viewing, the auto-open is suppressed. When you switch to that tab, the control board opens on the next tick (within ~100 ms) if the step is still stuck.
+
+**With `--yolo`** — instead of the control board, amux opens the **yolo countdown dialog**, which automatically advances to the next step after 60 seconds of continued inactivity. See [Yolo mode](#yolo-mode-tui-workflows) below.
+
+### Yolo mode (TUI workflows)
+
+When `--yolo` is passed with `--workflow`, the TUI workflow experience changes in three ways:
+
+1. **`--worktree` is implied** — an isolated Git worktree is created automatically before the first step launches. A message appears in the execution window:
+   ```
+   --yolo with --workflow implies --worktree. Running in isolated worktree.
+   ```
+
+2. **Stuck steps trigger the countdown dialog instead of the control board** — when a step produces no output for 10 seconds, the yolo countdown dialog appears:
+   ```
+   ╭─────── Yolo: Auto-Advance ──────────────╮
+   │ Step: implement                          │
+   │                                          │
+   │  No activity detected.                   │
+   │  Advancing to next step in  47s...       │
+   │                                          │
+   │                    [Esc] cancel          │
+   ╰──────────────────────────────────────────╯
+   ```
+   The countdown updates every tick. When it reaches zero, amux automatically advances to the next step (or completes the workflow if this was the last step).
+
+3. **Countdown is cancelled by any PTY output** — if the container produces any output during the countdown, the dialog is dismissed immediately. The agent is no longer stuck, so no action is needed.
+
+**Pressing Esc** on the countdown dialog dismisses it. The normal 10-second backoff applies: if the step remains silent, the countdown will re-open. The countdown does not resume from where it was left off — it resets to the full 60 seconds on each re-open.
 
 ### When Ctrl+W is available (manual)
 
@@ -215,12 +248,18 @@ PTY session ended — starting new container
 | **← Cancel** with parallel predecessors | Rolls back the most recently completed step (last `Done` step by file order) |
 | **→ / ↓ Next** when current step is the final step | Transitions to workflow-complete state; no new launch |
 | **↓ Next: same container** with closed PTY | Falls back to new container; shows status message |
+| **d** pressed; auto-popup suppressed for step | Auto-open skipped until workflow advances; Ctrl+W still works manually |
 | Container window maximized (manual Ctrl+W) | Ctrl+W is suppressed; hint guides you to minimize first |
 | Container window maximized (auto-open) | Dialog opens over the maximized terminal; input routes to the dialog |
 | Another dialog already open | Both Ctrl+W and auto-open are suppressed until the open dialog is dismissed |
 | Step goes silent on a background tab | Auto-open is deferred; control board appears when you switch to that tab |
 | Esc dismissed; container still silent | Timer resets; dialog re-opens after another 10 s of silence |
 | Output resumes before the 10 s threshold | Stuck state clears; auto-open does not trigger |
+| `--yolo`: step stuck for 10 s | Countdown dialog opens instead of control board; auto-advances after 60 s |
+| `--yolo`: container produces output during countdown | Countdown dialog is dismissed immediately; agent is no longer stuck |
+| `--yolo`: countdown expires on the last step | Workflow-complete state triggered; no new container launched |
+| `--yolo` + `--workflow` without `--worktree` | `--worktree` is implied automatically; informational message printed |
+| `--yolo` + `--worktree` + `--workflow` | Both flags accepted; `--worktree` already set, no duplicate worktree; no message printed |
 
 ---
 
