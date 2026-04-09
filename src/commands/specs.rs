@@ -123,7 +123,9 @@ fn agent_name_from_config(git_root: &Path) -> Result<String> {
 /// CLI entry point for `amux specs new`.
 pub async fn run_new(interview: bool) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    run_new_with_sink(&OutputSink::Stdout, None, None, &cwd, interview, None).await
+    let global_config = crate::config::load_global_config().unwrap_or_default();
+    let runtime = crate::runtime::resolve_runtime(&global_config)?;
+    run_new_with_sink(&OutputSink::Stdout, None, None, &cwd, interview, None, &*runtime).await
 }
 
 /// Shared logic for `specs new` — used by both CLI and TUI.
@@ -134,6 +136,7 @@ pub async fn run_new_with_sink(
     cwd: &Path,
     interview: bool,
     summary: Option<String>,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     if !interview {
         return crate::commands::new::run_with_sink(out, kind, title, cwd).await;
@@ -182,6 +185,7 @@ pub async fn run_new_with_sink(
         false,
         false,
         None,
+        runtime,
     )
     .await?;
 
@@ -203,6 +207,7 @@ pub async fn run_amend(
     work_item_str: &str,
     non_interactive: bool,
     allow_docker: bool,
+    runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
 ) -> Result<()> {
     let work_item = parse_work_item(work_item_str)?;
     let git_root = find_git_root().context("Not inside a Git repository")?;
@@ -236,6 +241,7 @@ pub async fn run_amend(
         allow_docker,
         false,
         None,
+        &*runtime,
     )
     .await
 }
@@ -249,6 +255,7 @@ pub async fn run_with_sink_amend(
     non_interactive: bool,
     host_settings: Option<&docker::HostSettings>,
     allow_docker: bool,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let config = load_repo_config(&git_root)?;
@@ -278,6 +285,7 @@ pub async fn run_with_sink_amend(
         allow_docker,
         false,
         None,
+        runtime,
     )
     .await
 }

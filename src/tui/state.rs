@@ -1094,16 +1094,26 @@ pub struct App {
     /// Set to `true` after a TUI suspend/restore so the event loop calls
     /// `terminal.clear()` before the next draw, forcing a full re-render.
     pub needs_full_redraw: bool,
+    /// Container runtime backend (Docker, Apple Containers, etc.).
+    pub runtime: Arc<dyn crate::runtime::AgentRuntime>,
 }
 
 impl App {
     pub fn new(cwd: std::path::PathBuf) -> Self {
+        Self::new_with_runtime(
+            cwd,
+            Arc::new(crate::runtime::docker::DockerRuntime::new()),
+        )
+    }
+
+    pub fn new_with_runtime(cwd: std::path::PathBuf, runtime: Arc<dyn crate::runtime::AgentRuntime>) -> Self {
         Self {
             tabs: vec![TabState::new(cwd)],
             active_tab_idx: 0,
             should_quit: false,
             tui_tabs_shared: Arc::new(Mutex::new(vec![])),
             needs_full_redraw: false,
+            runtime,
         }
     }
 

@@ -23,6 +23,7 @@ use amux::commands::ready::{
     print_summary, print_interactive_notice,
 };
 use amux::commands::{init, new, ready};
+use amux::runtime::docker::DockerRuntime;
 use amux::tui::input::{autocomplete_suggestions, closest_subcommand};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -70,7 +71,8 @@ async fn ready_via_sink_emits_checking_message() {
 
     let mount_path = PathBuf::from("/tmp");
     let opts = ReadyOptions::default();
-    let _ = ready::run_with_sink(&sink, mount_path, vec![], &opts, None).await;
+    let runtime = DockerRuntime::new();
+    let _ = ready::run_with_sink(&sink, mount_path, vec![], &opts, None, &runtime).await;
 
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let has_checking = messages.iter().any(|m| m.contains("Checking"));
@@ -152,11 +154,11 @@ fn ready_summary_table_outputs_all_rows() {
         refresh: StepStatus::Skipped("use --refresh to run".into()),
         image_rebuild: StepStatus::Skipped("no refresh".into()),
     };
-    print_summary(&sink, &summary);
+    print_summary(&sink, "docker", &summary);
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let all = messages.join("\n");
     assert!(all.contains("Ready Summary"));
-    assert!(all.contains("Docker daemon"));
+    assert!(all.contains("docker runtime"));
     assert!(all.contains("Dockerfile.dev"));
     assert!(all.contains("Dev image"));
     assert!(all.contains("Refresh"));
@@ -188,7 +190,7 @@ fn ready_summary_includes_aspec_and_local_agent_rows() {
         refresh: StepStatus::Skipped("use --refresh to run".into()),
         image_rebuild: StepStatus::Skipped("no refresh".into()),
     };
-    print_summary(&sink, &summary);
+    print_summary(&sink, "docker", &summary);
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let all = messages.join("\n");
     assert!(all.contains("aspec folder"), "Missing aspec folder row");
@@ -1944,7 +1946,8 @@ async fn claws_ready_not_installed_suggests_init() {
     let _guard = HOME_MUTEX.lock().unwrap();
     std::env::set_var("HOME", tmp.path());
 
-    let result = claws::run_claws_ready(&sink).await;
+    let runtime = DockerRuntime::new();
+    let result = claws::run_claws_ready(&sink, &runtime).await;
 
     std::env::remove_var("HOME");
 
@@ -1969,7 +1972,8 @@ async fn claws_chat_not_installed_returns_error() {
     let _guard = HOME_MUTEX.lock().unwrap();
     std::env::set_var("HOME", tmp.path());
 
-    let result = claws::run_claws_chat().await;
+    let runtime = DockerRuntime::new();
+    let result = claws::run_claws_chat(&runtime).await;
 
     std::env::remove_var("HOME");
 
@@ -2001,7 +2005,8 @@ async fn claws_chat_container_not_running_returns_error() {
     let _guard = HOME_MUTEX.lock().unwrap();
     std::env::set_var("HOME", tmp.path());
 
-    let result = claws::run_claws_chat().await;
+    let runtime = DockerRuntime::new();
+    let result = claws::run_claws_chat(&runtime).await;
 
     std::env::remove_var("HOME");
 
@@ -2430,6 +2435,7 @@ async fn run_agent_with_sink_mount_ssh_emits_warning() {
 
     // mount_override avoids the interactive stdin prompt.
     let mount_path = PathBuf::from("/tmp");
+    let runtime = amux::runtime::docker::DockerRuntime::new();
     let result = amux::commands::agent::run_agent_with_sink(
         vec!["echo".to_string(), "hello".to_string()],
         "test status",
@@ -2441,6 +2447,7 @@ async fn run_agent_with_sink_mount_ssh_emits_warning() {
         false,
         true, // mount_ssh = true
         None,
+        &runtime,
     )
     .await;
 
@@ -2468,6 +2475,7 @@ async fn run_agent_with_sink_no_mount_ssh_no_warning() {
     let sink = OutputSink::Channel(tx);
 
     let mount_path = PathBuf::from("/tmp");
+    let runtime = amux::runtime::docker::DockerRuntime::new();
     let result = amux::commands::agent::run_agent_with_sink(
         vec!["echo".to_string(), "hello".to_string()],
         "test status",
@@ -2479,6 +2487,7 @@ async fn run_agent_with_sink_no_mount_ssh_no_warning() {
         false,
         false, // mount_ssh = false
         None,
+        &runtime,
     )
     .await;
 
@@ -2507,6 +2516,7 @@ async fn run_agent_with_sink_mount_ssh_display_cmd_includes_ssh_path() {
     let sink = OutputSink::Channel(tx);
 
     let mount_path = PathBuf::from("/tmp");
+    let runtime = amux::runtime::docker::DockerRuntime::new();
     let result = amux::commands::agent::run_agent_with_sink(
         vec!["echo".to_string()],
         "test status",
@@ -2518,6 +2528,7 @@ async fn run_agent_with_sink_mount_ssh_display_cmd_includes_ssh_path() {
         false,
         true, // mount_ssh = true
         None,
+        &runtime,
     )
     .await;
 
@@ -2551,6 +2562,7 @@ async fn run_agent_with_sink_no_mount_ssh_display_cmd_excludes_ssh_path() {
     let sink = OutputSink::Channel(tx);
 
     let mount_path = PathBuf::from("/tmp");
+    let runtime = amux::runtime::docker::DockerRuntime::new();
     let result = amux::commands::agent::run_agent_with_sink(
         vec!["echo".to_string()],
         "test status",
@@ -2562,6 +2574,7 @@ async fn run_agent_with_sink_no_mount_ssh_display_cmd_excludes_ssh_path() {
         false,
         false, // mount_ssh = false
         None,
+        &runtime,
     )
     .await;
 
@@ -2596,6 +2609,7 @@ async fn run_agent_with_sink_mount_ssh_missing_ssh_dir_errors() {
     let sink = OutputSink::Channel(tx);
 
     let mount_path = PathBuf::from("/tmp");
+    let runtime = amux::runtime::docker::DockerRuntime::new();
     let result = amux::commands::agent::run_agent_with_sink(
         vec!["echo".to_string()],
         "test status",
@@ -2607,6 +2621,7 @@ async fn run_agent_with_sink_mount_ssh_missing_ssh_dir_errors() {
         false,
         true, // mount_ssh = true, but ~/.ssh does not exist
         None,
+        &runtime,
     )
     .await;
 
@@ -2678,6 +2693,7 @@ async fn e2e_implement_mount_ssh_displays_warning_and_docker_mount() {
     let sink = OutputSink::Channel(tx);
 
     let cwd = std::env::current_dir().unwrap();
+    let runtime = DockerRuntime::new();
     let _ = amux::commands::implement::run_with_sink(
         1,
         &sink,
@@ -2689,6 +2705,7 @@ async fn e2e_implement_mount_ssh_displays_warning_and_docker_mount() {
         false,
         false, // worktree
         true,  // mount_ssh
+        &runtime,
     )
     .await;
 
@@ -2730,6 +2747,7 @@ async fn e2e_chat_mount_ssh_displays_warning_and_docker_mount() {
     let sink = OutputSink::Channel(tx);
 
     let cwd = std::env::current_dir().unwrap();
+    let runtime = DockerRuntime::new();
     let _ = amux::commands::chat::run_with_sink(
         &sink,
         Some(cwd),
@@ -2739,6 +2757,7 @@ async fn e2e_chat_mount_ssh_displays_warning_and_docker_mount() {
         None,
         false,
         true, // mount_ssh
+        &runtime,
     )
     .await;
 

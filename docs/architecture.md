@@ -10,12 +10,15 @@ amux binary ──► command mode  ──► commands/{init,ready,implement,cha
      │                                       │
      └──────► interactive mode (TUI)         │
                     │                        ▼
-              tui/{mod,state,                docker::run_container
-               input,render,pty}             docker::run_container_captured
-                    │                        docker::build_image_streaming
-                    ▼                              │
-              Docker Daemon ──────────────► Managed Container
-                                           (agent runs here)
+              tui/{mod,state,          runtime: AgentRuntime (Arc<dyn>)
+               input,render,pty}             │
+                    │              ┌──────────┴──────────┐
+                    │         DockerRuntime       AppleContainersRuntime
+                    │              │                     │ (macOS 26+)
+                    ▼              ▼                     ▼
+             Container Runtime ──────────────► Managed Container
+               (Docker or                      (agent runs here)
+            Apple Containers)
 ```
 
 ---
@@ -53,14 +56,17 @@ src/
                            agent_entrypoint, agent_entrypoint_non_interactive
     chat.rs                `amux chat` — run() + run_with_sink()
                            chat_entrypoint, chat_entrypoint_non_interactive
-  docker/
-    mod.rs                 is_daemon_running, image_exists, project_image_tag,
-                           build_image, build_image_streaming,
-                           run_container, run_container_captured,
-                           build_run_args, build_run_args_pty,
-                           HostSettings (sanitized config mount),
-                           ContainerStats, generate_container_name,
-                           query_container_stats
+  runtime/
+    mod.rs                 AgentRuntime trait (all container operations);
+                           resolve_runtime() factory (reads GlobalConfig);
+                           HostSettings (sanitized config mount, shared by all runtimes);
+                           ContainerStats; free utilities: generate_container_name,
+                           project_image_tag, parse_cpu_percent, parse_memory_mb,
+                           format_build_cmd, format_run_cmd
+    docker.rs              DockerRuntime — implements AgentRuntime via the
+                           `docker` CLI; replaces src/docker/mod.rs
+    apple.rs               AppleContainersRuntime — implements AgentRuntime via
+                           the `container` CLI; #[cfg(target_os = "macos")]
   tui/
     mod.rs                 run() entry point; event loop; action dispatcher;
                            ClipboardWriter trait; copy_selection_to_clipboard();
@@ -109,13 +115,84 @@ pub enum OutputSink {
 ```
 
 `OutputSink` implements `Clone`, allowing it to be passed to streaming callbacks
-like `docker::build_image_streaming`.
+like `runtime.build_image_streaming()`.
 
 This is the core mechanism that allows zero code duplication between the two
 execution modes. The command logic is identical — only the destination of output differs.
 
 In command mode, `run()` wraps `run_with_sink(…, &OutputSink::Stdout)`.
 In TUI mode, `execute_command()` passes `OutputSink::Channel(app.output_tx.clone())`.
+
+---
+
+## The `AgentRuntime` Abstraction
+
+All container operations go through a single `AgentRuntime` trait defined in
+`src/runtime/mod.rs`. This decouples the agent-launching logic from any
+specific container technology.
+
+```rust
+pub trait AgentRuntime: Send + Sync {
+    fn is_available(&self) -> bool;
+    fn name(&self) -> &'static str;
+    fn cli_binary(&self) -> &'static str;
+
+    // Image lifecycle
+    fn build_image(&self, tag: &str, dockerfile: &Path, context: &Path, no_cache: bool) -> Result<String>;
+    fn build_image_streaming<F>(&self, ...) -> Result<String>;
+    fn image_exists(&self, tag: &str) -> bool;
+
+    // Container run variants
+    fn run_container(&self, ...) -> Result<()>;
+    fn run_container_captured(&self, ...) -> Result<(String, String)>;
+    fn run_container_detached(&self, ...) -> Result<String>;
+    // … additional run_container_at_path variants …
+
+    // Container lifecycle
+    fn start_container(&self, id: &str) -> Result<()>;
+    fn stop_container(&self, id: &str) -> Result<()>;
+    fn remove_container(&self, id: &str) -> Result<()>;
+    fn is_container_running(&self, id: &str) -> bool;
+
+    // Discovery & stats
+    fn list_running_containers_by_prefix(&self, prefix: &str) -> Vec<String>;
+    fn query_container_stats(&self, name: &str) -> Option<ContainerStats>;
+
+    // PTY argument builders (for TUI interactive sessions)
+    fn build_run_args_pty(&self, ...) -> Vec<String>;
+    fn build_exec_args_pty(&self, ...) -> Vec<String>;
+}
+```
+
+The runtime is resolved once at startup via `resolve_runtime(&GlobalConfig)`,
+which reads the `runtime` config field and returns an `Arc<dyn AgentRuntime>`.
+This `Arc` is threaded from `main.rs` through the command dispatcher into every
+command handler and the TUI event loop.
+
+### Runtime implementations
+
+| Struct | File | Notes |
+|--------|------|-------|
+| `DockerRuntime` | `src/runtime/docker.rs` | Wraps the `docker` CLI; identical behavior to the old `src/docker/mod.rs` |
+| `AppleContainersRuntime` | `src/runtime/apple.rs` | Wraps the `container` CLI; `#[cfg(target_os = "macos")]` |
+
+### Shared utilities
+
+The following free functions in `src/runtime/mod.rs` are not runtime-specific
+and are used by all implementations:
+
+- `generate_container_name()` — produces `amux-{hash}` names
+- `project_image_tag()` — produces `amux-{project}:latest`
+- `parse_cpu_percent()` / `parse_memory_mb()` — stat output parsers (each
+  runtime may use its own format variant)
+- `format_build_cmd()` / `format_run_cmd()` — display-only command string builders
+
+### `HostSettings`
+
+`HostSettings` (the sanitized Claude config mount — `.claude.json` and
+`settings.json`) lives in `src/runtime/mod.rs`. It is not Docker-specific; all
+runtime implementations that support bind mounts use it for credential
+injection.
 
 ---
 
@@ -192,7 +269,7 @@ The `ready` command has two modes based on the `--refresh` flag:
 
 ### Without `--refresh` (default)
 
-1. Check Docker daemon
+1. Check configured runtime is available (`runtime.is_available()`) — report name and status
 2. Check `Dockerfile.dev` exists (init from template if missing)
 3. Check project image exists (build if missing, with streaming output)
 4. Print skip message and tip about `--refresh`

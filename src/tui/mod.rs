@@ -47,7 +47,7 @@ pub struct StartupReadyFlags {
 }
 
 /// Launches the interactive TUI. Blocks until the user quits.
-pub async fn run(startup_flags: StartupReadyFlags) -> Result<()> {
+pub async fn run(startup_flags: StartupReadyFlags, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -62,7 +62,7 @@ pub async fn run(startup_flags: StartupReadyFlags) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, startup_flags).await;
+    let result = run_app(&mut terminal, startup_flags, runtime).await;
 
     // Always restore the terminal, even on error.
     if keyboard_enhanced {
@@ -74,13 +74,13 @@ pub async fn run(startup_flags: StartupReadyFlags) -> Result<()> {
     result
 }
 
-async fn run_app<B>(terminal: &mut Terminal<B>, startup_flags: StartupReadyFlags) -> Result<()>
+async fn run_app<B>(terminal: &mut Terminal<B>, startup_flags: StartupReadyFlags, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()>
 where
     B: ratatui::backend::Backend + io::Write,
     <B as ratatui::backend::Backend>::Error: Send + Sync + 'static,
 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let mut app = App::new(cwd.clone());
+    let mut app = App::new_with_runtime(cwd.clone(), runtime);
 
     // At startup: if we are inside a Git repo, run `ready` as usual.
     // If not, run `status --watch` so the user can see the global agent universe.
@@ -886,16 +886,17 @@ async fn execute_command(app: &mut App, cmd: &str) {
             let tx = app.active_tab().output_tx.clone();
             // Pass the shared Arc so the background task reads live state on every refresh.
             let tui_tabs = app.tui_tabs_shared.clone();
+            let status_runtime = app.runtime.clone();
             if watch {
                 // Create a cancel channel so that running a new command stops the loop.
                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
                 app.active_tab_mut().status_watch_cancel_tx = Some(cancel_tx);
                 spawn_text_command(tx, exit_tx, move |sink| async move {
-                    status::run_with_sink(true, &sink, Some(cancel_rx), tui_tabs).await
+                    status::run_with_sink(true, &sink, Some(cancel_rx), tui_tabs, status_runtime).await
                 });
             } else {
                 spawn_text_command(tx, exit_tx, move |sink| async move {
-                    status::run_with_sink(false, &sink, None, tui_tabs).await
+                    status::run_with_sink(false, &sink, None, tui_tabs, status_runtime).await
                 });
             }
         }
@@ -1001,18 +1002,19 @@ async fn launch_ready(app: &mut App) {
     app.active_tab_mut().ready_ctx_rx = Some(ctx_rx);
     let tx = app.active_tab().output_tx.clone();
 
+    let ready_runtime = app.runtime.clone();
     // If not refreshing, run the full sink-based workflow (no audit/post-audit).
     if !opts.refresh {
         app.active_tab_mut().ready_phase = ReadyPhase::Inactive; // No multi-phase needed.
         spawn_text_command(tx, exit_tx, move |sink| async move {
-            let _ = ready::run_with_sink(&sink, mount_path, env_vars, &opts, None).await?;
+            let _ = ready::run_with_sink(&sink, mount_path, env_vars, &opts, None, &*ready_runtime).await?;
             Ok(())
         });
     } else {
         let opts_clone = opts.clone();
         spawn_text_command(tx, exit_tx, move |sink| async move {
             let mut summary = ready::ReadySummary::default();
-            let ctx = ready::run_pre_audit(&sink, mount_path, env_vars, &opts_clone, &mut summary).await?;
+            let ctx = ready::run_pre_audit(&sink, mount_path, env_vars, &opts_clone, &mut summary, &*ready_runtime).await?;
             let _ = ctx_tx.send((ctx, summary));
             Ok(())
         });
@@ -1122,17 +1124,17 @@ fn launch_ready_audit(app: &mut App) {
     let entrypoint = ready::audit_entrypoint(&ctx.agent_name);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    let docker_args = docker::build_run_args_pty(
+    let pty_args = app.runtime.build_run_args_pty(
         &ctx.image_tag,
         &ctx.mount_path,
         &entrypoint_refs,
         &ctx.env_vars,
-        Some(&container_name),
         app.active_tab().host_settings.as_ref(),
         allow_docker,
+        Some(&container_name),
         None,
     );
-    let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
+    let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
 
     // Use actual terminal dimensions for the PTY.
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -1153,11 +1155,13 @@ fn launch_ready_audit(app: &mut App) {
     app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(ctx.mount_path.as_ref());
     app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
 
-    match PtySession::spawn("docker", &docker_str_refs, size) {
+    let cli_binary = app.runtime.cli_binary();
+    let stats_runtime = app.runtime.clone();
+    match PtySession::spawn(cli_binary, &pty_str_refs, size) {
         Ok((session, pty_rx)) => {
             app.active_tab_mut().pty = Some(session);
             app.active_tab_mut().pty_rx = Some(pty_rx);
-            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name));
+            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
         }
         Err(e) => {
             app.active_tab_mut().push_output(format!("Failed to launch audit container: {}", e));
@@ -1209,10 +1213,11 @@ fn launch_ready_audit_captured(app: &mut App) {
     app.active_tab_mut().exit_rx = Some(exit_rx);
     let tx = app.active_tab().output_tx.clone();
 
+    let audit_runtime = app.runtime.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
         let entrypoint = ready::audit_entrypoint_non_interactive(&ctx.agent_name);
         let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
-        let (_cmd, output) = docker::run_container_captured(
+        let (_cmd, output) = audit_runtime.run_container_captured(
             &ctx.image_tag,
             &ctx.mount_path,
             &entrypoint_refs,
@@ -1241,6 +1246,7 @@ fn launch_ready_post_audit(app: &mut App) {
     };
 
     let opts = app.active_tab().ready_opts.clone();
+    let post_audit_runtime = app.runtime.clone();
     app.active_tab_mut().ready_phase = ReadyPhase::PostAudit;
     app.active_tab_mut().continue_command("ready (rebuild)".to_string());
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
@@ -1253,8 +1259,8 @@ fn launch_ready_post_audit(app: &mut App) {
         summary.dockerfile = ready::StepStatus::Ok("checked".into());
         summary.dev_image = ready::StepStatus::Ok("checked".into());
         summary.refresh = ready::StepStatus::Ok("completed".into());
-        ready::run_post_audit(&sink, &ctx, &opts, &mut summary).await?;
-        print_summary(&sink, &summary);
+        ready::run_post_audit(&sink, &ctx, &opts, &mut summary, &*post_audit_runtime).await?;
+        print_summary(&sink, post_audit_runtime.name(), &summary);
         sink.println(String::new());
         sink.println("amux is ready.");
         Ok(())
@@ -1464,13 +1470,14 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
     // Generate a container name for stats polling.
     let container_name = docker::generate_container_name();
 
-    // Show the full Docker CLI command in the execution window (with masked env values).
+    // Show the full CLI command in the execution window (with masked env values).
     let display_args = if non_interactive {
-        docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, None, ssh_dir.clone())
+        app.runtime.build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, None, ssh_dir.as_deref())
     } else {
-        docker::build_run_args_pty_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, Some(&container_name), app.active_tab().host_settings.as_ref(), allow_docker, ssh_dir.clone())
+        app.runtime.build_run_args_pty_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, Some(&container_name), ssh_dir.as_deref())
     };
-    let cmd_display = docker::format_run_cmd(&display_args);
+    let cli_binary = app.runtime.cli_binary();
+    let cmd_display = format!("$ {} {}", cli_binary, display_args.join(" "));
 
     app.active_tab_mut().start_command(command_display);
 
@@ -1494,7 +1501,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         }
     }
 
-    app.active_tab_mut().push_output(format!("$ {}", cmd_display));
+    app.active_tab_mut().push_output(cmd_display);
 
     if non_interactive {
         app.active_tab_mut().push_output("Tip: remove --non-interactive to interact with the agent directly.");
@@ -1505,10 +1512,11 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         app.active_tab_mut().exit_rx = Some(exit_rx);
         let tx = app.active_tab().output_tx.clone();
         let mount_str = mount_path.to_str().unwrap().to_string();
+        let impl_runtime = app.runtime.clone();
         spawn_text_command(tx, exit_tx, move |sink| async move {
             let entrypoint = agent_entrypoint_non_interactive(&agent_name, work_item, plan);
             let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
-            let (_cmd, output) = docker::run_container_captured(
+            let (_cmd, output) = impl_runtime.run_container_captured(
                 &image_tag,
                 &mount_str,
                 &entrypoint_refs,
@@ -1516,7 +1524,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
                 host_settings.as_ref(),
                 allow_docker,
                 None,
-                ssh_dir.clone(),
+                ssh_dir.as_deref(),
             )?;
             for line in output.lines() {
                 sink.println(line);
@@ -1528,9 +1536,8 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
         print_interactive_notice(&sink, &agent_name);
 
-        let docker_args =
-            docker::build_run_args_pty(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, Some(&container_name), app.active_tab().host_settings.as_ref(), allow_docker, ssh_dir.clone());
-        let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
+        let pty_args = app.runtime.build_run_args_pty(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, Some(&container_name), ssh_dir.as_deref());
+        let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
 
         // Use actual terminal dimensions for the PTY.
         let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -1548,12 +1555,14 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(&git_root);
         app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
 
-        match PtySession::spawn("docker", &docker_str_refs, size) {
+        let cli_bin = app.runtime.cli_binary();
+        let stats_runtime = app.runtime.clone();
+        match PtySession::spawn(cli_bin, &pty_str_refs, size) {
             Ok((session, pty_rx)) => {
                 app.active_tab_mut().pty = Some(session);
                 app.active_tab_mut().pty_rx = Some(pty_rx);
-                // Start Docker stats polling.
-                app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name));
+                // Start stats polling.
+                app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
             }
             Err(e) => {
                 app.active_tab_mut().push_output(format!("Failed to launch container: {}", e));
@@ -1624,13 +1633,14 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
     // Generate a container name for stats polling.
     let container_name = docker::generate_container_name();
 
-    // Show the full Docker CLI command in the execution window (with masked env values).
+    // Show the full CLI command in the execution window (with masked env values).
     let display_args = if non_interactive {
-        docker::build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, None, ssh_dir.clone())
+        app.runtime.build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, None, ssh_dir.as_deref())
     } else {
-        docker::build_run_args_pty_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, Some(&container_name), app.active_tab().host_settings.as_ref(), allow_docker, ssh_dir.clone())
+        app.runtime.build_run_args_pty_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, Some(&container_name), ssh_dir.as_deref())
     };
-    let cmd_display = docker::format_run_cmd(&display_args);
+    let cli_binary = app.runtime.cli_binary();
+    let cmd_display = format!("$ {} {}", cli_binary, display_args.join(" "));
 
     let command_display = "chat".to_string();
     app.active_tab_mut().start_command(command_display);
@@ -1655,7 +1665,7 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
         }
     }
 
-    app.active_tab_mut().push_output(format!("$ {}", cmd_display));
+    app.active_tab_mut().push_output(cmd_display);
 
     if non_interactive {
         app.active_tab_mut().push_output("Tip: remove --non-interactive to interact with the agent directly.");
@@ -1666,10 +1676,11 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
         app.active_tab_mut().exit_rx = Some(exit_rx);
         let tx = app.active_tab().output_tx.clone();
         let mount_str = mount_path.to_str().unwrap().to_string();
+        let chat_runtime = app.runtime.clone();
         spawn_text_command(tx, exit_tx, move |sink| async move {
             let entrypoint = chat_entrypoint_non_interactive(&agent_name, plan);
             let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
-            let (_cmd, output) = docker::run_container_captured(
+            let (_cmd, output) = chat_runtime.run_container_captured(
                 &image_tag,
                 &mount_str,
                 &entrypoint_refs,
@@ -1677,7 +1688,7 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
                 host_settings.as_ref(),
                 allow_docker,
                 None,
-                ssh_dir.clone(),
+                ssh_dir.as_deref(),
             )?;
             for line in output.lines() {
                 sink.println(line);
@@ -1689,9 +1700,8 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
         let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
         print_interactive_notice(&sink, &agent_name);
 
-        let docker_args =
-            docker::build_run_args_pty(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, Some(&container_name), app.active_tab().host_settings.as_ref(), allow_docker, ssh_dir.clone());
-        let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
+        let pty_args = app.runtime.build_run_args_pty(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, Some(&container_name), ssh_dir.as_deref());
+        let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
 
         // Use actual terminal dimensions for the PTY.
         let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -1709,12 +1719,14 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
         app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(&git_root);
         app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
 
-        match PtySession::spawn("docker", &docker_str_refs, size) {
+        let cli_bin = app.runtime.cli_binary();
+        let stats_runtime = app.runtime.clone();
+        match PtySession::spawn(cli_bin, &pty_str_refs, size) {
             Ok((session, pty_rx)) => {
                 app.active_tab_mut().pty = Some(session);
                 app.active_tab_mut().pty_rx = Some(pty_rx);
-                // Start Docker stats polling.
-                app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name));
+                // Start stats polling.
+                app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
             }
             Err(e) => {
                 app.active_tab_mut().push_output(format!("Failed to launch container: {}", e));
@@ -1724,9 +1736,10 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
     }
 }
 
-/// Spawn a background task that polls Docker stats every 5 seconds.
+/// Spawn a background task that polls container stats every 5 seconds.
 fn spawn_stats_poller(
     container_name: String,
+    runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
 ) -> tokio::sync::mpsc::UnboundedReceiver<docker::ContainerStats> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -1734,7 +1747,8 @@ fn spawn_stats_poller(
         loop {
             interval.tick().await;
             let name = container_name.clone();
-            let stats = tokio::task::spawn_blocking(move || docker::query_container_stats(&name))
+            let rt = runtime.clone();
+            let stats = tokio::task::spawn_blocking(move || rt.query_container_stats(&name))
                 .await;
             match stats {
                 Ok(Some(s)) => {
@@ -1801,7 +1815,7 @@ async fn show_claws_ready_status(app: &mut App) {
     match claws::load_nanoclaw_config() {
         Ok(config) => {
             if let Some(ref id) = config.nanoclaw_container_id {
-                if docker::is_container_running(id) {
+                if app.runtime.is_container_running(id) {
                     // Container is running — show status table.
                     app.active_tab_mut().start_command("claws ready".to_string());
                     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
@@ -1825,7 +1839,7 @@ async fn show_claws_ready_status(app: &mut App) {
                 }
             }
             // Container not running or no saved ID — check for a stopped one first.
-            if let Some(stopped) = docker::find_stopped_container(
+            if let Some(stopped) = app.runtime.find_stopped_container(
                 claws::NANOCLAW_CONTROLLER_NAME,
                 claws::NANOCLAW_IMAGE_TAG,
             ) {
@@ -1840,7 +1854,7 @@ async fn show_claws_ready_status(app: &mut App) {
         }
         Err(_) => {
             // Config unreadable — still check for stopped container.
-            if let Some(stopped) = docker::find_stopped_container(
+            if let Some(stopped) = app.runtime.find_stopped_container(
                 claws::NANOCLAW_CONTROLLER_NAME,
                 claws::NANOCLAW_IMAGE_TAG,
             ) {
@@ -1880,11 +1894,11 @@ async fn launch_claws_chat_attach(app: &mut App) {
     };
 
     let container_id = match config.nanoclaw_container_id {
-        Some(ref id) if docker::is_container_running(id) => id.clone(),
+        Some(ref id) if app.runtime.is_container_running(id) => id.clone(),
         _ => {
             // Container not running — check for a stopped one and offer to start.
             app.active_tab_mut().claws_attach_after_start = true;
-            if let Some(stopped) = docker::find_stopped_container(
+            if let Some(stopped) = app.runtime.find_stopped_container(
                 claws::NANOCLAW_CONTROLLER_NAME,
                 claws::NANOCLAW_IMAGE_TAG,
             ) {
@@ -1949,6 +1963,7 @@ async fn launch_claws_ready(app: &mut App) {
     app.active_tab_mut().claws_sudo_request_rx = Some(sudo_request_rx);
     app.active_tab_mut().claws_sudo_response_tx = Some(sudo_response_tx);
 
+    let claws_ready_runtime = app.runtime.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
         if let Some(ref username) = username {
             match claws::clone_nanoclaw(username.trim(), &sink)? {
@@ -1986,6 +2001,7 @@ async fn launch_claws_ready(app: &mut App) {
             env_vars,
             &mut summary,
             closure_host_settings.as_ref(),
+            &*claws_ready_runtime,
         ).await?;
 
         sink.println("Audit agent launching in container window...");
@@ -2037,6 +2053,7 @@ async fn launch_claws_init_post_audit(app: &mut App) {
     app.active_tab_mut().claws_phase = ClawsPhase::PostAudit;
     app.active_tab_mut().continue_command("claws init".to_string());
 
+    let post_audit_claws_runtime = app.runtime.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
         let mut summary = claws::ClawsSummary::default();
 
@@ -2054,6 +2071,7 @@ async fn launch_claws_init_post_audit(app: &mut App) {
             &ctx.env_vars,
             &mut summary,
             closure_host_settings.as_ref(),
+            &*post_audit_claws_runtime,
         ).await?;
 
         // Send container ID back — check_claws_continuation will open a foreground
@@ -2097,23 +2115,24 @@ async fn launch_claws_start_container_status_only(app: &mut App) {
     let (container_tx, container_rx) = tokio::sync::oneshot::channel::<String>();
     app.active_tab_mut().claws_container_id_rx = Some(container_rx);
 
+    let start_only_runtime = app.runtime.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
         let nanoclaw_str = claws::nanoclaw_path_str();
         sink.println(format!("Starting nanoclaw controller container {}...", claws::NANOCLAW_CONTROLLER_NAME));
 
-        let container_id = docker::run_container_detached(
+        let container_id = start_only_runtime.run_container_detached(
             claws::NANOCLAW_IMAGE_TAG,
             &nanoclaw_str,
             &nanoclaw_str,
             &nanoclaw_str,
             Some(claws::NANOCLAW_CONTROLLER_NAME),
-            &env_vars,
+            env_vars,
             true,
             closure_host_settings.as_ref(),
         )?;
 
         sink.print("Waiting for container to start... ");
-        if !claws::wait_for_container(&container_id, 5) {
+        if !claws::wait_for_container(&container_id, 5, &*start_only_runtime) {
             sink.println("TIMEOUT");
             anyhow::bail!("Container did not start within 5 seconds.");
         }
@@ -2150,15 +2169,16 @@ async fn launch_claws_restart_stopped_container(app: &mut App, container_id: Str
     let (container_tx, container_rx) = tokio::sync::oneshot::channel::<String>();
     app.active_tab_mut().claws_container_id_rx = Some(container_rx);
 
+    let restart_runtime = app.runtime.clone();
     let cid = container_id.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
         sink.println(format!(
             "Starting stopped container {}...",
             &cid[..cid.len().min(12)],
         ));
-        if let Err(e) = docker::start_container(&cid) {
+        if let Err(e) = restart_runtime.start_container(&cid) {
             sink.println(String::new());
-            sink.println(format!("Docker error: {}", e));
+            sink.println(format!("Runtime error: {}", e));
             sink.println(String::new());
             sink.println("The bind-mount sources (e.g. claude.json) may have been cleaned up");
             sink.println("since the container was created.");
@@ -2166,7 +2186,7 @@ async fn launch_claws_restart_stopped_container(app: &mut App, container_id: Str
         }
 
         sink.print("Waiting for container to start... ");
-        if !claws::wait_for_container(&cid, 5) {
+        if !claws::wait_for_container(&cid, 5, &*restart_runtime) {
             sink.println("TIMEOUT");
             anyhow::bail!("Container did not start within 5 seconds.");
         }
@@ -2212,12 +2232,13 @@ async fn launch_claws_delete_and_start_fresh(app: &mut App, container_id: String
     let (container_tx, container_rx) = tokio::sync::oneshot::channel::<String>();
     app.active_tab_mut().claws_container_id_rx = Some(container_rx);
 
+    let delete_fresh_runtime = app.runtime.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
         sink.println(format!(
             "Deleting stopped container {}...",
             &container_id[..container_id.len().min(12)],
         ));
-        docker::remove_container(&container_id)?;
+        delete_fresh_runtime.remove_container(&container_id)?;
         sink.println("OK");
 
         let nanoclaw_str = claws::nanoclaw_path_str();
@@ -2225,19 +2246,19 @@ async fn launch_claws_delete_and_start_fresh(app: &mut App, container_id: String
             "Starting fresh nanoclaw container {}...",
             claws::NANOCLAW_CONTROLLER_NAME,
         ));
-        let new_container_id = docker::run_container_detached(
+        let new_container_id = delete_fresh_runtime.run_container_detached(
             claws::NANOCLAW_IMAGE_TAG,
             &nanoclaw_str,
             &nanoclaw_str,
             &nanoclaw_str,
             Some(claws::NANOCLAW_CONTROLLER_NAME),
-            &env_vars,
+            env_vars,
             true,
             closure_host_settings.as_ref(),
         )?;
 
         sink.print("Waiting for container to start... ");
-        if !claws::wait_for_container(&new_container_id, 5) {
+        if !claws::wait_for_container(&new_container_id, 5, &*delete_fresh_runtime) {
             sink.println("TIMEOUT");
             anyhow::bail!("Container did not start within 5 seconds.");
         }
@@ -2360,7 +2381,7 @@ async fn launch_claws_exec_audit(app: &mut App, container_id: String, ctx: claws
     let entrypoint = claws::claws_init_audit_entrypoint(&ctx.agent_name);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    let exec_args = docker::build_exec_args_pty(
+    let exec_args = app.runtime.build_exec_args_pty(
         &container_id,
         &claws::nanoclaw_path_str(),
         &entrypoint_refs,
@@ -2385,11 +2406,13 @@ async fn launch_claws_exec_audit(app: &mut App, container_id: String, ctx: claws
     app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(&claws::nanoclaw_path());
     app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
 
-    match PtySession::spawn("docker", &exec_str_refs, size) {
+    let cli_bin = app.runtime.cli_binary();
+    let stats_runtime = app.runtime.clone();
+    match PtySession::spawn(cli_bin, &exec_str_refs, size) {
         Ok((session, pty_rx)) => {
             app.active_tab_mut().pty = Some(session);
             app.active_tab_mut().pty_rx = Some(pty_rx);
-            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name));
+            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
         }
         Err(e) => {
             app.active_tab_mut().push_output(format!("Failed to launch agent: {}", e));
@@ -2414,7 +2437,7 @@ async fn launch_claws_exec(app: &mut App, container_id: String) {
     let entrypoint = chat_entrypoint(&agent_name, false);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    let exec_args = docker::build_exec_args_pty(
+    let exec_args = app.runtime.build_exec_args_pty(
         &container_id,
         &claws::nanoclaw_path_str(),
         &entrypoint_refs,
@@ -2439,11 +2462,13 @@ async fn launch_claws_exec(app: &mut App, container_id: String) {
     app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(&claws::nanoclaw_path());
     app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
 
-    match PtySession::spawn("docker", &exec_str_refs, size) {
+    let cli_bin = app.runtime.cli_binary();
+    let stats_runtime = app.runtime.clone();
+    match PtySession::spawn(cli_bin, &exec_str_refs, size) {
         Ok((session, pty_rx)) => {
             app.active_tab_mut().pty = Some(session);
             app.active_tab_mut().pty_rx = Some(pty_rx);
-            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name));
+            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
         }
         Err(e) => {
             app.active_tab_mut().push_output(format!("Failed to attach to nanoclaw container: {}", e));
@@ -2523,17 +2548,18 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
     let image_tag = docker::project_image_tag(&git_root);
     let container_name = docker::generate_container_name();
 
-    let display_args = docker::build_run_args_pty_display(
+    let display_args = app.runtime.build_run_args_pty_display(
         &image_tag,
         mount_path.to_str().unwrap(),
         &entrypoint_refs,
         &env_vars,
-        Some(&container_name),
         app.active_tab().host_settings.as_ref(),
         allow_docker,
+        Some(&container_name),
         None,
     );
-    let cmd_display = docker::format_run_cmd(&display_args);
+    let cli_binary = app.runtime.cli_binary();
+    let cmd_display = format!("$ {} {}", cli_binary, display_args.join(" "));
 
     let command_display = format!("specs amend {:04}", work_item);
     app.active_tab_mut().start_command(command_display);
@@ -2551,22 +2577,22 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
         }
     }
 
-    app.active_tab_mut().push_output(format!("$ {}", cmd_display));
+    app.active_tab_mut().push_output(cmd_display);
 
     let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
     print_interactive_notice(&sink, &agent_name);
 
-    let docker_args = docker::build_run_args_pty(
+    let pty_args = app.runtime.build_run_args_pty(
         &image_tag,
         mount_path.to_str().unwrap(),
         &entrypoint_refs,
         &env_vars,
-        Some(&container_name),
         app.active_tab().host_settings.as_ref(),
         allow_docker,
+        Some(&container_name),
         None,
     );
-    let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
+    let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
 
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let wf_strip_h = app.active_tab().workflow.as_ref().map(|wf| workflow_strip_height(wf)).unwrap_or(0);
@@ -2582,11 +2608,13 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
     app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(&git_root);
     app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
 
-    match PtySession::spawn("docker", &docker_str_refs, size) {
+    let cli_bin = app.runtime.cli_binary();
+    let stats_runtime = app.runtime.clone();
+    match PtySession::spawn(cli_bin, &pty_str_refs, size) {
         Ok((session, pty_rx)) => {
             app.active_tab_mut().pty = Some(session);
             app.active_tab_mut().pty_rx = Some(pty_rx);
-            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name));
+            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
         }
         Err(e) => {
             app.active_tab_mut().push_output(format!("Failed to launch container: {}", e));
@@ -2629,17 +2657,18 @@ async fn launch_specs_interview_agent(
     let image_tag = docker::project_image_tag(&git_root);
     let container_name = docker::generate_container_name();
 
-    let display_args = docker::build_run_args_pty_display(
+    let display_args = app.runtime.build_run_args_pty_display(
         &image_tag,
         mount_path.to_str().unwrap(),
         &entrypoint_refs,
         &env_vars,
-        Some(&container_name),
         app.active_tab().host_settings.as_ref(),
         allow_docker,
+        Some(&container_name),
         None,
     );
-    let cmd_display = docker::format_run_cmd(&display_args);
+    let cli_binary = app.runtime.cli_binary();
+    let cmd_display = format!("$ {} {}", cli_binary, display_args.join(" "));
 
     let command_display = format!("specs new --interview {:04}", work_item_number);
     app.active_tab_mut().start_command(command_display);
@@ -2657,22 +2686,22 @@ async fn launch_specs_interview_agent(
         }
     }
 
-    app.active_tab_mut().push_output(format!("$ {}", cmd_display));
+    app.active_tab_mut().push_output(cmd_display);
 
     let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
     print_interactive_notice(&sink, &agent_name);
 
-    let docker_args = docker::build_run_args_pty(
+    let pty_args = app.runtime.build_run_args_pty(
         &image_tag,
         mount_path.to_str().unwrap(),
         &entrypoint_refs,
         &env_vars,
-        Some(&container_name),
         app.active_tab().host_settings.as_ref(),
         allow_docker,
+        Some(&container_name),
         None,
     );
-    let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
+    let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
 
     let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let wf_strip_h = app.active_tab().workflow.as_ref().map(|wf| workflow_strip_height(wf)).unwrap_or(0);
@@ -2688,11 +2717,13 @@ async fn launch_specs_interview_agent(
     app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(&git_root);
     app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
 
-    match PtySession::spawn("docker", &docker_str_refs, size) {
+    let cli_bin = app.runtime.cli_binary();
+    let stats_runtime = app.runtime.clone();
+    match PtySession::spawn(cli_bin, &pty_str_refs, size) {
         Ok((session, pty_rx)) => {
             app.active_tab_mut().pty = Some(session);
             app.active_tab_mut().pty_rx = Some(pty_rx);
-            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name));
+            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
         }
         Err(e) => {
             app.active_tab_mut().push_output(format!("Failed to launch container: {}", e));
@@ -2797,8 +2828,9 @@ async fn finish_workflow(app: &mut App) {
 
     // Stop the running container so the PTY exits and the session summary is shown.
     if let Some(name) = app.active_tab().container_info.as_ref().map(|i| i.container_name.clone()) {
+        let stop_runtime = app.runtime.clone();
         tokio::task::spawn_blocking(move || {
-            let _ = docker::stop_container(&name);
+            let _ = stop_runtime.stop_container(&name);
         });
     }
 }
@@ -2934,17 +2966,17 @@ async fn launch_next_workflow_step(app: &mut App) {
     }
     let host_settings_ref = app.active_tab().host_settings.as_ref();
 
-    let docker_args = docker::build_run_args_pty(
+    let pty_args = app.runtime.build_run_args_pty(
         &image_tag,
         mount_path.to_str().unwrap_or("."),
         &entrypoint_refs,
         &env_vars,
-        Some(&container_name),
         host_settings_ref,
         allow_docker,
-        ssh_dir,
+        Some(&container_name),
+        ssh_dir.as_deref(),
     );
-    let docker_str_refs: Vec<&str> = docker_args.iter().map(String::as_str).collect();
+    let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
 
     let command_display = format!("implement {:04} [step: {}]", work_item, step_name);
     app.active_tab_mut().continue_command(command_display);
@@ -2980,11 +3012,13 @@ async fn launch_next_workflow_step(app: &mut App) {
     }
     app.active_tab_mut().workflow_current_step = Some(step_name);
 
-    match PtySession::spawn("docker", &docker_str_refs, size) {
+    let cli_bin = app.runtime.cli_binary();
+    let stats_runtime = app.runtime.clone();
+    match PtySession::spawn(cli_bin, &pty_str_refs, size) {
         Ok((session, pty_rx)) => {
             app.active_tab_mut().pty = Some(session);
             app.active_tab_mut().pty_rx = Some(pty_rx);
-            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name));
+            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
         }
         Err(e) => {
             app.active_tab_mut().push_output(format!("Failed to launch container: {}", e));

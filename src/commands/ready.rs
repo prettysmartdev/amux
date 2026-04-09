@@ -149,12 +149,13 @@ impl Default for ReadySummary {
 }
 
 /// Prints the summary table to the output sink.
-pub fn print_summary(out: &OutputSink, summary: &ReadySummary) {
+pub fn print_summary(out: &OutputSink, runtime_name: &str, summary: &ReadySummary) {
     out.println(String::new());
     out.println("┌───────────────────────────────────────────────────┐");
     out.println("│                   Ready Summary                   │");
     out.println("├───────────────────┬───────────────────────────────┤");
-    print_summary_row(out, "Docker daemon", &summary.docker_daemon);
+    let runtime_row_label = format!("{} runtime", runtime_name);
+    print_summary_row(out, &runtime_row_label, &summary.docker_daemon);
     print_summary_row(out, "Dockerfile.dev", &summary.dockerfile);
     print_summary_row(out, "aspec folder", &summary.aspec_folder);
     print_summary_row(out, "Local agent", &summary.local_agent);
@@ -258,7 +259,7 @@ pub async fn check_local_agent(agent_name: &str) -> (StepStatus, String, String)
 
 /// Command-mode entry point: prompts for mount scope and auth, then runs ready phases.
 /// The audit phase is only run when `--refresh` is passed.
-pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bool, allow_docker: bool) -> Result<()> {
+pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bool, allow_docker: bool, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
     // If --refresh is set, ignore --build (refresh always rebuilds after audit).
     let effective_build = if refresh { false } else { build };
     let git_root = find_git_root().context("Not inside a Git repository")?;
@@ -270,7 +271,7 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
     let agent_name = config.agent.as_deref().unwrap_or("claude");
     let credentials = resolve_auth(&git_root, agent_name)?;
     let env_vars = credentials.env_vars.clone();
-    let host_settings = docker::HostSettings::prepare(agent_name);
+    let host_settings = crate::runtime::HostSettings::prepare(agent_name);
     let out = &OutputSink::Stdout;
 
     // Determine whether to auto-create Dockerfile.dev or prompt the user.
@@ -334,7 +335,7 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
     };
 
     let mut summary = ReadySummary::default();
-    let ctx = run_pre_audit(out, mount_path, env_vars, &opts, &mut summary).await?;
+    let ctx = run_pre_audit(out, mount_path, env_vars, &opts, &mut summary, &*runtime).await?;
 
     if opts.refresh {
         if !opts.non_interactive {
@@ -363,7 +364,7 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
         let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
         if opts.non_interactive {
-            let (_cmd, audit_output) = docker::run_container_captured(
+            let (_cmd, audit_output) = runtime.run_container_captured(
                 &ctx.image_tag,
                 &ctx.mount_path,
                 &entrypoint_refs,
@@ -378,7 +379,7 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
                 out.println(line);
             }
         } else {
-            docker::run_container(
+            runtime.run_container(
                 &ctx.image_tag,
                 &ctx.mount_path,
                 &entrypoint_refs,
@@ -392,19 +393,19 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
         }
 
         summary.refresh = StepStatus::Ok("completed".into());
-        run_post_audit(out, &ctx, &opts, &mut summary).await?;
+        run_post_audit(out, &ctx, &opts, &mut summary, &*runtime).await?;
     } else {
         out.println("Skipping Dockerfile audit (use --refresh to run it).");
         summary.refresh = StepStatus::Skipped("use --refresh to run".into());
         // When --build is set, force a rebuild even without --refresh.
         if opts.build {
-            run_force_build(out, &ctx, &opts, &mut summary).await?;
+            run_force_build(out, &ctx, &opts, &mut summary, &*runtime).await?;
         } else {
             summary.image_rebuild = StepStatus::Skipped("no refresh".into());
         }
     }
 
-    print_summary(out, &summary);
+    print_summary(out, runtime.name(), &summary);
 
     if !opts.refresh {
         out.println(String::new());
@@ -432,16 +433,17 @@ pub async fn run_pre_audit(
     env_vars: Vec<(String, String)>,
     opts: &ReadyOptions,
     summary: &mut ReadySummary,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<ReadyContext> {
-    // 1. Docker daemon check
-    out.print("Checking Docker daemon... ");
-    if docker::is_daemon_running() {
+    // 1. Runtime daemon check
+    out.print(&format!("Checking {} runtime... ", runtime.name()));
+    if runtime.is_available() {
         out.println("OK");
         summary.docker_daemon = StepStatus::Ok("running".into());
     } else {
         out.println("FAILED");
         summary.docker_daemon = StepStatus::Failed("not running".into());
-        bail!("Docker daemon is not running or not accessible. Start Docker and try again.");
+        bail!("{} runtime is not running or not accessible. Start it and try again.", runtime.name());
     }
 
     // 2. Git root + project-specific image tag
@@ -521,10 +523,10 @@ pub async fn run_pre_audit(
     let git_root_str = git_root.to_str().unwrap().to_string();
     let mount_path_str = mount_path.to_str().unwrap().to_string();
 
-    let needs_build = dockerfile_was_missing || !docker::image_exists(&image_tag);
+    let needs_build = dockerfile_was_missing || !runtime.image_exists(&image_tag);
 
     if needs_build {
-        let reason = if !docker::image_exists(&image_tag) {
+        let reason = if !runtime.image_exists(&image_tag) {
             format!("Image {} not found. Building...", image_tag)
         } else if dockerfile_was_missing {
             format!("Dockerfile.dev was missing — rebuilding image {}...", image_tag)
@@ -539,14 +541,14 @@ pub async fn run_pre_audit(
         };
         out.println(format!("$ {}", build_cmd_display));
         let out_clone = out.clone();
-        docker::build_image_streaming(
+        runtime.build_image_streaming(
             &image_tag,
-            &dockerfile_str,
-            &git_root_str,
+            std::path::Path::new(&dockerfile_str),
+            std::path::Path::new(&git_root_str),
             opts.no_cache,
-            |line| { out_clone.println(line); },
+            &mut |line| { out_clone.println(line); },
         )
-        .context("Failed to build Docker image")?;
+        .context("Failed to build image")?;
         out.println(format!("Image {} built successfully.", image_tag));
         summary.dev_image = StepStatus::Ok("built".into());
     } else {
@@ -570,6 +572,7 @@ pub async fn run_post_audit(
     ctx: &ReadyContext,
     opts: &ReadyOptions,
     summary: &mut ReadySummary,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     out.println(format!(
         "Rebuilding image {} with updated Dockerfile.dev...",
@@ -582,14 +585,14 @@ pub async fn run_post_audit(
     };
     out.println(format!("$ {}", build_cmd_display));
     let out_clone = out.clone();
-    docker::build_image_streaming(
+    runtime.build_image_streaming(
         &ctx.image_tag,
-        &ctx.dockerfile_str,
-        &ctx.git_root_str,
+        std::path::Path::new(&ctx.dockerfile_str),
+        std::path::Path::new(&ctx.git_root_str),
         opts.no_cache,
-        |line| { out_clone.println(line); },
+        &mut |line| { out_clone.println(line); },
     )
-    .context("Failed to rebuild Docker image")?;
+    .context("Failed to rebuild image")?;
 
     summary.image_rebuild = StepStatus::Ok("rebuilt".into());
     Ok(())
@@ -601,6 +604,7 @@ async fn run_force_build(
     ctx: &ReadyContext,
     opts: &ReadyOptions,
     summary: &mut ReadySummary,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     out.println(format!(
         "Rebuilding image {} (--build)...",
@@ -613,14 +617,14 @@ async fn run_force_build(
     };
     out.println(format!("$ {}", build_cmd_display));
     let out_clone = out.clone();
-    docker::build_image_streaming(
+    runtime.build_image_streaming(
         &ctx.image_tag,
-        &ctx.dockerfile_str,
-        &ctx.git_root_str,
+        std::path::Path::new(&ctx.dockerfile_str),
+        std::path::Path::new(&ctx.git_root_str),
         opts.no_cache,
-        |line| { out_clone.println(line); },
+        &mut |line| { out_clone.println(line); },
     )
-    .context("Failed to rebuild Docker image")?;
+    .context("Failed to rebuild image")?;
 
     summary.image_rebuild = StepStatus::Ok("rebuilt".into());
     Ok(())
@@ -634,10 +638,11 @@ pub async fn run_with_sink(
     mount_path: PathBuf,
     env_vars: Vec<(String, String)>,
     opts: &ReadyOptions,
-    host_settings: Option<&docker::HostSettings>,
+    host_settings: Option<&crate::runtime::HostSettings>,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<ReadySummary> {
     let mut summary = ReadySummary::default();
-    let ctx = run_pre_audit(out, mount_path, env_vars, opts, &mut summary).await?;
+    let ctx = run_pre_audit(out, mount_path, env_vars, opts, &mut summary, runtime).await?;
 
     if opts.refresh {
         // If --allow-docker, check the socket and print a warning before launching.
@@ -660,7 +665,7 @@ pub async fn run_with_sink(
         };
         let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-        let (_run_cmd, audit_output) = docker::run_container_captured(
+        let (_run_cmd, audit_output) = runtime.run_container_captured(
             &ctx.image_tag,
             &ctx.mount_path,
             &entrypoint_refs,
@@ -676,18 +681,18 @@ pub async fn run_with_sink(
         }
         summary.refresh = StepStatus::Ok("completed".into());
 
-        run_post_audit(out, &ctx, opts, &mut summary).await?;
+        run_post_audit(out, &ctx, opts, &mut summary, runtime).await?;
     } else {
         out.println("Skipping Dockerfile audit (use --refresh to run it).");
         summary.refresh = StepStatus::Skipped("use --refresh to run".into());
         if opts.build {
-            run_force_build(out, &ctx, opts, &mut summary).await?;
+            run_force_build(out, &ctx, opts, &mut summary, runtime).await?;
         } else {
             summary.image_rebuild = StepStatus::Skipped("no refresh".into());
         }
     }
 
-    print_summary(out, &summary);
+    print_summary(out, runtime.name(), &summary);
 
     if !opts.refresh {
         out.println(String::new());
@@ -745,18 +750,20 @@ fn agent_from_str(name: &str) -> Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::AgentRuntime;
     use tokio::sync::mpsc::unbounded_channel;
 
     #[tokio::test]
     async fn run_with_sink_fails_gracefully_without_docker() {
-        if docker::is_daemon_running() {
+        let runtime = crate::runtime::docker::DockerRuntime::new();
+        if runtime.is_available() {
             return;
         }
         let (tx, mut rx) = unbounded_channel();
         let sink = OutputSink::Channel(tx);
         let mount_path = PathBuf::from("/tmp");
         let opts = ReadyOptions { auto_create_dockerfile: true, ..Default::default() };
-        let result = run_with_sink(&sink, mount_path, vec![], &opts, None).await;
+        let result = run_with_sink(&sink, mount_path, vec![], &opts, None, &runtime).await;
         assert!(result.is_err());
         let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(messages.iter().any(|m| m.contains("FAILED") || m.contains("Checking")));
@@ -766,7 +773,8 @@ mod tests {
     /// through the OutputSink (including Docker daemon check, local agent, etc.).
     #[tokio::test]
     async fn run_with_sink_routes_all_output_through_sink() {
-        if !docker::is_daemon_running() {
+        let runtime = crate::runtime::docker::DockerRuntime::new();
+        if !runtime.is_available() {
             return;
         }
         let git_root = match find_git_root() {
@@ -780,16 +788,16 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let sink = OutputSink::Channel(tx);
         let opts = ReadyOptions { auto_create_dockerfile: true, ..Default::default() };
-        let result = run_with_sink(&sink, git_root.clone(), vec![], &opts, None).await;
+        let result = run_with_sink(&sink, git_root.clone(), vec![], &opts, None, &runtime).await;
         let _ = result;
 
         let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
-        // Must include Docker daemon check message (this is the first thing produced).
-        let has_checking = messages.iter().any(|m| m.contains("Checking Docker daemon"));
+        // Must include runtime check message (this is the first thing produced).
+        let has_checking = messages.iter().any(|m| m.contains("Checking") && m.contains("runtime"));
         assert!(
             has_checking,
-            "Expected Docker daemon check in output. Got: {:?}",
+            "Expected runtime check in output. Got: {:?}",
             messages
         );
 
@@ -882,12 +890,12 @@ mod tests {
             refresh: StepStatus::Skipped("use --refresh to run".into()),
             image_rebuild: StepStatus::Skipped("no refresh".into()),
         };
-        print_summary(&sink, &summary);
+        print_summary(&sink, "docker", &summary);
 
         let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         let all = messages.join("\n");
         assert!(all.contains("Ready Summary"), "Missing header");
-        assert!(all.contains("Docker daemon"), "Missing docker row");
+        assert!(all.contains("docker runtime"), "Missing runtime row");
         assert!(all.contains("running"), "Missing running status");
         assert!(all.contains("aspec folder"), "Missing aspec row");
         assert!(all.contains("Local agent"), "Missing agent row");

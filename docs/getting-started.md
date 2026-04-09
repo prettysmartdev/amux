@@ -7,7 +7,9 @@
 ## Prerequisites
 
 - **Git** — your project must be in a Git repository
-- **Docker** — a running Docker daemon ([Install Docker](https://docs.docker.com/get-docker/))
+- **A container runtime** — one of:
+  - **Docker** (default, all platforms) — a running Docker daemon ([Install Docker](https://docs.docker.com/get-docker/))
+  - **Apple Containers** (macOS 26+ only) — Apple's native `container` CLI; no Docker Desktop required. See [Runtime Selection](usage.md#runtime-selection) to opt in.
 - **A supported agent** — Claude Code, Codex, or OpenCode installed and authenticated on your machine. NanoClaw for persistent 24/7 agents.
 
 ---

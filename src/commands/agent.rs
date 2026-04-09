@@ -28,6 +28,7 @@ pub async fn run_agent_with_sink(
     allow_docker: bool,
     mount_ssh: bool,
     container_name_override: Option<String>,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let config = load_repo_config(&git_root)?;
@@ -44,7 +45,7 @@ pub async fn run_agent_with_sink(
     if allow_docker {
         let socket_path = docker::check_docker_socket()
             .context("Cannot mount Docker socket")?;
-        out.println(format!("Docker socket: {} (found)", socket_path.display()));
+        out.println(format!("{} socket: {} (found)", runtime.name(), socket_path.display()));
         out.println(format!(
             "WARNING: --allow-docker: mounting host Docker socket into container ({}:{}). \
              This grants the agent elevated host access.",
@@ -76,8 +77,8 @@ pub async fn run_agent_with_sink(
     let image_tag = docker::project_image_tag(&git_root);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    // Show the full Docker CLI command being run (with masked env values).
-    let display_args = docker::build_run_args_display(
+    // Show the full runtime CLI command being run (with masked env values).
+    let display_args = runtime.build_run_args_display(
         &image_tag,
         mount_path.to_str().unwrap(),
         &entrypoint_refs,
@@ -85,9 +86,9 @@ pub async fn run_agent_with_sink(
         host_settings,
         allow_docker,
         container_name_override.as_deref(),
-        ssh_dir.clone(),
+        ssh_dir.as_deref(),
     );
-    out.println(format!("$ {}", docker::format_run_cmd(&display_args)));
+    out.println(format!("$ {} {}", runtime.cli_binary(), display_args.join(" ")));
 
     if !non_interactive {
         crate::commands::ready::print_interactive_notice(out, &agent);
@@ -96,7 +97,7 @@ pub async fn run_agent_with_sink(
     }
 
     if non_interactive {
-        let (_cmd, output) = docker::run_container_captured(
+        let (_cmd, output) = runtime.run_container_captured(
             &image_tag,
             mount_path.to_str().unwrap(),
             &entrypoint_refs,
@@ -104,14 +105,14 @@ pub async fn run_agent_with_sink(
             host_settings,
             allow_docker,
             container_name_override.as_deref(),
-            ssh_dir,
+            ssh_dir.as_deref(),
         )
         .context("Container exited with an error")?;
         for line in output.lines() {
             out.println(line);
         }
     } else {
-        docker::run_container(
+        runtime.run_container(
             &image_tag,
             mount_path.to_str().unwrap(),
             &entrypoint_refs,
@@ -119,7 +120,7 @@ pub async fn run_agent_with_sink(
             host_settings,
             allow_docker,
             container_name_override.as_deref(),
-            ssh_dir,
+            ssh_dir.as_deref(),
         )
         .context("Container exited with an error")?;
     }
@@ -142,6 +143,7 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
 
+        let runtime = crate::runtime::docker::DockerRuntime::new();
         let result = run_agent_with_sink(
             entrypoint,
             "test",
@@ -153,6 +155,7 @@ mod tests {
             false,
             false,
             None,
+            &runtime,
         )
         .await;
 

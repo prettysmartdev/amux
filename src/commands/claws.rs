@@ -227,18 +227,18 @@ fn print_claws_row(out: &OutputSink, label: &str, status: &StepStatus) {
 }
 
 /// Command-mode entry point.
-pub async fn run(action: ClawsAction) -> Result<()> {
+pub async fn run(action: ClawsAction, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
     match action {
-        ClawsAction::Init => run_claws_init(&OutputSink::Stdout).await,
-        ClawsAction::Ready => run_claws_ready(&OutputSink::Stdout).await,
-        ClawsAction::Chat => run_claws_chat().await,
+        ClawsAction::Init => run_claws_init(&OutputSink::Stdout, &*runtime).await,
+        ClawsAction::Ready => run_claws_ready(&OutputSink::Stdout, &*runtime).await,
+        ClawsAction::Chat => run_claws_chat(&*runtime).await,
     }
 }
 
 /// Entry point for `amux claws init` — runs the first-time setup wizard.
-pub async fn run_claws_init(out: &OutputSink) -> Result<()> {
+pub async fn run_claws_init(out: &OutputSink, runtime: &dyn crate::runtime::AgentRuntime) -> Result<()> {
     let mut summary = ClawsSummary::default();
-    run_first_time_wizard(out, &mut summary).await?;
+    run_first_time_wizard(out, &mut summary, runtime).await?;
     print_claws_summary(out, &summary);
     Ok(())
 }
@@ -248,7 +248,7 @@ pub async fn run_claws_init(out: &OutputSink) -> Result<()> {
 /// If nanoclaw is not installed, suggests running `claws init`.
 /// If nanoclaw is installed but the container is not running, interactively
 /// offers to start it in the background.
-pub async fn run_claws_ready(out: &OutputSink) -> Result<()> {
+pub async fn run_claws_ready(out: &OutputSink, runtime: &dyn crate::runtime::AgentRuntime) -> Result<()> {
     let nanoclaw_dir = nanoclaw_path();
 
     if !nanoclaw_dir.exists() {
@@ -257,7 +257,7 @@ pub async fn run_claws_ready(out: &OutputSink) -> Result<()> {
     }
 
     let mut summary = ClawsSummary::default();
-    run_subsequent_check(out, &mut summary).await?;
+    run_subsequent_check(out, &mut summary, runtime).await?;
     print_claws_summary(out, &summary);
     Ok(())
 }
@@ -266,7 +266,7 @@ pub async fn run_claws_ready(out: &OutputSink) -> Result<()> {
 ///
 /// Errors immediately if nanoclaw is not installed or the container is not running.
 /// Use `amux claws ready` to start or restart the container.
-pub async fn run_claws_chat() -> Result<()> {
+pub async fn run_claws_chat(runtime: &dyn crate::runtime::AgentRuntime) -> Result<()> {
     let nanoclaw_dir = nanoclaw_path();
 
     if !nanoclaw_dir.exists() {
@@ -275,7 +275,7 @@ pub async fn run_claws_chat() -> Result<()> {
 
     let config = load_nanoclaw_config().unwrap_or_default();
     let container_id = match config.nanoclaw_container_id {
-        Some(ref id) if docker::is_container_running(id) => id.clone(),
+        Some(ref id) if runtime.is_container_running(id) => id.clone(),
         _ => {
             bail!("nanoclaw container is not running. Run 'amux claws ready' to start it.");
         }
@@ -287,7 +287,7 @@ pub async fn run_claws_chat() -> Result<()> {
     };
     let credentials = agent_keychain_credentials(&agent_name);
 
-    attach_to_nanoclaw(&container_id, &agent_name, &credentials.env_vars)?;
+    attach_to_nanoclaw(&container_id, &agent_name, &credentials.env_vars, runtime)?;
     Ok(())
 }
 
@@ -587,16 +587,17 @@ pub async fn build_nanoclaw_pre_audit(
     env_vars: Vec<(String, String)>,
     summary: &mut ClawsSummary,
     host_settings: Option<&docker::HostSettings>,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<ClawsAuditCtx> {
     let nanoclaw_dir = nanoclaw_path();
     let nanoclaw_str = nanoclaw_path_str();
 
-    // Check Docker daemon.
-    out.print("Checking Docker daemon... ");
-    if !docker::is_daemon_running() {
+    // Check runtime daemon.
+    out.print(&format!("Checking {} runtime... ", runtime.name()));
+    if !runtime.is_available() {
         out.println("FAILED");
         summary.docker_daemon = StepStatus::Failed("not running".into());
-        bail!("Docker daemon is not running or not accessible. Start Docker and try again.");
+        bail!("{} is not running or not accessible. Start {} and try again.", runtime.name(), runtime.name());
     }
     out.println("OK");
     summary.docker_daemon = StepStatus::Ok("running".into());
@@ -616,12 +617,12 @@ pub async fn build_nanoclaw_pre_audit(
     let dockerfile_str = format!("{}/Dockerfile.dev", nanoclaw_str);
     out.println(format!("Building image {}...", NANOCLAW_IMAGE_TAG));
     let out_clone = out.clone();
-    docker::build_image_streaming(
+    runtime.build_image_streaming(
         NANOCLAW_IMAGE_TAG,
-        &dockerfile_str,
-        &nanoclaw_str,
+        std::path::Path::new(&dockerfile_str),
+        std::path::Path::new(&nanoclaw_str),
         false,
-        |line| { out_clone.println(line); },
+        &mut |line| { out_clone.println(line); },
     )
     .context("Failed to build nanoclaw Docker image")?;
     out.println(format!("Image {} built successfully.", NANOCLAW_IMAGE_TAG));
@@ -641,8 +642,9 @@ pub async fn build_nanoclaw_image(
     env_vars: &[(String, String)],
     summary: &mut ClawsSummary,
     host_settings: Option<&docker::HostSettings>,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<ClawsAuditCtx> {
-    let ctx = build_nanoclaw_pre_audit(out, env_vars.to_vec(), summary, host_settings).await?;
+    let ctx = build_nanoclaw_pre_audit(out, env_vars.to_vec(), summary, host_settings, runtime).await?;
 
     // Explain the audit + setup flow.
     out.println(String::new());
@@ -673,17 +675,17 @@ pub async fn build_nanoclaw_image(
 /// Uses `docker exec -it` so the user can watch the agent configure nanoclaw, then
 /// run `/setup` in the same agent session without detaching or reattaching.
 /// The container keeps running after the agent session ends.
-pub fn exec_audit_foreground(container_id: &str, ctx: &ClawsAuditCtx) -> Result<()> {
+pub fn exec_audit_foreground(container_id: &str, ctx: &ClawsAuditCtx, runtime: &dyn crate::runtime::AgentRuntime) -> Result<()> {
     let entrypoint = claws_init_audit_entrypoint(&ctx.agent_name);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
-    let exec_args = docker::build_exec_args_pty(
+    let exec_args = runtime.build_exec_args_pty(
         container_id,
         &ctx.nanoclaw_str,
         &entrypoint_refs,
         &ctx.env_vars,
     );
     let exec_str_refs: Vec<&str> = exec_args.iter().map(String::as_str).collect();
-    let status = std::process::Command::new("docker")
+    let status = std::process::Command::new(runtime.cli_binary())
         .args(&exec_str_refs)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -709,18 +711,19 @@ pub async fn launch_nanoclaw_container(
     env_vars: &[(String, String)],
     summary: &mut ClawsSummary,
     host_settings: Option<&docker::HostSettings>,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<String> {
     let nanoclaw_str = nanoclaw_path_str();
 
     out.println(format!("Starting nanoclaw controller container {}...", NANOCLAW_CONTROLLER_NAME));
 
-    let container_id = docker::run_container_detached(
+    let container_id = runtime.run_container_detached(
         NANOCLAW_IMAGE_TAG,
         &nanoclaw_str,
         &nanoclaw_str,
         &nanoclaw_str,
         Some(NANOCLAW_CONTROLLER_NAME),
-        env_vars,
+        env_vars.to_vec(),
         true, // nanoclaw controller container: mount Docker socket
         host_settings,
     )
@@ -728,7 +731,7 @@ pub async fn launch_nanoclaw_container(
 
     // Wait up to 5 s for container to reach running state.
     out.print("Waiting for container to start... ");
-    if !wait_for_container(&container_id, 5) {
+    if !wait_for_container(&container_id, 5, runtime) {
         out.println("TIMEOUT");
         bail!("Container did not start within 5 seconds.");
     }
@@ -747,14 +750,14 @@ pub async fn launch_nanoclaw_container(
 ///
 /// Launches the agent in plain interactive mode. No premade prompt is passed —
 /// the user interacts directly with the agent (e.g. to run `/setup`).
-pub fn attach_to_nanoclaw(container_id: &str, agent_name: &str, env_vars: &[(String, String)]) -> Result<()> {
+pub fn attach_to_nanoclaw(container_id: &str, agent_name: &str, env_vars: &[(String, String)], runtime: &dyn crate::runtime::AgentRuntime) -> Result<()> {
     let entrypoint = chat_entrypoint(agent_name, false);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    let exec_args = docker::build_exec_args_pty(container_id, &nanoclaw_path_str(), &entrypoint_refs, env_vars);
+    let exec_args = runtime.build_exec_args_pty(container_id, &nanoclaw_path_str(), &entrypoint_refs, env_vars);
     let exec_str_refs: Vec<&str> = exec_args.iter().map(String::as_str).collect();
 
-    let status = std::process::Command::new("docker")
+    let status = std::process::Command::new(runtime.cli_binary())
         .args(&exec_str_refs)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -770,21 +773,21 @@ pub fn attach_to_nanoclaw(container_id: &str, agent_name: &str, env_vars: &[(Str
 }
 
 /// Wait up to `timeout_secs` seconds for a container to reach running state.
-pub fn wait_for_container(container_id: &str, timeout_secs: u64) -> bool {
+pub fn wait_for_container(container_id: &str, timeout_secs: u64, runtime: &dyn crate::runtime::AgentRuntime) -> bool {
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {
-        if docker::is_container_running(container_id) {
+        if runtime.is_container_running(container_id) {
             return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    docker::is_container_running(container_id)
+    runtime.is_container_running(container_id)
 }
 
 // --- First-run and subsequent-run wizards (CLI mode) ---
 
-async fn run_first_time_wizard(out: &OutputSink, summary: &mut ClawsSummary) -> Result<()> {
+async fn run_first_time_wizard(out: &OutputSink, summary: &mut ClawsSummary, runtime: &dyn crate::runtime::AgentRuntime) -> Result<()> {
     let dest_str = nanoclaw_path_str();
     out.println("claws ready — first-time setup for nanoclaw");
     out.println(String::new());
@@ -899,7 +902,7 @@ async fn run_first_time_wizard(out: &OutputSink, summary: &mut ClawsSummary) -> 
     let host_settings = docker::HostSettings::prepare(&agent_name);
 
     // Download Dockerfile.nanoclaw, build image once, show audit explanation dialog.
-    let ctx = build_nanoclaw_image(out, &credentials.env_vars, summary, host_settings.as_ref()).await?;
+    let ctx = build_nanoclaw_image(out, &credentials.env_vars, summary, host_settings.as_ref(), runtime).await?;
 
     // Docker socket warning — the nanoclaw container needs Docker socket access.
     out.println(String::new());
@@ -916,7 +919,7 @@ async fn run_first_time_wizard(out: &OutputSink, summary: &mut ClawsSummary) -> 
 
     // Launch background container with docker socket (sleep loop keeps it alive).
     let container_id =
-        launch_nanoclaw_container(out, &credentials.env_vars, summary, host_settings.as_ref()).await?;
+        launch_nanoclaw_container(out, &credentials.env_vars, summary, host_settings.as_ref(), runtime).await?;
 
     // Exec into the container foreground/interactive with the audit prompt.
     // The user watches the audit, then runs /setup in the same session.
@@ -925,18 +928,18 @@ async fn run_first_time_wizard(out: &OutputSink, summary: &mut ClawsSummary) -> 
     out.println("Launching agent inside container. The audit will begin automatically.");
     out.println("When the audit finishes, run /setup to complete configuration.");
     out.println(String::new());
-    exec_audit_foreground(&container_id, &ctx)?;
+    exec_audit_foreground(&container_id, &ctx, runtime)?;
 
     Ok(())
 }
 
-async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary) -> Result<()> {
+async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary, runtime: &dyn crate::runtime::AgentRuntime) -> Result<()> {
     summary.nanoclaw_cloned = StepStatus::Ok("exists".into());
 
     let config = load_nanoclaw_config().unwrap_or_default();
 
     if let Some(ref container_id) = config.nanoclaw_container_id {
-        if docker::is_container_running(container_id) {
+        if runtime.is_container_running(container_id) {
             summary.docker_daemon = StepStatus::Ok("running".into());
             summary.nanoclaw_image = StepStatus::Ok("exists".into());
             summary.nanoclaw_container = StepStatus::Ok("running".into());
@@ -955,14 +958,14 @@ async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary) -> R
     out.println("Note: you may need to run /setup in your agent to get nanoclaw running again.");
     out.println(String::new());
 
-    if !docker::is_daemon_running() {
+    if !runtime.is_available() {
         summary.docker_daemon = StepStatus::Failed("not running".into());
-        bail!("Docker daemon is not running. Start Docker and try again.");
+        bail!("{} is not running. Start {} and try again.", runtime.name(), runtime.name());
     }
     summary.docker_daemon = StepStatus::Ok("running".into());
 
     // Check for a stopped container before offering to run a fresh one.
-    if let Some(stopped) = docker::find_stopped_container(NANOCLAW_CONTROLLER_NAME, NANOCLAW_IMAGE_TAG) {
+    if let Some(stopped) = runtime.find_stopped_container(NANOCLAW_CONTROLLER_NAME, NANOCLAW_IMAGE_TAG) {
         out.println(format!(
             "Found stopped container: ID={}, Name={}, Created={}",
             &stopped.id[..stopped.id.len().min(12)],
@@ -978,7 +981,7 @@ async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary) -> R
         ))?;
         if restart {
             out.print("Starting stopped container... ");
-            match docker::start_container(&stopped.id) {
+            match runtime.start_container(&stopped.id) {
                 Ok(()) => {}
                 Err(e) => {
                     out.println("FAILED");
@@ -995,7 +998,7 @@ async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary) -> R
                         "Deleting stopped container {}... ",
                         &stopped.id[..stopped.id.len().min(12)],
                     ));
-                    docker::remove_container(&stopped.id)
+                    runtime.remove_container(&stopped.id)
                         .context("Failed to delete stopped container")?;
                     out.println("OK");
                     // Fall through to fresh-start logic below.
@@ -1009,19 +1012,19 @@ async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary) -> R
                         let settings_dir = nanoclaw_settings_dir();
                         let host_settings = docker::HostSettings::prepare_to_dir(agent_name, &settings_dir);
                         out.println(format!("Starting nanoclaw controller container {}...", NANOCLAW_CONTROLLER_NAME));
-                        let container_id = docker::run_container_detached(
+                        let container_id = runtime.run_container_detached(
                             NANOCLAW_IMAGE_TAG,
                             &nanoclaw_str,
                             &nanoclaw_str,
                             &nanoclaw_str,
                             Some(NANOCLAW_CONTROLLER_NAME),
-                            &credentials.env_vars,
+                            credentials.env_vars,
                             true,
                             host_settings.as_ref(),
                         )
                         .context("Failed to start nanoclaw background container")?;
                         out.print("Waiting for container to start... ");
-                        if !wait_for_container(&container_id, 5) {
+                        if !wait_for_container(&container_id, 5, runtime) {
                             out.println("TIMEOUT");
                             bail!("Container did not start within 5 seconds.");
                         }
@@ -1034,7 +1037,7 @@ async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary) -> R
                     }
                 }
             }
-            if !wait_for_container(&stopped.id, 5) {
+            if !wait_for_container(&stopped.id, 5, runtime) {
                 out.println("TIMEOUT");
                 bail!("Container did not start within 5 seconds.");
             }
@@ -1073,20 +1076,21 @@ async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary) -> R
     // Launch controller container.
     out.println(format!("Starting nanoclaw controller container {}...", NANOCLAW_CONTROLLER_NAME));
 
-    let container_id = docker::run_container_detached(
+    let env_vars = credentials.env_vars;
+    let container_id = runtime.run_container_detached(
         NANOCLAW_IMAGE_TAG,
         &nanoclaw_str,
         &nanoclaw_str,
         &nanoclaw_str,
         Some(NANOCLAW_CONTROLLER_NAME),
-        &credentials.env_vars,
+        env_vars.clone(),
         true,
         host_settings.as_ref(),
     )
     .context("Failed to start nanoclaw background container")?;
 
     out.print("Waiting for container to start... ");
-    if !wait_for_container(&container_id, 5) {
+    if !wait_for_container(&container_id, 5, runtime) {
         out.println("TIMEOUT");
         bail!("Container did not start within 5 seconds.");
     }
@@ -1097,7 +1101,7 @@ async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary) -> R
     new_config.nanoclaw_container_id = Some(container_id.clone());
     save_nanoclaw_config(&new_config)?;
 
-    attach_to_nanoclaw(&container_id, agent_name, &credentials.env_vars)?;
+    attach_to_nanoclaw(&container_id, agent_name, &env_vars, runtime)?;
 
     Ok(())
 }

@@ -2,249 +2,22 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Docker container stats returned by `docker stats`.
-#[derive(Debug, Clone)]
-pub struct ContainerStats {
-    pub name: String,
-    pub cpu_percent: String,
-    pub memory: String,
-}
+// Re-export shared types from the runtime module so existing callers are unaffected.
+pub use crate::runtime::{ContainerStats, HostSettings, StoppedContainerInfo};
+#[allow(unused_imports)]
+pub use crate::runtime::docker::DockerRuntime;
 
-/// Host-machine agent settings prepared for injection into a Docker container.
-///
-/// Stores sanitized config files in a temporary directory. The directory is
-/// bind-mounted into the container as `/root/.claude.json` and `/root/.claude`.
-/// The temp directory is automatically cleaned up when this struct is dropped
-/// (RAII via `tempfile::TempDir`).
-pub struct HostSettings {
-    /// Kept alive so the temp dir survives as long as the container runs.
-    /// `None` when created via `from_paths` (caller manages the backing directory).
-    _temp_dir: Option<tempfile::TempDir>,
-    /// Path to the sanitized `.claude.json` inside the temp dir.
-    pub config_path: PathBuf,
-    /// Path to the copied `.claude/` directory inside the temp dir.
-    pub claude_dir_path: PathBuf,
-}
-
-/// Top-level entries in `~/.claude/` that are large, host-specific, or
-/// irrelevant inside a container. Everything else is copied.
-const CLAUDE_DIR_DENYLIST: &[&str] = &[
-    "projects",
-    "sessions",
-    "session-env",
-    "debug",
-    "file-history",
-    "history.jsonl",
-    "telemetry",
-    "downloads",
-    "ide",
-    "shell-snapshots",
-    "paste-cache",
-];
-
-impl HostSettings {
-    /// Reads and sanitizes host agent settings for container injection.
-    ///
-    /// - Reads `~/.claude.json`, strips `oauthAccount`, adds `/workspace` project trust
-    /// - Copies `~/.claude/` (filtered) into a temp directory
-    ///
-    /// Returns `None` if the agent is not `claude` or the host has no config.
-    pub fn prepare(agent: &str) -> Option<Self> {
-        if agent != "claude" {
-            return None;
-        }
-
-        let home = dirs::home_dir()?;
-        let host_config_file = home.join(".claude.json");
-        if !host_config_file.exists() {
-            return None;
-        }
-
-        let temp_dir = tempfile::TempDir::new().ok()?;
-
-        // Sanitize .claude.json — strip oauthAccount to prevent broken
-        // OAuth state (tokens are in macOS keychain, inaccessible from container).
-        let raw = std::fs::read_to_string(&host_config_file).ok()?;
-        let mut parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        if let Some(obj) = parsed.as_object_mut() {
-            obj.remove("oauthAccount");
-
-            // Ensure /workspace project trust for the container environment.
-            // Without this, Claude Code shows the trust dialog inside the container.
-            let projects = obj
-                .entry("projects")
-                .or_insert_with(|| serde_json::json!({}));
-            if let Some(projects_obj) = projects.as_object_mut() {
-                projects_obj.insert(
-                    "/workspace".to_string(),
-                    serde_json::json!({"hasTrustDialogAccepted": true}),
-                );
-            }
-        }
-        let config_json = serde_json::to_string(&parsed).ok()?;
-        let config_path = temp_dir.path().join("claude.json");
-        std::fs::write(&config_path, &config_json).ok()?;
-
-        // Copy ~/.claude/ directory with denylist filter.
-        let claude_dir_path = temp_dir.path().join("dot-claude");
-        let host_claude_dir = home.join(".claude");
-        if host_claude_dir.is_dir() {
-            copy_dir_filtered(&host_claude_dir, &claude_dir_path, CLAUDE_DIR_DENYLIST).ok()?;
-        } else {
-            // Create an empty directory so the mount target exists.
-            std::fs::create_dir_all(&claude_dir_path).ok()?;
-        }
-        disable_lsp_recommendations(&claude_dir_path).ok()?;
-
-        Some(HostSettings {
-            _temp_dir: Some(temp_dir),
-            config_path,
-            claude_dir_path,
-        })
-    }
-
-    /// Prepares host agent settings into a caller-supplied stable directory.
-    ///
-    /// Identical to `prepare` but writes into `dir` instead of a temp directory,
-    /// so the bind-mount sources survive process restarts and container stops.
-    /// Use this when the container may be stopped and restarted later.
-    pub fn prepare_to_dir(agent: &str, dir: &Path) -> Option<Self> {
-        if agent != "claude" {
-            return None;
-        }
-
-        let home = dirs::home_dir()?;
-        let host_config_file = home.join(".claude.json");
-        if !host_config_file.exists() {
-            return None;
-        }
-
-        std::fs::create_dir_all(dir).ok()?;
-
-        let raw = std::fs::read_to_string(&host_config_file).ok()?;
-        let mut parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        if let Some(obj) = parsed.as_object_mut() {
-            obj.remove("oauthAccount");
-            let projects = obj
-                .entry("projects")
-                .or_insert_with(|| serde_json::json!({}));
-            if let Some(projects_obj) = projects.as_object_mut() {
-                projects_obj.insert(
-                    "/workspace".to_string(),
-                    serde_json::json!({"hasTrustDialogAccepted": true}),
-                );
-            }
-        }
-        let config_json = serde_json::to_string(&parsed).ok()?;
-        let config_path = dir.join("claude.json");
-        std::fs::write(&config_path, &config_json).ok()?;
-
-        let claude_dir_path = dir.join("dot-claude");
-        let host_claude_dir = home.join(".claude");
-        if host_claude_dir.is_dir() {
-            copy_dir_filtered(&host_claude_dir, &claude_dir_path, CLAUDE_DIR_DENYLIST).ok()?;
-        } else {
-            std::fs::create_dir_all(&claude_dir_path).ok()?;
-        }
-        disable_lsp_recommendations(&claude_dir_path).ok()?;
-
-        Some(HostSettings {
-            _temp_dir: None,
-            config_path,
-            claude_dir_path,
-        })
-    }
-
-    /// Creates a `HostSettings` pointing to existing files without owning a temp directory.
-    ///
-    /// Used when the backing directory is owned elsewhere (e.g. stored in `App::host_settings`
-    /// across task boundaries). The caller must ensure the paths remain valid for the
-    /// lifetime of this value and any container that references them.
-    pub fn from_paths(config_path: PathBuf, claude_dir_path: PathBuf) -> Self {
-        HostSettings {
-            _temp_dir: None,
-            config_path,
-            claude_dir_path,
-        }
-    }
-
-    /// Creates a minimal `HostSettings` with only LSP recommendations disabled.
-    ///
-    /// Used as a fallback when the host has no `~/.claude.json` (e.g. the user has never
-    /// run Claude Code on this machine). This ensures LSP recommendation dialogs are always
-    /// suppressed inside containers, even without a full host config. Only applies to the
-    /// `claude` agent — returns `None` for all others.
-    pub fn prepare_minimal(agent: &str) -> Option<Self> {
-        if agent != "claude" {
-            return None;
-        }
-        let temp_dir = tempfile::TempDir::new().ok()?;
-        let config_path = temp_dir.path().join("claude.json");
-        // Write a minimal valid config so the bind-mount target exists.
-        std::fs::write(&config_path, "{}").ok()?;
-        let claude_dir_path = temp_dir.path().join("dot-claude");
-        std::fs::create_dir_all(&claude_dir_path).ok()?;
-        disable_lsp_recommendations(&claude_dir_path).ok()?;
-        Some(HostSettings {
-            _temp_dir: Some(temp_dir),
-            config_path,
-            claude_dir_path,
-        })
-    }
-}
-
-/// The `settings.json` key that tells Claude Code not to show LSP recommendation dialogs.
-///
-/// Confirmed empirically: after dismissing the LSP dialog inside a container,
-/// Claude Code writes this key to `~/.claude/settings.json`.
-const LSP_SETTINGS_KEY: &str = "hasShownLspRecommendation";
-
-/// The dead key written by older versions of amux — has no effect in Claude Code.
-const LSP_SETTINGS_KEY_DEAD: &str = "lspRecommendationDisabled";
-
-/// Disables LSP recommendations in the `settings.json` inside the copied claude dir.
-///
-/// Claude Code prompts the user to install language servers when it detects
-/// missing LSP support. Inside a container there is no IDE and no pre-installed
-/// language servers, so these recommendations are noise. This sets
-/// `hasShownLspRecommendation: true` in the container's `settings.json` to suppress them,
-/// and removes the old dead key written by prior versions of amux.
-fn disable_lsp_recommendations(claude_dir: &Path) -> std::io::Result<()> {
-    let settings_path = claude_dir.join("settings.json");
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let raw = std::fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-    if let Some(obj) = settings.as_object_mut() {
-        obj.insert(LSP_SETTINGS_KEY.to_string(), serde_json::json!(true));
-        obj.remove(LSP_SETTINGS_KEY_DEAD);
-    }
-    std::fs::write(&settings_path, serde_json::to_string(&settings)?)
-}
-
-/// Recursively copy `src` to `dst`, skipping top-level entries in `denylist`.
-fn copy_dir_filtered(src: &Path, dst: &Path, denylist: &[&str]) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if denylist.iter().any(|d| *d == name_str.as_ref()) {
-            continue;
-        }
-        let src_path = entry.path();
-        let dst_path = dst.join(&name);
-        if src_path.is_dir() {
-            // No denylist for nested directories — only filter at the top level.
-            copy_dir_filtered(&src_path, &dst_path, &[])?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
-}
+// Bring runtime private helpers into scope so the docker tests (use super::*) can
+// still reference LSP_SETTINGS_KEY, LSP_SETTINGS_KEY_DEAD, copy_dir_filtered, and
+// disable_lsp_recommendations without modification.
+#[allow(unused_imports)]
+use crate::runtime::LSP_SETTINGS_KEY;
+#[allow(unused_imports)]
+use crate::runtime::LSP_SETTINGS_KEY_DEAD;
+#[allow(unused_imports)]
+use crate::runtime::copy_dir_filtered;
+#[allow(unused_imports)]
+use crate::runtime::disable_lsp_recommendations;
 
 /// Returns the host Docker daemon socket path for the current platform.
 ///
@@ -1057,13 +830,6 @@ pub fn build_run_args_pty_at_path(
     args
 }
 
-/// Info about a stopped (non-running) Docker container.
-#[derive(Debug, Clone)]
-pub struct StoppedContainerInfo {
-    pub id: String,
-    pub name: String,
-    pub created: String,
-}
 
 /// Find a stopped container matching `name` exactly and created from `image`.
 ///
@@ -1570,11 +1336,9 @@ mod tests {
         let claude_dir_path = temp_dir.path().join("dot-claude");
         std::fs::create_dir_all(&claude_dir_path).unwrap();
 
-        let hs = HostSettings {
-            _temp_dir: Some(temp_dir),
-            config_path: config_path.clone(),
-            claude_dir_path: claude_dir_path.clone(),
-        };
+        // temp_dir kept alive in scope so files still exist.
+        let hs = HostSettings::from_paths(config_path.clone(), claude_dir_path.clone());
+        let _temp_dir_guard = temp_dir;
 
         let args = build_run_args("img", "/repo", &["claude", "--print", "hi"], &[], Some(&hs), false, None, None);
 
@@ -1605,11 +1369,9 @@ mod tests {
         let claude_dir_path = temp_dir.path().join("dot-claude");
         std::fs::create_dir_all(&claude_dir_path).unwrap();
 
-        let hs = HostSettings {
-            _temp_dir: Some(temp_dir),
-            config_path,
-            claude_dir_path,
-        };
+        // temp_dir kept alive in scope so files still exist.
+        let hs = HostSettings::from_paths(config_path, claude_dir_path);
+        let _temp_dir_guard = temp_dir;
 
         let args = build_run_args_display("img", "/repo", &["claude"], &[], Some(&hs), false, None, None);
         assert!(args.iter().any(|a| a == "<settings>:/root/.claude.json"));
