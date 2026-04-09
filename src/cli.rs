@@ -84,6 +84,12 @@ pub enum Command {
         /// Mount host ~/.ssh read-only into the agent container.
         #[arg(long)]
         mount_ssh: bool,
+
+        /// Enable fully autonomous mode: skip all agent permission prompts, apply
+        /// yoloDisallowedTools config, and (with --workflow) auto-advance stuck steps
+        /// after countdown. Implies --worktree when combined with --workflow.
+        #[arg(long)]
+        yolo: bool,
     },
 
     /// Start a freeform chat session with the configured agent in a container.
@@ -103,6 +109,11 @@ pub enum Command {
         /// Mount host ~/.ssh read-only into the agent container.
         #[arg(long)]
         mount_ssh: bool,
+
+        /// Enable fully autonomous mode: skip all agent permission prompts and apply
+        /// yoloDisallowedTools config.
+        #[arg(long)]
+        yolo: bool,
     },
 
     /// Manage work item specs (create, interview, amend).

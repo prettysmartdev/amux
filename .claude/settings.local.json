@@ -78,7 +78,8 @@
       "Bash(find ~/.cargo -name mod.rs -path */ratatui*)",
       "Bash(ls -la /workspace/aspec/*.md /workspace/aspec/*/*.md)",
       "Bash(echo \"Exit: $?\")",
-      "Bash(find /workspace/tests -type f -name *.rs)"
+      "Bash(find /workspace/tests -type f -name *.rs)",
+      "Bash(ls /tmp/cargo-*2)"
     ]
   }
 }

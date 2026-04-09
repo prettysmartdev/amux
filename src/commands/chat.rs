@@ -3,13 +3,13 @@ use crate::commands::auth::resolve_auth;
 use crate::commands::implement::confirm_mount_scope_stdin;
 use crate::commands::init::find_git_root;
 use crate::commands::output::OutputSink;
-use crate::config::load_repo_config;
+use crate::config::{effective_yolo_disallowed_tools, load_repo_config};
 use crate::docker;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 /// Command-mode entry point for `amux chat`.
-pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
+pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
     let credentials = resolve_auth(&git_root, agent_name(&git_root)?)?;
@@ -27,6 +27,7 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
         host_settings.as_ref(),
         allow_docker,
         mount_ssh,
+        yolo,
         &*runtime,
     )
     .await
@@ -40,6 +41,8 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
 /// `plan`: when true, launch agent in plan (read-only) mode.
 /// `allow_docker`: when true, mount the host Docker daemon socket into the container.
 /// `mount_ssh`: when true, mount the host `~/.ssh` directory read-only into the container.
+/// `yolo`: when true, append agent-specific skip-permissions flags and disallowed-tools config.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_with_sink(
     out: &OutputSink,
     mount_override: Option<PathBuf>,
@@ -49,17 +52,21 @@ pub async fn run_with_sink(
     host_settings: Option<&docker::HostSettings>,
     allow_docker: bool,
     mount_ssh: bool,
+    yolo: bool,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let config = load_repo_config(&git_root)?;
     let agent = config.agent.as_deref().unwrap_or("claude").to_string();
 
-    let entrypoint = if non_interactive {
+    let mut entrypoint = if non_interactive {
         chat_entrypoint_non_interactive(&agent, plan)
     } else {
         chat_entrypoint(&agent, plan)
     };
+
+    let disallowed_tools = if yolo { effective_yolo_disallowed_tools(&git_root) } else { vec![] };
+    append_yolo_flags(&mut entrypoint, &agent, yolo, &disallowed_tools);
 
     run_agent_with_sink(
         entrypoint,
@@ -130,6 +137,39 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
         }
         // Opencode and unknown agents have no plan mode.
         _ => {}
+    }
+}
+
+/// Append agent-specific yolo (skip-permissions) flags and disallowed-tools config.
+///
+/// - Claude: `--dangerously-skip-permissions`; if disallowed_tools non-empty, `--disallowedTools <t1>,<t2>,...`
+/// - Codex: `--full-auto`; disallowed tools not supported (warning printed)
+/// - Opencode: no equivalent — a warning is printed; disallowed tools not supported
+pub fn append_yolo_flags(args: &mut Vec<String>, agent: &str, yolo: bool, disallowed_tools: &[String]) {
+    if !yolo {
+        return;
+    }
+    match agent {
+        "claude" => {
+            args.push("--dangerously-skip-permissions".to_string());
+            if !disallowed_tools.is_empty() {
+                args.push("--disallowedTools".to_string());
+                args.push(disallowed_tools.join(","));
+            }
+        }
+        "codex" => {
+            args.push("--full-auto".to_string());
+            if !disallowed_tools.is_empty() {
+                eprintln!("WARNING: --yolo: codex does not support --disallowedTools; yoloDisallowedTools config will be ignored.");
+            }
+        }
+        _ => {
+            // Opencode and unknown agents have no skip-permissions equivalent.
+            eprintln!("WARNING: --yolo: agent '{}' does not support a skip-permissions flag; proceeding without it.", agent);
+            if !disallowed_tools.is_empty() {
+                eprintln!("WARNING: --yolo: agent '{}' does not support --disallowedTools; yoloDisallowedTools config will be ignored.", agent);
+            }
+        }
     }
 }
 
@@ -262,6 +302,81 @@ mod tests {
     #[test]
     fn chat_entrypoint_non_interactive_plan_opencode() {
         let args = chat_entrypoint_non_interactive("opencode", true);
+        assert_eq!(args, vec!["opencode"]);
+    }
+
+    // --- append_yolo_flags tests ---
+
+    #[test]
+    fn append_yolo_flags_noop_when_yolo_false() {
+        let mut args = vec!["claude".to_string()];
+        append_yolo_flags(&mut args, "claude", false, &[]);
+        assert_eq!(args, vec!["claude"]);
+    }
+
+    #[test]
+    fn append_yolo_flags_claude_adds_skip_permissions() {
+        let mut args = vec!["claude".to_string()];
+        append_yolo_flags(&mut args, "claude", true, &[]);
+        assert!(
+            args.contains(&"--dangerously-skip-permissions".to_string()),
+            "claude must receive --dangerously-skip-permissions"
+        );
+    }
+
+    #[test]
+    fn append_yolo_flags_claude_no_disallowed_tools_skips_flag() {
+        let mut args = vec!["claude".to_string()];
+        append_yolo_flags(&mut args, "claude", true, &[]);
+        assert!(
+            !args.contains(&"--disallowedTools".to_string()),
+            "--disallowedTools must not appear when the list is empty"
+        );
+    }
+
+    #[test]
+    fn append_yolo_flags_claude_with_disallowed_tools() {
+        let mut args = vec!["claude".to_string()];
+        let tools = vec!["Bash".to_string(), "computer".to_string()];
+        append_yolo_flags(&mut args, "claude", true, &tools);
+        let dt_idx = args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("--disallowedTools flag missing");
+        assert_eq!(args[dt_idx + 1], "Bash,computer");
+    }
+
+    #[test]
+    fn append_yolo_flags_codex_adds_full_auto() {
+        let mut args = vec!["codex".to_string()];
+        append_yolo_flags(&mut args, "codex", true, &[]);
+        assert!(args.contains(&"--full-auto".to_string()));
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn append_yolo_flags_codex_no_disallowed_tools_flag() {
+        // codex does not support --disallowedTools; the flag must never appear
+        let mut args = vec!["codex".to_string()];
+        let tools = vec!["Bash".to_string()];
+        append_yolo_flags(&mut args, "codex", true, &tools);
+        assert!(!args.contains(&"--disallowedTools".to_string()));
+    }
+
+    #[test]
+    fn append_yolo_flags_opencode_no_skip_permissions_flag() {
+        // opencode has no skip-permissions equivalent; args must be unchanged
+        let mut args = vec!["opencode".to_string()];
+        append_yolo_flags(&mut args, "opencode", true, &[]);
+        assert_eq!(args, vec!["opencode"]);
+    }
+
+    #[test]
+    fn append_yolo_flags_opencode_no_disallowed_tools_flag() {
+        let mut args = vec!["opencode".to_string()];
+        let tools = vec!["Bash".to_string()];
+        append_yolo_flags(&mut args, "opencode", true, &tools);
+        assert!(!args.contains(&"--disallowedTools".to_string()));
         assert_eq!(args, vec!["opencode"]);
     }
 }

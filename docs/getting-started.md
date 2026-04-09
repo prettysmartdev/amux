@@ -197,3 +197,4 @@ amux status --watch  # auto-refreshing dashboard (updates every 3 seconds)
 - Use `--worktree` to implement in an isolated Git branch — review and merge (or discard) after the agent finishes: `amux implement 0001 --worktree`
 - Use `--mount-ssh` to give the agent access to your host SSH keys for cloning private repos or pushing branches: `amux implement 0001 --mount-ssh`
 - Break complex work items into auditable phases with [Multi-Agent Workflows](workflows.md): `amux implement 0001 --workflow aspec/workflows/implement-feature.md`
+- Use `--yolo` to run the agent in fully autonomous mode — all permission prompts are skipped. Combined with `--workflow`, it implies `--worktree` and auto-advances stuck steps via a countdown dialog: `amux implement 0001 --yolo --workflow aspec/workflows/implement-feature.md`

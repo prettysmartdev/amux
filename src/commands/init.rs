@@ -97,6 +97,7 @@ pub async fn run_with_sink(
         agent: Some(agent.as_str().to_string()),
         auto_agent_auth_accepted: None,
         terminal_scrollback_lines: None,
+        yolo_disallowed_tools: None,
     };
     save_repo_config(&git_root, &config)?;
     out.println(format!(
@@ -454,7 +455,10 @@ mod tests {
 
     #[test]
     fn find_git_root_finds_git_dir() {
-        let root = find_git_root();
+        // Use the source file's directory rather than CWD, which is process-global
+        // and can be mutated by concurrently-running tests.
+        let src_dir = std::path::Path::new(file!()).parent().unwrap().parent().unwrap();
+        let root = find_git_root_from(src_dir);
         assert!(root.is_some());
         assert!(root.unwrap().join(".git").exists());
     }

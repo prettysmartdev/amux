@@ -66,6 +66,8 @@ pub enum Action {
     WorkflowNextInCurrentContainer,
     /// Workflow control board: mark the last step done and terminate the container.
     WorkflowFinish,
+    /// Workflow control board: disable auto-popup of stuck dialog for the current step.
+    DisableAutoWorkflowForStep,
     /// Worktree merge prompt: merge the worktree branch into the current branch.
     WorktreeMerge,
     /// Worktree merge prompt: discard the worktree branch and remove the worktree.
@@ -164,6 +166,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         Dialog::WorkflowControlBoard { .. } => {
             return handle_workflow_control_board(app.active_tab_mut(), key)
+        }
+        Dialog::WorkflowYoloCountdown { .. } => {
+            return handle_workflow_yolo_countdown(app.active_tab_mut(), key)
         }
         Dialog::WorktreeMergePrompt { .. } => {
             return handle_worktree_merge_prompt(app.active_tab_mut(), key)
@@ -1046,6 +1051,22 @@ fn handle_workflow_control_board(tab: &mut TabState, key: KeyEvent) -> Action {
             if tab.container_window == ContainerWindowState::Minimized {
                 tab.container_window = ContainerWindowState::Maximized;
             }
+            Action::None
+        }
+        KeyCode::Char('d') => {
+            // Disable auto-popup for the current step (still dismisses dialog with backoff).
+            tab.dialog = Dialog::None;
+            Action::DisableAutoWorkflowForStep
+        }
+        _ => Action::None, // dialog stays open
+    }
+}
+
+fn handle_workflow_yolo_countdown(tab: &mut TabState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            // Dismiss with backoff so the countdown won't immediately re-open.
+            tab.dismiss_stuck_dialog();
             Action::None
         }
         _ => Action::None, // dialog stays open

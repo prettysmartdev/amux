@@ -810,6 +810,10 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
         draw_workflow_control_board(frame, area, current_step, error.as_deref(), container_minimized, is_last_step);
         return;
     }
+    if let Dialog::WorkflowYoloCountdown { current_step, started_at, duration } = &tab.dialog {
+        draw_workflow_yolo_countdown(frame, area, current_step, started_at, duration);
+        return;
+    }
     if let Dialog::WorktreeCommitPrompt { branch, uncommitted_files, message, cursor_pos, .. } = &tab.dialog {
         draw_worktree_commit_prompt(frame, area, branch, uncommitted_files, message, *cursor_pos);
         return;
@@ -996,6 +1000,10 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
         // NewInterviewSummary is handled by the early return above — this arm is unreachable.
         Dialog::NewInterviewSummary { .. } => return,
         Dialog::WorkflowControlBoard { .. } => {
+            // Handled by the special-case early return above — unreachable here.
+            return;
+        }
+        Dialog::WorkflowYoloCountdown { .. } => {
             // Handled by the special-case early return above — unreachable here.
             return;
         }
@@ -1485,16 +1493,81 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
 
     let hint = if is_last_step {
         if container_minimized {
-            " [↑←] select  [Ctrl+Enter] finish  [c] restore  [Esc] dismiss"
+            " [↑←] select  [Ctrl+Enter] finish  [c] restore  [d]isable auto-popup  [Esc] dismiss"
         } else {
-            " [↑←] select  [Ctrl+Enter] finish  [Esc] dismiss"
+            " [↑←] select  [Ctrl+Enter] finish  [d]isable auto-popup  [Esc] dismiss"
         }
     } else if container_minimized {
-        " [Arrow] select  [c] restore container  [Esc] dismiss"
+        " [Arrow] select  [c] restore container  [d]isable auto-popup  [Esc] dismiss"
     } else {
-        " [Arrow] select  [Esc] dismiss"
+        " [Arrow] select  [d]isable controls auto-popup for this step  [Esc] dismiss"
     };
     lines.push(Line::from(vec![Span::styled(hint, hint_style)]));
+
+    let para = Paragraph::new(lines);
+    frame.render_widget(para, inner);
+}
+
+/// Render the yolo-mode countdown dialog shown when a workflow step is stuck.
+fn draw_workflow_yolo_countdown(
+    frame: &mut Frame,
+    area: Rect,
+    step_name: &str,
+    started_at: &std::time::Instant,
+    duration: &std::time::Duration,
+) {
+    let popup_width = 52u16.min(area.width.saturating_sub(4));
+    let popup_height = 9u16.min(area.height.saturating_sub(4));
+    let popup = centered_rect(popup_width, popup_height, area);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Yolo Mode — Auto-Advancing ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Magenta));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let elapsed = started_at.elapsed();
+    let remaining = duration.saturating_sub(elapsed);
+    let secs_remaining = remaining.as_secs();
+
+    let step_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let countdown_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+    let msg_style = Style::default().fg(Color::Yellow);
+    let hint_style = Style::default().fg(Color::DarkGray);
+
+    // Truncate step name if too long.
+    let max_step_len = popup_width.saturating_sub(10) as usize;
+    let step_display = if step_name.len() > max_step_len {
+        format!("{}…", &step_name[..max_step_len.saturating_sub(1)])
+    } else {
+        step_name.to_string()
+    };
+
+    let lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::raw(" Step: "),
+            Span::styled(step_display, step_style),
+        ]),
+        Line::raw(""),
+        Line::from(vec![Span::styled(
+            format!(" No activity detected. Advancing to next step in {}s...", secs_remaining),
+            msg_style,
+        )]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{}", secs_remaining), countdown_style),
+            Span::styled(" seconds remaining", countdown_style),
+        ]),
+        Line::raw(""),
+        Line::from(vec![Span::styled(" [Esc] dismiss (60s backoff)", hint_style)]),
+    ];
 
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);
