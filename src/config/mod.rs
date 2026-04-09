@@ -24,6 +24,10 @@ pub struct GlobalConfig {
     /// Applied to all repos unless overridden by per-repo config. Built-in default: 10,000.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_scrollback_lines: Option<usize>,
+    /// Container runtime to use. Supported values: `"docker"` (default), `"apple-containers"`.
+    /// `"apple-containers"` is only supported on macOS; on other platforms it falls back to Docker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 /// Built-in default number of scrollback lines for the container terminal emulator.

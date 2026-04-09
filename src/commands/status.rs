@@ -1,6 +1,5 @@
 use crate::commands::output::OutputSink;
 use crate::config::load_repo_config;
-use crate::docker;
 use anyhow::Result;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -123,13 +122,13 @@ pub struct NanoclawRow {
 ///
 /// Code-agent containers have an `amux-` name prefix and are excluded if they
 /// belong to the nanoclaw subsystem (`amux-claws-*` or contain `nanoclaw`).
-pub fn gather_code_agents() -> Vec<CodeAgentRow> {
-    docker::list_running_containers_with_ids_by_prefix("amux-")
+pub fn gather_code_agents(runtime: &dyn crate::runtime::AgentRuntime) -> Vec<CodeAgentRow> {
+    runtime.list_running_containers_with_ids_by_prefix("amux-")
         .into_iter()
         .filter(|(n, _)| !n.starts_with("amux-claws-") && !n.contains("nanoclaw"))
         .map(|(name, container_id)| {
-            let (project, agent) = project_and_agent_for(&name);
-            let (cpu, memory) = stats_for(&name);
+            let (project, agent) = project_and_agent_for(&name, runtime);
+            let (cpu, memory) = stats_for(&name, runtime);
             CodeAgentRow { name, container_id, project, agent, cpu, memory }
         })
         .collect()
@@ -139,19 +138,19 @@ pub fn gather_code_agents() -> Vec<CodeAgentRow> {
 ///
 /// Includes `amux-claws-controller` (if running) and any container whose name
 /// contains `nanoclaw`.
-pub fn gather_nanoclaw_containers() -> Vec<NanoclawRow> {
+pub fn gather_nanoclaw_containers(runtime: &dyn crate::runtime::AgentRuntime) -> Vec<NanoclawRow> {
     let mut entries: Vec<(String, String)> = Vec::new();
 
     // The nanoclaw controller has a well-known name.
     let controller = crate::commands::claws::NANOCLAW_CONTROLLER_NAME;
-    for (n, id) in docker::list_running_containers_with_ids_by_prefix(controller) {
+    for (n, id) in runtime.list_running_containers_with_ids_by_prefix(controller) {
         if n == controller {
             entries.push((n, id));
         }
     }
 
     // Any container whose name contains "nanoclaw" (worker containers, etc.).
-    for (n, id) in docker::list_running_containers_with_ids_by_prefix("nanoclaw") {
+    for (n, id) in runtime.list_running_containers_with_ids_by_prefix("nanoclaw") {
         if !entries.iter().any(|(name, _)| name == &n) {
             entries.push((n, id));
         }
@@ -160,7 +159,7 @@ pub fn gather_nanoclaw_containers() -> Vec<NanoclawRow> {
     entries
         .into_iter()
         .map(|(name, container_id)| {
-            let (cpu, memory) = stats_for(&name);
+            let (cpu, memory) = stats_for(&name, runtime);
             NanoclawRow { name, container_id, cpu, memory }
         })
         .collect()
@@ -170,8 +169,8 @@ pub fn gather_nanoclaw_containers() -> Vec<NanoclawRow> {
 ///
 /// Queries the container's `/workspace` mount, then reads `aspec/.amux.json`
 /// from the mounted Git root to determine the configured agent.
-fn project_and_agent_for(container_name: &str) -> (String, String) {
-    let project = docker::get_container_workspace_mount(container_name)
+fn project_and_agent_for(container_name: &str, runtime: &dyn crate::runtime::AgentRuntime) -> (String, String) {
+    let project = runtime.get_container_workspace_mount(container_name)
         .unwrap_or_else(|| "unknown".to_string());
 
     let agent = if project != "unknown" {
@@ -187,8 +186,8 @@ fn project_and_agent_for(container_name: &str) -> (String, String) {
 }
 
 /// Return (cpu_percent, memory) stats for a container, or ("--", "--") on failure.
-fn stats_for(name: &str) -> (String, String) {
-    docker::query_container_stats(name)
+fn stats_for(name: &str, runtime: &dyn crate::runtime::AgentRuntime) -> (String, String) {
+    runtime.query_container_stats(name)
         .map(|s| (s.cpu_percent, s.memory))
         .unwrap_or_else(|| ("--".to_string(), "--".to_string()))
 }
@@ -271,9 +270,9 @@ pub fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
 ///
 /// `tui_tabs` is a snapshot of running TUI tabs used to annotate the tables with
 /// tab numbers and attachment hints. Pass an empty slice when running from the CLI.
-pub fn format_status_output(tip: &str, tui_tabs: &[TuiTabInfo]) -> String {
-    let code_agents = gather_code_agents();
-    let nanoclaw = gather_nanoclaw_containers();
+pub fn format_status_output(tip: &str, tui_tabs: &[TuiTabInfo], runtime: &dyn crate::runtime::AgentRuntime) -> String {
+    let code_agents = gather_code_agents(runtime);
+    let nanoclaw = gather_nanoclaw_containers(runtime);
     let in_tui = !tui_tabs.is_empty();
 
     // Build container_name → (tab_number, is_stuck) lookups from the snapshot.
@@ -397,11 +396,12 @@ pub async fn run_with_sink(
     sink: &OutputSink,
     cancel: Option<tokio::sync::oneshot::Receiver<()>>,
     tui_tabs: Arc<Mutex<Vec<TuiTabInfo>>>,
+    runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
 ) -> Result<()> {
     // Select the tip once per invocation so it stays stable across --watch refreshes.
     let tip = select_random_tip();
     let snapshot = tui_tabs.lock().map(|g| g.clone()).unwrap_or_default();
-    let content = format_status_output(tip, &snapshot);
+    let content = format_status_output(tip, &snapshot, &*runtime);
 
     if !watch {
         sink.print(&content);
@@ -419,7 +419,7 @@ pub async fn run_with_sink(
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
             let snapshot = tui_tabs.lock().map(|g| g.clone()).unwrap_or_default();
-            let new_content = format_status_output(tip, &snapshot);
+            let new_content = format_status_output(tip, &snapshot, &*runtime);
             let new_lines = new_content.lines().count();
             // Move cursor up by `prev_lines` lines, then clear to end of screen.
             print!("\x1B[{}A\x1B[0J{}", prev_lines, new_content);
@@ -445,7 +445,7 @@ pub async fn run_with_sink(
             }
 
             let snapshot = tui_tabs.lock().map(|g| g.clone()).unwrap_or_default();
-            let new_content = format_status_output(tip, &snapshot);
+            let new_content = format_status_output(tip, &snapshot, &*runtime);
             // Send clear marker first; if the channel is closed, stop the loop.
             if !sink.try_println(CLEAR_MARKER) {
                 break;
@@ -457,9 +457,9 @@ pub async fn run_with_sink(
 }
 
 /// Entry point for `amux status` (command mode).
-pub async fn run(watch: bool) -> Result<()> {
+pub async fn run(watch: bool, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
     let sink = OutputSink::Stdout;
-    run_with_sink(watch, &sink, None, Arc::new(Mutex::new(vec![]))).await
+    run_with_sink(watch, &sink, None, Arc::new(Mutex::new(vec![])), runtime).await
 }
 
 #[cfg(test)]
@@ -537,20 +537,23 @@ mod tests {
 
     #[test]
     fn format_status_output_contains_both_sections() {
-        let output = format_status_output("test tip", &[]);
+        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let output = format_status_output("test tip", &[], &runtime);
         assert!(output.contains("CODE AGENTS"));
         assert!(output.contains("NANOCLAW"));
     }
 
     #[test]
     fn format_status_output_contains_dashboard_header() {
-        let output = format_status_output("test tip", &[]);
+        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let output = format_status_output("test tip", &[], &runtime);
         assert!(output.contains("AMUX STATUS DASHBOARD"));
     }
 
     #[test]
     fn format_status_output_contains_tip() {
-        let output = format_status_output("my custom tip", &[]);
+        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let output = format_status_output("my custom tip", &[], &runtime);
         assert!(output.contains("Tip: my custom tip"));
     }
 
@@ -558,7 +561,8 @@ mod tests {
     fn format_status_output_empty_state_messages_when_no_docker() {
         // When no containers are running (or Docker is unavailable), both sections
         // should show their empty-state messages rather than a table.
-        let output = format_status_output("test tip", &[]);
+        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let output = format_status_output("test tip", &[], &runtime);
         // One or both sections will be empty in the test environment.
         // At minimum, both section headers must be present.
         assert!(output.contains("CODE AGENTS\n"));
@@ -582,7 +586,8 @@ mod tests {
     #[test]
     fn project_and_agent_for_unknown_container_returns_unknown() {
         // A container that does not exist has no workspace mount → "unknown".
-        let (project, agent) = project_and_agent_for("amux-test-nonexistent-xyz-99999");
+        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let (project, agent) = project_and_agent_for("amux-test-nonexistent-xyz-99999", &runtime);
         assert_eq!(project, "unknown");
         assert_eq!(agent, "unknown");
     }
@@ -591,7 +596,8 @@ mod tests {
 
     #[test]
     fn stats_for_nonexistent_container_returns_dashes() {
-        let (cpu, mem) = stats_for("amux-test-nonexistent-xyz-99999");
+        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let (cpu, mem) = stats_for("amux-test-nonexistent-xyz-99999", &runtime);
         assert_eq!(cpu, "--");
         assert_eq!(mem, "--");
     }

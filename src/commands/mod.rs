@@ -13,8 +13,9 @@ pub mod status;
 
 use crate::cli::{Command, SpecsAction};
 use anyhow::Result;
+use std::sync::Arc;
 
-pub async fn run(command: Command) -> Result<()> {
+pub async fn run(command: Command, runtime: Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
     match command {
         Command::Init { agent, aspec } => init::run(agent, aspec).await,
         Command::Ready {
@@ -23,7 +24,7 @@ pub async fn run(command: Command) -> Result<()> {
             no_cache,
             non_interactive,
             allow_docker,
-        } => ready::run(refresh, build, no_cache, non_interactive, allow_docker).await,
+        } => ready::run(refresh, build, no_cache, non_interactive, allow_docker, runtime).await,
         Command::Implement {
             work_item,
             non_interactive,
@@ -32,17 +33,17 @@ pub async fn run(command: Command) -> Result<()> {
             workflow,
             worktree,
             mount_ssh,
-        } => implement::run(&work_item, non_interactive, plan, allow_docker, workflow.as_deref(), worktree, mount_ssh).await,
+        } => implement::run(&work_item, non_interactive, plan, allow_docker, workflow.as_deref(), worktree, mount_ssh, runtime).await,
         Command::Chat { non_interactive, plan, allow_docker, mount_ssh } => {
-            chat::run(non_interactive, plan, allow_docker, mount_ssh).await
+            chat::run(non_interactive, plan, allow_docker, mount_ssh, runtime).await
         }
-        Command::Claws { action } => claws::run(action).await,
-        Command::Status { watch } => status::run(watch).await,
+        Command::Claws { action } => claws::run(action, runtime).await,
+        Command::Status { watch } => status::run(watch, runtime.clone()).await,
         Command::Specs { action } => match action {
             SpecsAction::New { interview } => specs::run_new(interview).await,
             SpecsAction::Amend { work_item, non_interactive, allow_docker } => {
-                specs::run_amend(&work_item, non_interactive, allow_docker).await
-            }
+                specs::run_amend(&work_item, non_interactive, allow_docker, runtime).await
+            },
         },
     }
 }

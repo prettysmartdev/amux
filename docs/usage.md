@@ -130,7 +130,9 @@ amux init --agent=claude --aspec
 
 Checks that your environment is ready for agentic development.
 
-1. Verifies the Docker daemon is running
+1. Validates the configured runtime is available — prints which runtime is active
+   (`docker` or `apple-containers`). Fails immediately with a clear error if the
+   runtime binary is not found or the daemon is not running.
 2. Checks the `aspec/` folder — notes if missing and suggests `amux init --aspec`
 3. Checks the local agent installation by sending a random greeting (non-containerized)
    and displaying the greeting sent and the agent's response
@@ -221,7 +223,7 @@ of each step:
 ┌──────────────────────────────────────────────────┐
 │                  Ready Summary                   │
 ├───────────────────┬──────────────────────────────┤
-│    Docker daemon  │ ✓ running                    │
+│           Runtime │ ✓ docker: daemon running     │
 │    Dockerfile.dev │ ✓ exists                     │
 │      aspec folder │ ✓ present                    │
 │       Local agent │ ✓ claude: installed & ...    │
@@ -1096,6 +1098,89 @@ amux ready --refresh --allow-docker   # run audit with Docker access in containe
 
 ---
 
+## Runtime Selection
+
+amux supports multiple container runtimes. The active runtime handles all image
+builds, container launches, stats polling, and lifecycle operations. Switching
+runtime requires no changes to your `Dockerfile.dev`, workflow files, or any
+other project config.
+
+### Supported runtimes
+
+| Runtime | Value | Platform | Requirement |
+|---------|-------|----------|-------------|
+| Docker | `"docker"` | macOS, Linux, Windows | Docker daemon running |
+| Apple Containers | `"apple-containers"` | macOS 26+ only | `container` CLI in PATH |
+
+### Selecting a runtime
+
+Set the `runtime` field in your global config (`$HOME/.amux/config.json`):
+
+```json
+{ "runtime": "apple-containers" }
+```
+
+Or to use Docker explicitly (this is also the default when the field is absent):
+
+```json
+{ "runtime": "docker" }
+```
+
+An unrecognised value (e.g. a typo) falls back to Docker with a warning — your
+workflow is not broken, but you should fix the value.
+
+### Runtime availability check
+
+`amux ready` validates the configured runtime before any other checks and prints
+which runtime is active:
+
+```
+Runtime: docker (daemon running)
+```
+
+If the runtime is misconfigured or unavailable, `ready` exits immediately with a
+clear message:
+
+```
+error: runtime 'apple-containers' is not available: 'container' not found in PATH.
+Install Apple Containers (macOS 26+) or set "runtime": "docker" in your config.
+```
+
+This means you get a fast, actionable failure at `ready` time rather than a
+confusing error mid-launch.
+
+### Apple Containers runtime
+
+Apple Containers (`container` CLI, macOS 26+) is an OCI-compatible container
+runtime. It supports Dockerfiles natively, and amux maps every operation to the
+equivalent `container` CLI invocation. From a user perspective, behavior is
+identical to the Docker runtime.
+
+**Limitations of the Apple Containers runtime:**
+
+- **`--allow-docker`**: Docker socket passthrough is not meaningful under Apple
+  Containers. Passing `--allow-docker` with this runtime produces a warning and
+  the socket is not mounted. If your work item needs Docker-in-container access,
+  switch to the Docker runtime.
+
+- **Nanoclaw (`amux claws`)**: The nanoclaw container requires detached
+  container mode and Docker socket access, both of which depend on the Docker
+  runtime. `amux claws init`, `claws ready`, and `claws chat` are not supported
+  when `runtime` is set to `"apple-containers"`. Switch to the Docker runtime
+  for nanoclaw sessions.
+
+- **macOS-only**: If `"apple-containers"` is configured on Linux or Windows,
+  amux exits at startup with an error rather than silently falling back to
+  Docker, so your config mismatch is visible.
+
+### Adding a new runtime (for contributors)
+
+Implement the `AgentRuntime` trait in `src/runtime/` and register it in
+`resolve_runtime()`. No changes to agent-launching, TUI, or command-handler
+code are required — the trait enforces the full contract.
+
+---
+
 ## Worktree Isolation
 
 The `--worktree` flag on `amux implement` runs the agent against an isolated
@@ -1309,19 +1394,27 @@ amux chat --mount-ssh                 # freeform session with SSH access
 
 ---
 
-## Docker Command Visibility
+## Container Command Visibility
 
-Every time amux runs a Docker command (`docker build` or `docker run`), the
-full CLI command is displayed:
+Every time amux runs a container command (`build` or `run`), the full CLI
+command is displayed using the active runtime's binary name:
 
 - **Command mode**: printed to stdout before the command runs
 - **TUI mode**: included as the first line in the execution window output
 
-This lets you see exactly what Docker invocation amux is making, e.g.:
+This lets you see exactly what invocation amux is making. With the default
+Docker runtime:
 
 ```
 $ docker build -t amux-myapp:latest -f Dockerfile.dev /path/to/repo
 $ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_OAUTH_TOKEN=*** amux-myapp:latest claude "Implement work item 0001..."
+```
+
+With the Apple Containers runtime, the same commands are shown with `container`:
+
+```
+$ container build -t amux-myapp:latest -f Dockerfile.dev /path/to/repo
+$ container run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_OAUTH_TOKEN=*** amux-myapp:latest claude "Implement work item 0001..."
 ```
 
 ---
@@ -1347,7 +1440,8 @@ $ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_O
 ```json
 {
   "default_agent": "claude",
-  "terminal_scrollback_lines": 10000
+  "terminal_scrollback_lines": 10000,
+  "runtime": "docker"
 }
 ```
 
@@ -1355,10 +1449,15 @@ $ docker run --rm -it -v /path/to/repo:/workspace -w /workspace -e CLAUDE_CODE_O
 |-------|------|---------|-------------|
 | `default_agent` | string | `"claude"` | Default agent used when no per-repo agent is configured |
 | `terminal_scrollback_lines` | integer | `10000` | Default number of scrollback lines for the container terminal emulator. Applied to all repos unless overridden by per-repo config |
+| `runtime` | string | `"docker"` | Container runtime to use. Accepted values: `"docker"`, `"apple-containers"` (macOS 26+ only). An unrecognised value falls back to `"docker"` with a warning. See [Runtime Selection](#runtime-selection). |
 
 **Config precedence for `terminal_scrollback_lines`:**
 
 Per-repo config → Global config → Built-in default (10,000 lines)
+
+**Note:** `runtime` is a global (machine-level) setting. It is not available in
+the per-repo config — container runtime is a property of the machine, not the
+project.
 
 A 10,000-line scrollback buffer at 80 columns uses approximately 3 MB per tab.
 Increase this value for long-running build or test sessions; decrease it to

@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 /// Command-mode entry point for `amux chat`.
-pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool) -> Result<()> {
+pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
     let credentials = resolve_auth(&git_root, agent_name(&git_root)?)?;
@@ -18,23 +18,16 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
     let host_settings = docker::HostSettings::prepare(agent)
         .or_else(|| docker::HostSettings::prepare_minimal(agent));
 
-    let entrypoint = if non_interactive {
-        chat_entrypoint_non_interactive(agent, plan)
-    } else {
-        chat_entrypoint(agent, plan)
-    };
-
-    run_agent_with_sink(
-        entrypoint,
-        &format!("Starting chat session with agent '{}'", agent),
+    run_with_sink(
         &OutputSink::Stdout,
         Some(mount_path),
         credentials.env_vars.clone(),
         non_interactive,
+        plan,
         host_settings.as_ref(),
         allow_docker,
         mount_ssh,
-        None,
+        &*runtime,
     )
     .await
 }
@@ -56,6 +49,7 @@ pub async fn run_with_sink(
     host_settings: Option<&docker::HostSettings>,
     allow_docker: bool,
     mount_ssh: bool,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let config = load_repo_config(&git_root)?;
@@ -78,6 +72,7 @@ pub async fn run_with_sink(
         allow_docker,
         mount_ssh,
         None,
+        runtime,
     )
     .await
 }

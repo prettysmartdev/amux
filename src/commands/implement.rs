@@ -23,6 +23,7 @@ pub async fn run(
     workflow_path: Option<&Path>,
     worktree: bool,
     mount_ssh: bool,
+    runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
 ) -> Result<()> {
     let work_item = parse_work_item(work_item_str)?;
     let git_root = find_git_root().context("Not inside a Git repository")?;
@@ -111,6 +112,7 @@ pub async fn run(
             plan,
             allow_docker,
             mount_ssh,
+            &*runtime,
         )
         .await;
         if let Some(ref branch) = worktree_branch {
@@ -144,6 +146,7 @@ pub async fn run(
         allow_docker,
         mount_ssh,
         None,
+        &*runtime,
     )
     .await;
 
@@ -175,6 +178,7 @@ pub async fn run_with_sink(
     allow_docker: bool,
     worktree: bool,
     mount_ssh: bool,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let config = load_repo_config(&git_root)?;
@@ -210,6 +214,7 @@ pub async fn run_with_sink(
         allow_docker,
         mount_ssh,
         None,
+        runtime,
     )
     .await
 }
@@ -391,6 +396,7 @@ async fn run_workflow(
     plan: bool,
     allow_docker: bool,
     mount_ssh: bool,
+    runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     use std::io::{BufRead, Write};
 
@@ -503,6 +509,7 @@ async fn run_workflow(
             allow_docker,
             mount_ssh,
             Some(container_name),
+            runtime,
         )
         .await;
 
