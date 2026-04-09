@@ -79,7 +79,10 @@
       "Bash(ls -la /workspace/aspec/*.md /workspace/aspec/*/*.md)",
       "Bash(echo \"Exit: $?\")",
       "Bash(find /workspace/tests -type f -name *.rs)",
-      "Bash(ls /tmp/cargo-*2)"
+      "Bash(ls /tmp/cargo-*2)",
+      "Bash(curl:*)",
+      "Bash(gh api:*)",
+      "Bash(node -e \":*)"
     ]
   }
 }

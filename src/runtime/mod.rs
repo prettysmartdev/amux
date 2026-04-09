@@ -21,8 +21,11 @@ pub struct ContainerStats {
 /// Parses a single formatted stats line into a [`ContainerStats`].
 ///
 /// Expected format: `"name|cpu_percent|mem_usage/mem_limit"` — the format
-/// produced by both Docker and Apple Containers when invoked with
+/// produced by Docker when invoked with
 /// `stats --no-stream --format "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}"`.
+///
+/// Note: Apple Containers does not support Go-template `--format`; its
+/// stats path uses JSON and is handled directly in `apple::AppleContainersRuntime`.
 ///
 /// Returns `None` for empty input or when the line cannot be split into
 /// exactly three `|`-separated fields.
@@ -58,9 +61,9 @@ pub struct StoppedContainerInfo {
 /// Host-machine agent settings prepared for injection into a container.
 ///
 /// Stores sanitized config files in a temporary directory. The directory is
-/// bind-mounted into the container as `/root/.claude.json` and `/root/.claude`.
-/// The temp directory is automatically cleaned up when this struct is dropped
-/// (RAII via `tempfile::TempDir`).
+/// bind-mounted into the container as `<container_home>/.claude.json` and
+/// `<container_home>/.claude`. The temp directory is automatically cleaned up
+/// when this struct is dropped (RAII via `tempfile::TempDir`).
 pub struct HostSettings {
     /// Kept alive so the temp dir survives as long as the container runs.
     /// `None` when created via `from_paths` (caller manages the backing directory).
@@ -69,6 +72,10 @@ pub struct HostSettings {
     pub config_path: PathBuf,
     /// Path to the copied `.claude/` directory inside the temp dir.
     pub claude_dir_path: PathBuf,
+    /// Home directory path inside the container for mounting agent settings.
+    /// Defaults to `/root`. Set to `/home/<username>` when `Dockerfile.dev`
+    /// specifies a non-root USER directive.
+    pub container_home: String,
 }
 
 /// Top-level entries in `~/.claude/` that are large, host-specific, or
@@ -145,6 +152,7 @@ impl HostSettings {
             _temp_dir: Some(temp_dir),
             config_path,
             claude_dir_path,
+            container_home: "/root".to_string(),
         })
     }
 
@@ -197,6 +205,7 @@ impl HostSettings {
             _temp_dir: None,
             config_path,
             claude_dir_path,
+            container_home: "/root".to_string(),
         })
     }
 
@@ -210,6 +219,7 @@ impl HostSettings {
             _temp_dir: None,
             config_path,
             claude_dir_path,
+            container_home: "/root".to_string(),
         }
     }
 
@@ -234,7 +244,41 @@ impl HostSettings {
             _temp_dir: Some(temp_dir),
             config_path,
             claude_dir_path,
+            container_home: "/root".to_string(),
         })
+    }
+}
+
+/// Scans a Dockerfile from the end upwards to find the last `USER` directive.
+///
+/// Returns the username as a `String` if a `USER` instruction is found,
+/// or `None` if no `USER` directive exists in the file.
+///
+/// Dockerfile instructions are case-insensitive per the spec, so both
+/// `USER agent` and `user agent` are recognised.
+pub fn parse_dockerfile_user(dockerfile_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(dockerfile_path).ok()?;
+    for line in content.lines().rev() {
+        let trimmed = line.trim();
+        let upper = trimmed.to_ascii_uppercase();
+        if upper.starts_with("USER") {
+            let rest = trimmed[4..].trim();
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Returns the container home directory path for a given username.
+///
+/// `"root"` maps to `/root`; any other username maps to `/home/<username>`.
+pub fn container_home_for_user(username: &str) -> String {
+    if username == "root" {
+        "/root".to_string()
+    } else {
+        format!("/home/{}", username)
     }
 }
 
@@ -798,5 +842,76 @@ mod tests {
             msg.contains("macOS"),
             "error message should mention macOS: {}", msg
         );
+    }
+
+    // ─── parse_dockerfile_user ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_dockerfile_user_returns_last_user_directive() {
+        let tmp = TempDir::new().unwrap();
+        let dockerfile = tmp.path().join("Dockerfile.dev");
+        std::fs::write(&dockerfile, "FROM debian\nUSER root\nUSER agent\n").unwrap();
+        assert_eq!(parse_dockerfile_user(&dockerfile).as_deref(), Some("agent"));
+    }
+
+    #[test]
+    fn parse_dockerfile_user_case_insensitive() {
+        let tmp = TempDir::new().unwrap();
+        let dockerfile = tmp.path().join("Dockerfile.dev");
+        std::fs::write(&dockerfile, "FROM debian\nuser agent\n").unwrap();
+        assert_eq!(parse_dockerfile_user(&dockerfile).as_deref(), Some("agent"));
+    }
+
+    #[test]
+    fn parse_dockerfile_user_no_user_directive_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        let dockerfile = tmp.path().join("Dockerfile.dev");
+        std::fs::write(&dockerfile, "FROM debian\nRUN echo hello\n").unwrap();
+        assert!(parse_dockerfile_user(&dockerfile).is_none());
+    }
+
+    #[test]
+    fn parse_dockerfile_user_nonexistent_file_returns_none() {
+        let path = std::path::Path::new("/nonexistent/Dockerfile.dev");
+        assert!(parse_dockerfile_user(path).is_none());
+    }
+
+    #[test]
+    fn parse_dockerfile_user_root_user_returned() {
+        let tmp = TempDir::new().unwrap();
+        let dockerfile = tmp.path().join("Dockerfile.dev");
+        std::fs::write(&dockerfile, "FROM debian\nUSER root\n").unwrap();
+        assert_eq!(parse_dockerfile_user(&dockerfile).as_deref(), Some("root"));
+    }
+
+    // ─── container_home_for_user ─────────────────────────────────────────────
+
+    #[test]
+    fn container_home_for_root_is_slash_root() {
+        assert_eq!(container_home_for_user("root"), "/root");
+    }
+
+    #[test]
+    fn container_home_for_non_root_is_home_username() {
+        assert_eq!(container_home_for_user("agent"), "/home/agent");
+        assert_eq!(container_home_for_user("claude"), "/home/claude");
+    }
+
+    // ─── HostSettings::container_home default ────────────────────────────────
+
+    #[test]
+    fn host_settings_from_paths_default_container_home_is_root() {
+        let settings = HostSettings::from_paths(
+            PathBuf::from("/tmp/cfg.json"),
+            PathBuf::from("/tmp/dot-claude"),
+        );
+        assert_eq!(settings.container_home, "/root");
+    }
+
+    #[test]
+    fn host_settings_prepare_minimal_default_container_home_is_root() {
+        if let Some(s) = HostSettings::prepare_minimal("claude") {
+            assert_eq!(s.container_home, "/root");
+        }
     }
 }

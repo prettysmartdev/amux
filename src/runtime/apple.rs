@@ -1,9 +1,16 @@
 //! Apple Containers runtime — macOS only.
 //!
 //! Uses Apple's `container` CLI (shipping with macOS 26+) as the container
-//! backend. The `container` CLI accepts the same subcommand structure as
-//! `docker` for basic operations, so this implementation mirrors
-//! `DockerRuntime` but substitutes "container" for "docker" throughout.
+//! backend. The `container` CLI is similar to Docker for basic run/build/exec
+//! operations but differs in several areas:
+//!
+//! - Availability check: `container system status` (not `container info`)
+//! - Listing: `container list` (not `container ps`); only supports
+//!   `--format json` or `--format table`, **not** Go templates
+//! - Inspect: `container inspect` outputs raw JSON; no `--format` flag
+//! - Stats: `container stats --format json` outputs raw bytes/microseconds;
+//!   CPU% must be derived from two time-separated samples
+//! - Container ID == container name (no separate short hex ID)
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -60,21 +67,24 @@ fn append_docker_socket_mount_args(args: &mut Vec<String>) {
 fn append_settings_mounts(args: &mut Vec<String>, settings: &HostSettings) {
     args.push("-v".into());
     args.push(format!(
-        "{}:/root/.claude.json",
-        settings.config_path.display()
+        "{}:{}/.claude.json",
+        settings.config_path.display(),
+        settings.container_home,
     ));
     args.push("-v".into());
     args.push(format!(
-        "{}:/root/.claude",
-        settings.claude_dir_path.display()
+        "{}:{}/.claude",
+        settings.claude_dir_path.display(),
+        settings.container_home,
     ));
 }
 
-fn append_settings_mounts_display(args: &mut Vec<String>) {
+fn append_settings_mounts_display(args: &mut Vec<String>, settings: Option<&HostSettings>) {
+    let home = settings.map(|s| s.container_home.as_str()).unwrap_or("/root");
     args.push("-v".into());
-    args.push("<settings>:/root/.claude.json".into());
+    args.push(format!("<settings>:{}/.claude.json", home));
     args.push("-v".into());
-    args.push("<settings>:/root/.claude".into());
+    args.push(format!("<settings>:{}/.claude", home));
 }
 
 fn append_entrypoint(args: &mut Vec<String>, image: &str, entrypoint: &[&str]) {
@@ -96,12 +106,30 @@ fn append_env_args_display(args: &mut Vec<String>, env_vars: &[(String, String)]
     }
 }
 
+/// Formats raw byte counts into human-readable IEC units (KiB / MiB / GiB).
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 // ─── AgentRuntime impl ──────────────────────────────────────────────────────
 
 impl AgentRuntime for AppleContainersRuntime {
     fn is_available(&self) -> bool {
+        // `container info` does not exist in the Apple Container CLI.
+        // The correct availability check is `container system status`.
         Command::new("container")
-            .args(["info"])
+            .args(["system", "status"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -540,31 +568,35 @@ impl AgentRuntime for AppleContainersRuntime {
     }
 
     fn is_container_running(&self, container_id: &str) -> bool {
+        // Apple's `container inspect` does not support --format with Go templates.
+        // It always outputs a raw JSON array of PrintableContainer objects.
+        // The status field is a string: "running" | "stopped" | "stopping" | "unknown".
         let output = Command::new("container")
-            .args(["inspect", "--format", "{{.State.Running}}", container_id])
+            .args(["inspect", container_id])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
             .ok();
         if let Some(output) = output {
             if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                return stdout.trim() == "true";
+                if let Ok(json) =
+                    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                {
+                    if let Some(status) = json[0]["status"].as_str() {
+                        return status == "running";
+                    }
+                }
             }
         }
         false
     }
 
     fn find_stopped_container(&self, name: &str, image: &str) -> Option<StoppedContainerInfo> {
+        // Apple's CLI does not have `container ps` or Go-template --format.
+        // Use `container list --all --format json` and parse the result.
+        // JSON schema: [{status, configuration: {id, image: {...}}, startedDate: float|null}]
         let output = Command::new("container")
-            .args([
-                "ps",
-                "-a",
-                "--filter",
-                &format!("name={}", name),
-                "--format",
-                "{{.ID}}\t{{.Names}}\t{{.CreatedAt}}\t{{.Image}}\t{{.Status}}",
-            ])
+            .args(["list", "--all", "--format", "json"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
@@ -574,92 +606,125 @@ impl AgentRuntime for AppleContainersRuntime {
             return None;
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.splitn(5, '\t').collect();
-            if parts.len() < 5 {
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).ok()?;
+        let containers = json.as_array()?;
+
+        for container in containers {
+            let container_id =
+                container["configuration"]["id"].as_str().unwrap_or("");
+            let status = container["status"].as_str().unwrap_or("");
+
+            if container_id != name {
                 continue;
             }
-            let (id, container_name, created, container_image, status) =
-                (parts[0], parts[1], parts[2], parts[3], parts[4]);
-            if container_name != name {
+            // Skip running or stopping containers.
+            if status == "running" || status == "stopping" {
                 continue;
             }
-            if container_image != image {
+            // Match image: the image field is an object; do a loose substring
+            // check on its serialized form so any reference format matches.
+            let image_val = &container["configuration"]["image"];
+            let image_json =
+                serde_json::to_string(image_val).unwrap_or_default();
+            if !image_json.contains(image) {
                 continue;
             }
-            if status.starts_with("Up ") {
-                continue;
-            }
+
+            let created = container["startedDate"]
+                .as_f64()
+                .map(|ts| format!("{:.0}", ts))
+                .unwrap_or_else(|| "unknown".to_string());
+
             return Some(StoppedContainerInfo {
-                id: id.to_string(),
-                name: container_name.to_string(),
-                created: created.to_string(),
+                id: container_id.to_string(),
+                name: container_id.to_string(),
+                created,
             });
         }
         None
     }
 
     fn list_running_containers_by_prefix(&self, prefix: &str) -> Vec<String> {
+        // Apple's CLI has no `container ps` or Go-template --format.
+        // Use `container list --format json` (shows only running by default).
         let output = Command::new("container")
-            .args([
-                "ps",
-                "--filter",
-                &format!("name={}", prefix),
-                "--format",
-                "{{.Names}}",
-            ])
+            .args(["list", "--format", "json"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output();
 
         match output {
-            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|l| !l.is_empty() && l.starts_with(prefix))
-                .map(|l| l.to_string())
-                .collect(),
+            Ok(out) if out.status.success() => {
+                let json: serde_json::Value =
+                    match serde_json::from_slice(&out.stdout) {
+                        Ok(v) => v,
+                        Err(_) => return vec![],
+                    };
+                let arr = match json.as_array() {
+                    Some(a) => a,
+                    None => return vec![],
+                };
+                arr.iter()
+                    .filter_map(|c| {
+                        let id = c["configuration"]["id"].as_str()?;
+                        if id.starts_with(prefix) {
+                            Some(id.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
             _ => vec![],
         }
     }
 
-    fn list_running_containers_with_ids_by_prefix(&self, prefix: &str) -> Vec<(String, String)> {
+    fn list_running_containers_with_ids_by_prefix(
+        &self,
+        prefix: &str,
+    ) -> Vec<(String, String)> {
+        // Apple's CLI has no `container ps` or Go-template --format.
+        // In Apple containers the name IS the container identifier, so both
+        // elements of the tuple carry the same value.
         let output = Command::new("container")
-            .args([
-                "ps",
-                "--filter",
-                &format!("name={}", prefix),
-                "--format",
-                "{{.Names}}\t{{.ID}}",
-            ])
+            .args(["list", "--format", "json"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output();
 
         match output {
-            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|l| !l.is_empty())
-                .filter_map(|l| {
-                    let mut parts = l.splitn(2, '\t');
-                    let name = parts.next()?.to_string();
-                    let id = parts.next().unwrap_or("").trim().to_string();
-                    if name.starts_with(prefix) {
-                        Some((name, id))
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
+            Ok(out) if out.status.success() => {
+                let json: serde_json::Value =
+                    match serde_json::from_slice(&out.stdout) {
+                        Ok(v) => v,
+                        Err(_) => return vec![],
+                    };
+                let arr = match json.as_array() {
+                    Some(a) => a,
+                    None => return vec![],
+                };
+                arr.iter()
+                    .filter_map(|c| {
+                        let id = c["configuration"]["id"].as_str()?;
+                        if id.starts_with(prefix) {
+                            Some((id.to_string(), id.to_string()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
             _ => vec![],
         }
     }
 
     fn get_container_workspace_mount(&self, container_name: &str) -> Option<String> {
-        let format_str =
-            "{{range .Mounts}}{{if eq .Destination \"/workspace\"}}{{.Source}}{{end}}{{end}}";
+        // Apple's `container inspect` does not support --format with Go templates.
+        // It returns a raw JSON array of PrintableContainer objects.
+        // Mounts are at configuration.mounts[].{source,destination}.
         let output = Command::new("container")
-            .args(["inspect", "--format", format_str, container_name])
+            .args(["inspect", container_name])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
@@ -669,28 +734,60 @@ impl AgentRuntime for AppleContainersRuntime {
             return None;
         }
 
-        let src = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if src.is_empty() { None } else { Some(src) }
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).ok()?;
+        let mounts = json[0]["configuration"]["mounts"].as_array()?;
+        for mount in mounts {
+            if mount["destination"].as_str() == Some("/workspace") {
+                let src = mount["source"].as_str().unwrap_or("").to_string();
+                if !src.is_empty() {
+                    return Some(src);
+                }
+            }
+        }
+        None
     }
 
     fn query_container_stats(&self, name: &str) -> Option<ContainerStats> {
-        let output = Command::new("container")
-            .args([
-                "stats",
-                "--no-stream",
-                "--format",
-                "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}",
-                name,
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        super::parse_stats_line(&line)
+        // Apple's `container stats` only accepts --format json or --format table,
+        // not Go templates. The JSON output contains raw bytes and CPU microseconds.
+        // CPU% requires two samples; we take them ~200 ms apart.
+        let take_sample = |n: &str| -> Option<(u64, u64)> {
+            let out = Command::new("container")
+                .args(["stats", "--no-stream", "--format", "json", n])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let json: serde_json::Value =
+                serde_json::from_slice(&out.stdout).ok()?;
+            let entry = json.as_array()?.first()?;
+            let cpu = entry["cpuUsageUsec"].as_u64().unwrap_or(0);
+            let mem = entry["memoryUsageBytes"].as_u64().unwrap_or(0);
+            Some((cpu, mem))
+        };
+
+        let (cpu1, _) = take_sample(name)?;
+        let t0 = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (cpu2, mem) = take_sample(name)?;
+        let elapsed_usec = t0.elapsed().as_micros() as u64;
+
+        let cpu_delta = cpu2.saturating_sub(cpu1);
+        let cpu_percent = if elapsed_usec > 0 {
+            (cpu_delta as f64 / elapsed_usec as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        Some(ContainerStats {
+            name: name.to_string(),
+            cpu_percent: format!("{:.1}%", cpu_percent),
+            memory: format_bytes(mem),
+        })
     }
 
     fn build_run_args_pty(
@@ -756,7 +853,7 @@ impl AgentRuntime for AppleContainersRuntime {
         ]);
 
         if host_settings.is_some() {
-            append_settings_mounts_display(&mut args);
+            append_settings_mounts_display(&mut args, host_settings);
         }
         if allow_docker {
             append_docker_socket_mount_args(&mut args);
@@ -846,7 +943,7 @@ impl AgentRuntime for AppleContainersRuntime {
         }
 
         if host_settings.is_some() {
-            append_settings_mounts_display(&mut args);
+            append_settings_mounts_display(&mut args, host_settings);
         }
         if allow_docker {
             append_docker_socket_mount_args(&mut args);
@@ -1042,7 +1139,7 @@ mod tests {
 
     fn container_cli_present() -> bool {
         std::process::Command::new("container")
-            .args(["info"])
+            .args(["system", "status"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

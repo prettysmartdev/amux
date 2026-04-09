@@ -77,13 +77,33 @@ pub async fn run_agent_with_sink(
     let image_tag = docker::project_image_tag(&git_root);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
+    // Detect the last USER directive in Dockerfile.dev and update settings mounts
+    // to target the correct home directory inside the container.
+    let modified_settings: Option<docker::HostSettings> = host_settings.and_then(|settings| {
+        let dockerfile = git_root.join("Dockerfile.dev");
+        let user = crate::runtime::parse_dockerfile_user(&dockerfile)?;
+        let home = crate::runtime::container_home_for_user(&user);
+        out.println(format!(
+            "Agent settings will be mounted for user '{}' ({})",
+            user, home
+        ));
+        let mut new_settings = docker::HostSettings::from_paths(
+            settings.config_path.clone(),
+            settings.claude_dir_path.clone(),
+        );
+        new_settings.container_home = home;
+        Some(new_settings)
+    });
+    let effective_settings: Option<&docker::HostSettings> =
+        modified_settings.as_ref().or(host_settings);
+
     // Show the full runtime CLI command being run (with masked env values).
     let display_args = runtime.build_run_args_display(
         &image_tag,
         mount_path.to_str().unwrap(),
         &entrypoint_refs,
         &env_vars,
-        host_settings,
+        effective_settings,
         allow_docker,
         container_name_override.as_deref(),
         ssh_dir.as_deref(),
@@ -102,7 +122,7 @@ pub async fn run_agent_with_sink(
             mount_path.to_str().unwrap(),
             &entrypoint_refs,
             &env_vars,
-            host_settings,
+            effective_settings,
             allow_docker,
             container_name_override.as_deref(),
             ssh_dir.as_deref(),
@@ -117,7 +137,7 @@ pub async fn run_agent_with_sink(
             mount_path.to_str().unwrap(),
             &entrypoint_refs,
             &env_vars,
-            host_settings,
+            effective_settings,
             allow_docker,
             container_name_override.as_deref(),
             ssh_dir.as_deref(),

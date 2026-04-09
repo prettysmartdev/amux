@@ -62,21 +62,24 @@ fn append_docker_socket_mount_args(args: &mut Vec<String>) {
 fn append_settings_mounts(args: &mut Vec<String>, settings: &HostSettings) {
     args.push("-v".into());
     args.push(format!(
-        "{}:/root/.claude.json",
-        settings.config_path.display()
+        "{}:{}/.claude.json",
+        settings.config_path.display(),
+        settings.container_home,
     ));
     args.push("-v".into());
     args.push(format!(
-        "{}:/root/.claude",
-        settings.claude_dir_path.display()
+        "{}:{}/.claude",
+        settings.claude_dir_path.display(),
+        settings.container_home,
     ));
 }
 
-fn append_settings_mounts_display(args: &mut Vec<String>) {
+fn append_settings_mounts_display(args: &mut Vec<String>, settings: Option<&HostSettings>) {
+    let home = settings.map(|s| s.container_home.as_str()).unwrap_or("/root");
     args.push("-v".into());
-    args.push("<settings>:/root/.claude.json".into());
+    args.push(format!("<settings>:{}/.claude.json", home));
     args.push("-v".into());
-    args.push("<settings>:/root/.claude".into());
+    args.push(format!("<settings>:{}/.claude", home));
 }
 
 fn append_entrypoint(args: &mut Vec<String>, image: &str, entrypoint: &[&str]) {
@@ -759,7 +762,7 @@ impl AgentRuntime for DockerRuntime {
         ]);
 
         if host_settings.is_some() {
-            append_settings_mounts_display(&mut args);
+            append_settings_mounts_display(&mut args, host_settings);
         }
         if allow_docker {
             append_docker_socket_mount_args(&mut args);
@@ -849,7 +852,7 @@ impl AgentRuntime for DockerRuntime {
         }
 
         if host_settings.is_some() {
-            append_settings_mounts_display(&mut args);
+            append_settings_mounts_display(&mut args, host_settings);
         }
         if allow_docker {
             append_docker_socket_mount_args(&mut args);
