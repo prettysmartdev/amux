@@ -1,0 +1,219 @@
+# Security & Isolation
+
+amux is built around a simple principle: agents never run on your host machine. Every agent session runs inside a Docker container that only sees what you explicitly give it. This section explains the isolation mechanisms and when to opt into elevated access.
+
+---
+
+## The containment model
+
+By default, an agent container:
+
+- Sees only your current Git repository, mounted at `/workspace`
+- Receives your credentials as environment variables (never as mounted files)
+- Has no access to your home directory, SSH keys, or Docker daemon
+- Is removed when the session ends (`--rm`)
+
+This means a misbehaving agent can't access your SSH keys, can't run arbitrary containers on your behalf, and can't touch files outside the project. The worst case is that it makes bad edits inside the repo — which git can undo.
+
+### Transparency
+
+Every time amux runs a container command, the full CLI invocation is printed before it executes:
+
+```
+$ docker run --rm -it -v /home/user/myproject:/workspace -w /workspace \
+    -e CLAUDE_CODE_OAUTH_TOKEN=*** amux-myproject:latest claude "..."
+```
+
+Credential values are masked (`***`), but everything else is visible. You can always see exactly what amux is doing.
+
+---
+
+## Worktree isolation
+
+The `--worktree` flag on `amux implement` runs the agent in an isolated Git worktree rather than your main working directory. The agent's changes land on a separate branch, completely isolated from your current work until you decide what to do with them.
+
+### Why use it
+
+- The agent can make sweeping changes without your working branch becoming unstable mid-implementation
+- You can review the full diff as a coherent unit before it touches your main tree
+- If the output isn't useful, discard it with a single keypress — no `git reset` needed
+- Works with `--workflow`: all steps in the workflow share the same isolated worktree
+
+### How it works
+
+1. amux creates a branch `amux/work-item-NNNN` from your current `HEAD`
+2. A worktree is checked out at `~/.amux/worktrees/<repo-name>/<NNNN>/`
+3. The agent container mounts the worktree instead of your repo root
+4. After the agent exits, you choose what to do with the branch
+
+### Post-run options (command mode)
+
+```
+Worktree branch `amux/work-item-0030` is ready. Merge into current branch? [y/n/s]
+```
+
+| Key | Action |
+|-----|--------|
+| `y` | Merge into current branch (`git merge --no-ff`), remove worktree and branch |
+| `n` | Discard — remove worktree and delete branch |
+| `s` | Keep worktree and branch for manual review; prints the path |
+
+### Post-run dialog (TUI mode)
+
+```
+╭─── Worktree: Merge or Discard? ───────────────────────╮
+│                                                        │
+│  Branch 'amux/work-item-0030' completed.               │
+│                                                        │
+│  [m/y] Merge into current branch                       │
+│  [d]   Discard (delete branch + worktree)              │
+│  [s/Esc] Keep worktree branch as-is                    │
+│                                                        │
+╰────────────────────────────────────────────────────────╯
+```
+
+### Interrupted runs
+
+If a worktree already exists (previous run was interrupted), amux detects it:
+
+```
+Worktree already exists at ~/.amux/worktrees/myrepo/0030.
+[r]esume — reuse existing worktree
+[R]ecreate — remove it and start fresh
+```
+
+### Merge conflicts
+
+If the merge fails, amux prints a recovery message and leaves the worktree in place:
+
+```
+Merge failed with conflicts — resolve manually in /path/to/repo,
+then run: git branch -d amux/work-item-0030 && git worktree remove ~/.amux/worktrees/myrepo/0030
+```
+
+### Commit signing (GPG, SSH, S/MIME)
+
+When Git commit signing is enabled, amux **suspends the TUI** around each `git commit` it runs, allowing your passphrase prompt to work normally. After the commit completes (or fails), the TUI is restored. Users without signing configured see no change.
+
+### Edge cases
+
+| Situation | Behaviour |
+|-----------|-----------|
+| `git` < 2.5 | Error before launch: "git ≥ 2.5 is required for --worktree support" |
+| Detached HEAD | Warning printed; worktree created from current commit; continues |
+| Branch exists, no worktree dir | Worktree created using the existing branch |
+| Merge conflict | Error with manual resolution instructions; worktree kept |
+| Combined with `--workflow` | All workflow-step containers share the same worktree |
+| Combined with `--mount-ssh` | Both flags apply independently |
+
+### Examples
+
+```sh
+amux implement 0030 --worktree                        # isolated run; prompt to merge after
+amux implement 0030 --worktree --workflow wf.md       # multi-step workflow in one worktree
+amux implement 0030 --worktree --mount-ssh            # worktree + SSH keys in container
+```
+
+---
+
+## Docker socket access
+
+The `--allow-docker` flag mounts the host Docker daemon socket into the agent container. This lets the agent build and run Docker containers itself.
+
+### When to use it
+
+Use `--allow-docker` when the task requires the agent to:
+
+- Build Docker images (e.g. testing your app's Dockerfile)
+- Run Docker containers (e.g. starting a local database for testing)
+- Interact with the Docker daemon in any other way
+
+### What happens
+
+Before launching the container, amux verifies the socket exists and prints a warning:
+
+```
+Docker socket: /var/run/docker.sock (found)
+WARNING: --allow-docker: mounting host Docker socket into container
+(/var/run/docker.sock:/var/run/docker.sock). This grants the agent elevated host access.
+```
+
+| Platform | Mount |
+|----------|-------|
+| Linux / macOS | `-v /var/run/docker.sock:/var/run/docker.sock` |
+| Windows | `--mount type=npipe,source=\\.\pipe\docker_engine,target=\\.\pipe\docker_engine` |
+
+### Security note
+
+Mounting the Docker socket gives the agent root-equivalent access to your host — it can start containers, delete images, and interact with any running container. Only use `--allow-docker` for tasks that genuinely require it and when you trust the agent and work item. amux will never mount the socket without this explicit flag.
+
+### Examples
+
+```sh
+amux implement 0005 --allow-docker     # work item that needs to build a Docker image
+amux chat --allow-docker               # freeform session with Docker access
+amux ready --refresh --allow-docker    # Dockerfile audit with Docker access
+```
+
+---
+
+## SSH key mounting
+
+The `--mount-ssh` flag mounts your host `~/.ssh` directory read-only into the container, so the agent can authenticate with remote Git servers using your existing SSH keys.
+
+### When to use it
+
+Use `--mount-ssh` when the task requires the agent to:
+
+- Clone private repositories over SSH
+- Push branches or tags to a remote
+- Run `git fetch` / `git pull` against SSH remotes
+
+### What happens
+
+Before launching the container, amux verifies `~/.ssh` exists and prints a warning:
+
+```
+WARNING: --mount-ssh: mounting host ~/.ssh into container (read-only). Ensure you trust the agent image.
+```
+
+The directory is mounted as `-v /home/user/.ssh:/root/.ssh:ro`. The `:ro` flag prevents the agent from modifying your host SSH keys.
+
+`~/.ssh` is never mounted without this explicit flag — there is no config option to enable it silently.
+
+### Security notes
+
+- The mount is read-only; the agent can use your keys but cannot modify them
+- SSH key permissions must be correct on the host (`600` for private keys); Docker bind mounts inherit host permissions
+- Only use `--mount-ssh` with agent images you trust
+
+### Examples
+
+```sh
+amux implement 0030 --mount-ssh        # agent can push/pull over SSH
+amux chat --mount-ssh                  # freeform session with SSH access
+amux implement 0030 --worktree --mount-ssh   # combine with worktree isolation
+```
+
+When used with `--workflow`, the SSH directory is mounted into every workflow-step container.
+
+---
+
+## Container transparency
+
+Every `docker build` and `docker run` command amux issues is printed before it executes — in command mode to stdout, in TUI mode as the first line of the execution window.
+
+```
+$ docker build -t amux-myapp:latest -f Dockerfile.dev /path/to/repo
+$ docker run --rm -it \
+    -v /path/to/repo:/workspace \
+    -w /workspace \
+    -e CLAUDE_CODE_OAUTH_TOKEN=*** \
+    amux-myapp:latest claude "Implement work item 0001..."
+```
+
+With the Apple Containers runtime, the same commands are shown with `container` instead of `docker`. Credential values are always masked.
+
+---
+
+[← Agent Sessions](02-agent-sessions.md) · [Next: Workflows →](04-workflows.md)

@@ -752,14 +752,15 @@ fn parse_ready_flags(parts: &[&str]) -> (bool, bool, bool, bool, bool) {
     (refresh, build, no_cache, non_interactive, allow_docker)
 }
 
-/// Parse flags from implement command parts, returning (non_interactive, plan, allow_docker, workflow_path, worktree, mount_ssh).
-fn parse_implement_flags(parts: &[&str]) -> (bool, bool, bool, Option<std::path::PathBuf>, bool, bool, bool) {
+/// Parse flags from implement command parts, returning (non_interactive, plan, allow_docker, workflow_path, worktree, mount_ssh, yolo, auto).
+fn parse_implement_flags(parts: &[&str]) -> (bool, bool, bool, Option<std::path::PathBuf>, bool, bool, bool, bool) {
     let non_interactive = parts.iter().any(|p| *p == "--non-interactive");
     let plan = parts.iter().any(|p| *p == "--plan");
     let allow_docker = parts.iter().any(|p| *p == "--allow-docker");
     let worktree = parts.iter().any(|p| *p == "--worktree");
     let mount_ssh = parts.iter().any(|p| *p == "--mount-ssh");
     let yolo = parts.iter().any(|p| *p == "--yolo");
+    let auto = parts.iter().any(|p| *p == "--auto");
     // Accept --workflow=<path> or --workflow <path>
     let workflow = parts
         .iter()
@@ -777,17 +778,18 @@ fn parse_implement_flags(parts: &[&str]) -> (bool, bool, bool, Option<std::path:
                 .find(|w| w[0] == "--workflow")
                 .map(|w| std::path::PathBuf::from(w[1]))
         });
-    (non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo)
+    (non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto)
 }
 
-/// Parse flags from chat command parts, returning (non_interactive, plan, allow_docker, mount_ssh, yolo).
-fn parse_chat_flags(parts: &[&str]) -> (bool, bool, bool, bool, bool) {
+/// Parse flags from chat command parts, returning (non_interactive, plan, allow_docker, mount_ssh, yolo, auto).
+fn parse_chat_flags(parts: &[&str]) -> (bool, bool, bool, bool, bool, bool) {
     let non_interactive = parts.iter().any(|p| *p == "--non-interactive");
     let plan = parts.iter().any(|p| *p == "--plan");
     let allow_docker = parts.iter().any(|p| *p == "--allow-docker");
     let mount_ssh = parts.iter().any(|p| *p == "--mount-ssh");
     let yolo = parts.iter().any(|p| *p == "--yolo");
-    (non_interactive, plan, allow_docker, mount_ssh, yolo)
+    let auto = parts.iter().any(|p| *p == "--auto");
+    (non_interactive, plan, allow_docker, mount_ssh, yolo, auto)
 }
 
 /// Parse and dispatch a command string entered by the user.
@@ -821,11 +823,17 @@ async fn execute_command(app: &mut App, cmd: &str) {
         }
 
         "implement" => {
-            let (non_interactive, plan, allow_docker, workflow, mut worktree, mount_ssh, yolo) = parse_implement_flags(&parts);
-            // --yolo + --workflow implies --worktree.
+            let (non_interactive, plan, allow_docker, workflow, mut worktree, mount_ssh, yolo, auto) = parse_implement_flags(&parts);
+            // --yolo/--auto + --workflow implies --worktree.
             if yolo && workflow.is_some() && !worktree {
                 app.active_tab_mut().push_output(
                     "--yolo with --workflow implies --worktree. Running in isolated worktree.".to_string(),
+                );
+                worktree = true;
+            }
+            if auto && workflow.is_some() && !worktree {
+                app.active_tab_mut().push_output(
+                    "--auto with --workflow implies --worktree. Running in isolated worktree.".to_string(),
                 );
                 worktree = true;
             }
@@ -839,17 +847,17 @@ async fn execute_command(app: &mut App, cmd: &str) {
                 Some(n) => n,
                 None => {
                     app.active_tab_mut().input_error =
-                        Some("Usage: implement <work-item-number> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>] [--worktree] [--mount-ssh] [--yolo]".into());
+                        Some("Usage: implement <work-item-number> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>] [--worktree] [--mount-ssh] [--yolo] [--auto]".into());
                     return;
                 }
             };
-            app.active_tab_mut().pending_command = PendingCommand::Implement { work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo };
+            app.active_tab_mut().pending_command = PendingCommand::Implement { work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto };
             show_pre_command_dialogs(app).await;
         }
 
         "chat" => {
-            let (non_interactive, plan, allow_docker, mount_ssh, yolo) = parse_chat_flags(&parts);
-            app.active_tab_mut().pending_command = PendingCommand::Chat { non_interactive, plan, allow_docker, mount_ssh, yolo };
+            let (non_interactive, plan, allow_docker, mount_ssh, yolo, auto) = parse_chat_flags(&parts);
+            app.active_tab_mut().pending_command = PendingCommand::Chat { non_interactive, plan, allow_docker, mount_ssh, yolo, auto };
             show_pre_command_dialogs(app).await;
         }
 
@@ -972,11 +980,11 @@ async fn launch_pending_command(app: &mut App) {
             app.active_tab_mut().ready_opts = ReadyOptions { refresh, build, no_cache, non_interactive, allow_docker, auto_create_dockerfile: true };
             launch_ready(app).await;
         }
-        PendingCommand::Implement { work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo } => {
-            launch_implement(app, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo).await;
+        PendingCommand::Implement { work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto } => {
+            launch_implement(app, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto).await;
         }
-        PendingCommand::Chat { non_interactive, plan, allow_docker, mount_ssh, yolo } => {
-            launch_chat(app, non_interactive, plan, allow_docker, mount_ssh, yolo).await;
+        PendingCommand::Chat { non_interactive, plan, allow_docker, mount_ssh, yolo, auto } => {
+            launch_chat(app, non_interactive, plan, allow_docker, mount_ssh, yolo, auto).await;
         }
         PendingCommand::ClawsReady => {
             // Claws ready is launched directly from dialog actions (ClawsReadyProceed /
@@ -1015,6 +1023,14 @@ async fn launch_ready(app: &mut App) {
     // Prepare host settings (sanitized config files in a temp dir).
     app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
         .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
+    {
+        let dockerfile = git_root.join("Dockerfile.dev");
+        let msg = app.active_tab_mut().host_settings.as_mut()
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+        if let Some(msg) = msg {
+            app.active_tab_mut().push_output(msg);
+        }
+    }
 
     let opts = app.active_tab().ready_opts.clone();
 
@@ -1293,7 +1309,7 @@ fn launch_ready_post_audit(app: &mut App) {
 
 /// Actually spawn the docker container for `implement` via PTY.
 #[allow(clippy::too_many_arguments)]
-async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, plan: bool, allow_docker: bool, workflow_path: Option<std::path::PathBuf>, worktree: bool, mount_ssh: bool, yolo: bool) {
+async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, plan: bool, allow_docker: bool, workflow_path: Option<std::path::PathBuf>, worktree: bool, mount_ssh: bool, yolo: bool, auto: bool) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
         Some(r) => r,
@@ -1382,6 +1398,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
                         worktree,
                         mount_ssh,
                         yolo,
+                        auto,
                     };
                     app.active_tab_mut().dialog = Dialog::WorktreePreCommitWarning {
                         uncommitted_files: files,
@@ -1418,19 +1435,34 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
     // Prepare host settings (sanitized config files in a temp dir).
     app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
         .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
+    {
+        let dockerfile = git_root.join("Dockerfile.dev");
+        let msg = app.active_tab_mut().host_settings.as_mut()
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+        if let Some(msg) = msg {
+            app.active_tab_mut().push_output(msg);
+        }
+    }
+    // Suppress the dangerous-mode permission dialog when running with --yolo.
+    if yolo {
+        if let Some(ref s) = app.active_tab().host_settings {
+            let _ = s.apply_yolo_settings();
+        }
+    }
 
     // Persist launch context so workflow step-advancement functions can reuse identical settings.
     app.active_tab_mut().workflow_ssh_dir = ssh_dir.clone();
     app.active_tab_mut().workflow_mount_path = Some(mount_path.clone());
     app.active_tab_mut().workflow_allow_docker = allow_docker;
 
-    // Store yolo mode and resolve disallowed tools.
-    let disallowed_tools = if yolo {
+    // Store yolo/auto mode and resolve disallowed tools.
+    let disallowed_tools = if yolo || auto {
         crate::config::effective_yolo_disallowed_tools(&git_root)
     } else {
         vec![]
     };
     app.active_tab_mut().yolo_mode = yolo;
+    app.active_tab_mut().auto_mode = auto;
     app.active_tab_mut().yolo_disallowed_tools = disallowed_tools.clone();
 
     // If a workflow is specified, initialise/load its state and derive the step prompt.
@@ -1498,9 +1530,9 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         command_display = format!("implement {:04}", work_item);
     }
 
-    // Apply yolo flags to the entrypoint.
+    // Apply yolo/auto flags to the entrypoint.
     use crate::commands::implement::append_yolo_flags;
-    append_yolo_flags(&mut effective_entrypoint, &agent_name, yolo, &disallowed_tools);
+    append_yolo_flags(&mut effective_entrypoint, &agent_name, yolo, auto, &disallowed_tools);
 
     let entrypoint = effective_entrypoint;
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
@@ -1613,7 +1645,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
 }
 
 /// Actually spawn the docker container for `chat` via PTY.
-async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool) {
+async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
         Some(r) => r,
@@ -1660,6 +1692,20 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
     // Prepare host settings (sanitized config files in a temp dir).
     app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
         .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
+    {
+        let dockerfile = git_root.join("Dockerfile.dev");
+        let msg = app.active_tab_mut().host_settings.as_mut()
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+        if let Some(msg) = msg {
+            app.active_tab_mut().push_output(msg);
+        }
+    }
+    // Suppress the dangerous-mode permission dialog when running with --yolo.
+    if yolo {
+        if let Some(ref s) = app.active_tab().host_settings {
+            let _ = s.apply_yolo_settings();
+        }
+    }
 
     let mut entrypoint = if non_interactive {
         chat_entrypoint_non_interactive(&agent_name, plan)
@@ -1667,14 +1713,14 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
         chat_entrypoint(&agent_name, plan)
     };
 
-    // Apply yolo flags.
-    let chat_disallowed_tools = if yolo {
+    // Apply yolo/auto flags.
+    let chat_disallowed_tools = if yolo || auto {
         crate::config::effective_yolo_disallowed_tools(&git_root)
     } else {
         vec![]
     };
     use crate::commands::chat::append_yolo_flags as chat_append_yolo_flags;
-    chat_append_yolo_flags(&mut entrypoint, &agent_name, yolo, &chat_disallowed_tools);
+    chat_append_yolo_flags(&mut entrypoint, &agent_name, yolo, auto, &chat_disallowed_tools);
 
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
@@ -2591,6 +2637,14 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
 
     app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
         .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
+    {
+        let dockerfile = git_root.join("Dockerfile.dev");
+        let msg = app.active_tab_mut().host_settings.as_mut()
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+        if let Some(msg) = msg {
+            app.active_tab_mut().push_output(msg);
+        }
+    }
 
     let entrypoint = amend_agent_entrypoint(&agent_name, work_item);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
@@ -2700,6 +2754,14 @@ async fn launch_specs_interview_agent(
 
     app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
         .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
+    {
+        let dockerfile = git_root.join("Dockerfile.dev");
+        let msg = app.active_tab_mut().host_settings.as_mut()
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+        if let Some(msg) = msg {
+            app.active_tab_mut().push_output(msg);
+        }
+    }
 
     let entrypoint = interview_agent_entrypoint(&agent_name, work_item_number, &kind, &title, &summary);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
@@ -3011,14 +3073,14 @@ async fn launch_next_workflow_step(app: &mut App) {
     let env_vars = credentials.env_vars;
 
     let prompt = workflow::substitute_prompt(&step_state.prompt_template, work_item, &work_item_content);
-    let (yolo_mode, yolo_disallowed_tools) = {
+    let (yolo_mode, auto_mode, yolo_disallowed_tools) = {
         let tab = app.active_tab();
-        (tab.yolo_mode, tab.yolo_disallowed_tools.clone())
+        (tab.yolo_mode, tab.auto_mode, tab.yolo_disallowed_tools.clone())
     };
     let mut entrypoint = workflow_step_entrypoint(&agent_name, &prompt, false, false);
     {
         use crate::commands::implement::append_yolo_flags;
-        append_yolo_flags(&mut entrypoint, &agent_name, yolo_mode, &yolo_disallowed_tools);
+        append_yolo_flags(&mut entrypoint, &agent_name, yolo_mode, auto_mode, &yolo_disallowed_tools);
     }
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
@@ -3028,6 +3090,17 @@ async fn launch_next_workflow_step(app: &mut App) {
     if app.active_tab().host_settings.is_none() {
         app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent)
             .or_else(|| docker::HostSettings::prepare_minimal(&agent));
+        if yolo_mode {
+            if let Some(ref s) = app.active_tab().host_settings {
+                let _ = s.apply_yolo_settings();
+            }
+        }
+        let dockerfile = git_root.join("Dockerfile.dev");
+        let msg = app.active_tab_mut().host_settings.as_mut()
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+        if let Some(msg) = msg {
+            app.active_tab_mut().push_output(msg);
+        }
     }
     let host_settings_ref = app.active_tab().host_settings.as_ref();
 

@@ -90,6 +90,12 @@ pub enum Command {
         /// after countdown. Implies --worktree when combined with --workflow.
         #[arg(long)]
         yolo: bool,
+
+        /// Enable auto permission mode: pass --permission-mode auto to the agent instead of
+        /// --dangerously-skip-permissions. Applies yoloDisallowedTools config. With --workflow,
+        /// implies --worktree but does NOT auto-advance stuck steps.
+        #[arg(long)]
+        auto: bool,
     },
 
     /// Start a freeform chat session with the configured agent in a container.
@@ -114,6 +120,11 @@ pub enum Command {
         /// yoloDisallowedTools config.
         #[arg(long)]
         yolo: bool,
+
+        /// Enable auto permission mode: pass --permission-mode auto to the agent instead of
+        /// --dangerously-skip-permissions. Applies yoloDisallowedTools config.
+        #[arg(long)]
+        auto: bool,
     },
 
     /// Manage work item specs (create, interview, amend).
@@ -869,6 +880,58 @@ mod tests {
                 assert!(worktree);
                 assert!(mount_ssh);
                 assert_eq!(workflow, Some(std::path::PathBuf::from("wf.md")));
+            }
+            _ => panic!("expected implement"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // --auto flag
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn implement_auto_flag_true() {
+        let cli = parse(&["amux", "implement", "0001", "--auto"]);
+        match cli.command.unwrap() {
+            Command::Implement { auto, .. } => assert!(auto),
+            _ => panic!("expected implement"),
+        }
+    }
+
+    #[test]
+    fn implement_auto_flag_false_by_default() {
+        let cli = parse(&["amux", "implement", "0001"]);
+        match cli.command.unwrap() {
+            Command::Implement { auto, .. } => assert!(!auto),
+            _ => panic!("expected implement"),
+        }
+    }
+
+    #[test]
+    fn chat_auto_flag_true() {
+        let cli = parse(&["amux", "chat", "--auto"]);
+        match cli.command.unwrap() {
+            Command::Chat { auto, .. } => assert!(auto),
+            _ => panic!("expected chat"),
+        }
+    }
+
+    #[test]
+    fn chat_auto_flag_false_by_default() {
+        let cli = parse(&["amux", "chat"]);
+        match cli.command.unwrap() {
+            Command::Chat { auto, .. } => assert!(!auto),
+            _ => panic!("expected chat"),
+        }
+    }
+
+    #[test]
+    fn implement_auto_and_yolo_can_coexist() {
+        let cli = parse(&["amux", "implement", "0001", "--auto", "--yolo"]);
+        match cli.command.unwrap() {
+            Command::Implement { auto, yolo, .. } => {
+                assert!(auto);
+                assert!(yolo);
             }
             _ => panic!("expected implement"),
         }

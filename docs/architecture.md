@@ -960,3 +960,7 @@ The parity tests are the most important: they verify that `run_with_sink`,
 `find_work_item`, autocomplete, auth functions, summary table, interactive notice,
 and non-interactive entrypoints produce the same results regardless of which
 caller invokes them.
+
+---
+
+[← Configuration](07-configuration.md) · [Contents](contents.md)

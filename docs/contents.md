@@ -1,0 +1,23 @@
+# amux Documentation
+
+A guide to using amux, the containerized multi-agent terminal multiplexer.
+
+---
+
+## Contents
+
+| # | File | What's covered |
+|---|------|----------------|
+| 00 | [Getting Started](00-getting-started.md) | Installation, concepts, first agent session |
+| 01 | [Using the TUI](01-using-the-tui.md) | TUI layout, tabs, container window, keyboard reference |
+| 02 | [Agent Sessions](02-agent-sessions.md) | `chat`, `implement`, work items, authentication |
+| 03 | [Security & Isolation](03-security-and-isolation.md) | Worktrees, SSH keys, Docker socket, container transparency |
+| 04 | [Workflows](04-workflows.md) | Multi-step workflows, control board, state persistence |
+| 05 | [Yolo Mode](05-yolo-mode.md) | Fully autonomous operation, disallowed tools, countdown |
+| 06 | [Nanoclaw](06-nanoclaw.md) | Persistent background agents, `claws` commands |
+| 07 | [Configuration](07-configuration.md) | Config files, runtime selection, all fields |
+| — | [Architecture](architecture.md) | Source layout, modules, design decisions |
+
+---
+
+Start with [Getting Started](00-getting-started.md) if this is your first time.

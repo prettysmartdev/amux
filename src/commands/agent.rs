@@ -80,19 +80,17 @@ pub async fn run_agent_with_sink(
     // Detect the last USER directive in Dockerfile.dev and update settings mounts
     // to target the correct home directory inside the container.
     let modified_settings: Option<docker::HostSettings> = host_settings.and_then(|settings| {
-        let dockerfile = git_root.join("Dockerfile.dev");
-        let user = crate::runtime::parse_dockerfile_user(&dockerfile)?;
-        let home = crate::runtime::container_home_for_user(&user);
-        out.println(format!(
-            "Agent settings will be mounted for user '{}' ({})",
-            user, home
-        ));
         let mut new_settings = docker::HostSettings::from_paths(
             settings.config_path.clone(),
             settings.claude_dir_path.clone(),
         );
-        new_settings.container_home = home;
-        Some(new_settings)
+        let dockerfile = git_root.join("Dockerfile.dev");
+        if let Some(msg) = crate::runtime::apply_dockerfile_user(&mut new_settings, &dockerfile) {
+            out.println(msg);
+            Some(new_settings)
+        } else {
+            None
+        }
     });
     let effective_settings: Option<&docker::HostSettings> =
         modified_settings.as_ref().or(host_settings);

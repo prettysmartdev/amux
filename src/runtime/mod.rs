@@ -223,6 +223,25 @@ impl HostSettings {
         }
     }
 
+    /// Sets `skipDangerousModePermissionPrompt: true` in the container's `settings.json`.
+    ///
+    /// Claude Code shows a one-time confirmation dialog when first launched with
+    /// `--dangerously-skip-permissions`. Setting this key suppresses the dialog so
+    /// unattended `--yolo` runs are not blocked waiting for user input.
+    pub fn apply_yolo_settings(&self) -> std::io::Result<()> {
+        let settings_path = self.claude_dir_path.join("settings.json");
+        let mut settings: serde_json::Value = if settings_path.exists() {
+            let raw = std::fs::read_to_string(&settings_path)?;
+            serde_json::from_str(&raw).unwrap_or(serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+        if let Some(obj) = settings.as_object_mut() {
+            obj.insert("skipDangerousModePermissionPrompt".to_string(), serde_json::json!(true));
+        }
+        std::fs::write(&settings_path, serde_json::to_string(&settings)?)
+    }
+
     /// Creates a minimal `HostSettings` with only LSP recommendations disabled.
     ///
     /// Used as a fallback when the host has no `~/.claude.json` (e.g. the user has never
@@ -280,6 +299,24 @@ pub fn container_home_for_user(username: &str) -> String {
     } else {
         format!("/home/{}", username)
     }
+}
+
+/// Detects the last USER directive in `Dockerfile.dev` and, if it names a non-root user,
+/// updates `container_home` in `settings` and returns a message to display to the user.
+///
+/// Returns `None` if the file has no USER directive, if the effective user is `root`, or
+/// if the file cannot be read. Settings are mutated only when a non-root user is found.
+pub fn apply_dockerfile_user(settings: &mut HostSettings, dockerfile_path: &Path) -> Option<String> {
+    let user = parse_dockerfile_user(dockerfile_path)?;
+    if user == "root" {
+        return None;
+    }
+    let home = container_home_for_user(&user);
+    settings.container_home = home.clone();
+    Some(format!(
+        "Dockerfile.dev sets USER to '{}'; mounting Claude settings at {}",
+        user, home
+    ))
 }
 
 /// The `settings.json` key that tells Claude Code not to show LSP recommendation dialogs.
@@ -913,5 +950,77 @@ mod tests {
         if let Some(s) = HostSettings::prepare_minimal("claude") {
             assert_eq!(s.container_home, "/root");
         }
+    }
+
+    // ─── apply_dockerfile_user ────────────────────────────────────────────────
+
+    #[test]
+    fn apply_dockerfile_user_non_root_updates_container_home_and_returns_message() {
+        let tmp = TempDir::new().unwrap();
+        let dockerfile = tmp.path().join("Dockerfile.dev");
+        std::fs::write(&dockerfile, "FROM debian\nUSER amux\n").unwrap();
+        let mut settings = HostSettings::from_paths(
+            PathBuf::from("/tmp/cfg.json"),
+            PathBuf::from("/tmp/dot-claude"),
+        );
+        let msg = apply_dockerfile_user(&mut settings, &dockerfile);
+        assert_eq!(settings.container_home, "/home/amux");
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        assert!(msg.contains("amux"), "message should mention the user");
+        assert!(msg.contains("/home/amux"), "message should mention the home dir");
+    }
+
+    #[test]
+    fn apply_dockerfile_user_root_returns_none_and_leaves_container_home() {
+        let tmp = TempDir::new().unwrap();
+        let dockerfile = tmp.path().join("Dockerfile.dev");
+        std::fs::write(&dockerfile, "FROM debian\nUSER root\n").unwrap();
+        let mut settings = HostSettings::from_paths(
+            PathBuf::from("/tmp/cfg.json"),
+            PathBuf::from("/tmp/dot-claude"),
+        );
+        let msg = apply_dockerfile_user(&mut settings, &dockerfile);
+        assert!(msg.is_none());
+        assert_eq!(settings.container_home, "/root");
+    }
+
+    #[test]
+    fn apply_dockerfile_user_no_directive_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        let dockerfile = tmp.path().join("Dockerfile.dev");
+        std::fs::write(&dockerfile, "FROM debian\nRUN echo hello\n").unwrap();
+        let mut settings = HostSettings::from_paths(
+            PathBuf::from("/tmp/cfg.json"),
+            PathBuf::from("/tmp/dot-claude"),
+        );
+        let msg = apply_dockerfile_user(&mut settings, &dockerfile);
+        assert!(msg.is_none());
+        assert_eq!(settings.container_home, "/root");
+    }
+
+    #[test]
+    fn apply_dockerfile_user_uses_last_user_directive() {
+        let tmp = TempDir::new().unwrap();
+        let dockerfile = tmp.path().join("Dockerfile.dev");
+        std::fs::write(&dockerfile, "FROM debian\nUSER root\nUSER agent\n").unwrap();
+        let mut settings = HostSettings::from_paths(
+            PathBuf::from("/tmp/cfg.json"),
+            PathBuf::from("/tmp/dot-claude"),
+        );
+        let msg = apply_dockerfile_user(&mut settings, &dockerfile);
+        assert_eq!(settings.container_home, "/home/agent");
+        assert!(msg.is_some());
+    }
+
+    #[test]
+    fn apply_dockerfile_user_missing_file_returns_none() {
+        let mut settings = HostSettings::from_paths(
+            PathBuf::from("/tmp/cfg.json"),
+            PathBuf::from("/tmp/dot-claude"),
+        );
+        let msg = apply_dockerfile_user(&mut settings, Path::new("/nonexistent/Dockerfile.dev"));
+        assert!(msg.is_none());
+        assert_eq!(settings.container_home, "/root");
     }
 }

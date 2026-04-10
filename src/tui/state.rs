@@ -198,8 +198,10 @@ pub enum PendingCommand {
         worktree: bool,
         /// Mount host ~/.ssh read-only into the container.
         mount_ssh: bool,
-        /// Enable fully autonomous mode.
+        /// Enable fully autonomous mode (--dangerously-skip-permissions + auto-advance).
         yolo: bool,
+        /// Enable auto permission mode (--permission-mode auto, no auto-advance).
+        auto: bool,
     },
     Chat {
         non_interactive: bool,
@@ -207,8 +209,10 @@ pub enum PendingCommand {
         allow_docker: bool,
         /// Mount host ~/.ssh read-only into the container.
         mount_ssh: bool,
-        /// Enable fully autonomous mode.
+        /// Enable fully autonomous mode (--dangerously-skip-permissions).
         yolo: bool,
+        /// Enable auto permission mode (--permission-mode auto).
+        auto: bool,
     },
     ClawsReady,
     /// specs amend: run amend agent for a work item.
@@ -497,11 +501,14 @@ pub struct TabState {
     /// Whether `--allow-docker` was passed for this workflow session.
     pub workflow_allow_docker: bool,
 
-    // --- Yolo mode state ---
+    // --- Yolo/auto mode state ---
     /// When `true`, the agent was launched with `--yolo` (fully autonomous mode).
     pub yolo_mode: bool,
+    /// When `true`, the agent was launched with `--auto` (--permission-mode auto).
+    /// Unlike yolo_mode, auto_mode does not trigger auto-advance in workflows.
+    pub auto_mode: bool,
     /// Resolved `yoloDisallowedTools` list for the current session.
-    /// Empty when yolo mode is not active or no tools are configured.
+    /// Empty when neither yolo nor auto mode is active, or no tools are configured.
     pub yolo_disallowed_tools: Vec<String>,
     /// When `true`, the stuck-dialog auto-popup is disabled for the current workflow step.
     /// Set by pressing `d` in the `WorkflowControlBoard` dialog; reset when the step changes.
@@ -579,6 +586,7 @@ impl TabState {
             workflow_mount_path: None,
             workflow_allow_docker: false,
             yolo_mode: false,
+            auto_mode: false,
             yolo_disallowed_tools: Vec::new(),
             auto_workflow_disabled_for_step: false,
             yolo_countdown_expired: false,

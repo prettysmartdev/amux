@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 /// Command-mode entry point for `amux chat`.
-pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
+pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
     let credentials = resolve_auth(&git_root, agent_name(&git_root)?)?;
@@ -17,6 +17,13 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
     let agent = config.agent.as_deref().unwrap_or("claude");
     let host_settings = docker::HostSettings::prepare(agent)
         .or_else(|| docker::HostSettings::prepare_minimal(agent));
+
+    // Suppress the dangerous-mode permission dialog when running with --yolo.
+    if yolo {
+        if let Some(ref s) = host_settings {
+            let _ = s.apply_yolo_settings();
+        }
+    }
 
     run_with_sink(
         &OutputSink::Stdout,
@@ -28,6 +35,7 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
         allow_docker,
         mount_ssh,
         yolo,
+        auto,
         &*runtime,
     )
     .await
@@ -41,7 +49,8 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
 /// `plan`: when true, launch agent in plan (read-only) mode.
 /// `allow_docker`: when true, mount the host Docker daemon socket into the container.
 /// `mount_ssh`: when true, mount the host `~/.ssh` directory read-only into the container.
-/// `yolo`: when true, append agent-specific skip-permissions flags and disallowed-tools config.
+/// `yolo`: when true, append `--dangerously-skip-permissions` and disallowed-tools config.
+/// `auto`: when true, append `--permission-mode auto` and disallowed-tools config.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_sink(
     out: &OutputSink,
@@ -53,6 +62,7 @@ pub async fn run_with_sink(
     allow_docker: bool,
     mount_ssh: bool,
     yolo: bool,
+    auto: bool,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
@@ -65,8 +75,8 @@ pub async fn run_with_sink(
         chat_entrypoint(&agent, plan)
     };
 
-    let disallowed_tools = if yolo { effective_yolo_disallowed_tools(&git_root) } else { vec![] };
-    append_yolo_flags(&mut entrypoint, &agent, yolo, &disallowed_tools);
+    let disallowed_tools = if yolo || auto { effective_yolo_disallowed_tools(&git_root) } else { vec![] };
+    append_yolo_flags(&mut entrypoint, &agent, yolo, auto, &disallowed_tools);
 
     run_agent_with_sink(
         entrypoint,
@@ -140,18 +150,29 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
     }
 }
 
-/// Append agent-specific yolo (skip-permissions) flags and disallowed-tools config.
+/// Append agent-specific autonomous-mode flags and disallowed-tools config.
 ///
-/// - Claude: `--dangerously-skip-permissions`; if disallowed_tools non-empty, `--disallowedTools <t1>,<t2>,...`
+/// When `yolo` is true:
+/// - Claude: `--dangerously-skip-permissions`
+/// When `auto` is true (and not yolo):
+/// - Claude: `--permission-mode auto`
+/// Both modes:
+/// - Claude: if disallowed_tools non-empty, `--disallowedTools <t1>,<t2>,...`
 /// - Codex: `--full-auto`; disallowed tools not supported (warning printed)
 /// - Opencode: no equivalent — a warning is printed; disallowed tools not supported
-pub fn append_yolo_flags(args: &mut Vec<String>, agent: &str, yolo: bool, disallowed_tools: &[String]) {
-    if !yolo {
+pub fn append_yolo_flags(args: &mut Vec<String>, agent: &str, yolo: bool, auto: bool, disallowed_tools: &[String]) {
+    if !yolo && !auto {
         return;
     }
+    let flag_name = if yolo { "--yolo" } else { "--auto" };
     match agent {
         "claude" => {
-            args.push("--dangerously-skip-permissions".to_string());
+            if yolo {
+                args.push("--dangerously-skip-permissions".to_string());
+            } else {
+                args.push("--permission-mode".to_string());
+                args.push("auto".to_string());
+            }
             if !disallowed_tools.is_empty() {
                 args.push("--disallowedTools".to_string());
                 args.push(disallowed_tools.join(","));
@@ -160,14 +181,14 @@ pub fn append_yolo_flags(args: &mut Vec<String>, agent: &str, yolo: bool, disall
         "codex" => {
             args.push("--full-auto".to_string());
             if !disallowed_tools.is_empty() {
-                eprintln!("WARNING: --yolo: codex does not support --disallowedTools; yoloDisallowedTools config will be ignored.");
+                eprintln!("WARNING: {}: codex does not support --disallowedTools; yoloDisallowedTools config will be ignored.", flag_name);
             }
         }
         _ => {
             // Opencode and unknown agents have no skip-permissions equivalent.
-            eprintln!("WARNING: --yolo: agent '{}' does not support a skip-permissions flag; proceeding without it.", agent);
+            eprintln!("WARNING: {}: agent '{}' does not support a skip-permissions flag; proceeding without it.", flag_name, agent);
             if !disallowed_tools.is_empty() {
-                eprintln!("WARNING: --yolo: agent '{}' does not support --disallowedTools; yoloDisallowedTools config will be ignored.", agent);
+                eprintln!("WARNING: {}: agent '{}' does not support --disallowedTools; yoloDisallowedTools config will be ignored.", flag_name, agent);
             }
         }
     }
@@ -310,14 +331,14 @@ mod tests {
     #[test]
     fn append_yolo_flags_noop_when_yolo_false() {
         let mut args = vec!["claude".to_string()];
-        append_yolo_flags(&mut args, "claude", false, &[]);
+        append_yolo_flags(&mut args, "claude", false, false, &[]);
         assert_eq!(args, vec!["claude"]);
     }
 
     #[test]
     fn append_yolo_flags_claude_adds_skip_permissions() {
         let mut args = vec!["claude".to_string()];
-        append_yolo_flags(&mut args, "claude", true, &[]);
+        append_yolo_flags(&mut args, "claude", true, false, &[]);
         assert!(
             args.contains(&"--dangerously-skip-permissions".to_string()),
             "claude must receive --dangerously-skip-permissions"
@@ -327,7 +348,7 @@ mod tests {
     #[test]
     fn append_yolo_flags_claude_no_disallowed_tools_skips_flag() {
         let mut args = vec!["claude".to_string()];
-        append_yolo_flags(&mut args, "claude", true, &[]);
+        append_yolo_flags(&mut args, "claude", true, false, &[]);
         assert!(
             !args.contains(&"--disallowedTools".to_string()),
             "--disallowedTools must not appear when the list is empty"
@@ -338,7 +359,7 @@ mod tests {
     fn append_yolo_flags_claude_with_disallowed_tools() {
         let mut args = vec!["claude".to_string()];
         let tools = vec!["Bash".to_string(), "computer".to_string()];
-        append_yolo_flags(&mut args, "claude", true, &tools);
+        append_yolo_flags(&mut args, "claude", true, false, &tools);
         let dt_idx = args
             .iter()
             .position(|a| a == "--disallowedTools")
@@ -349,7 +370,7 @@ mod tests {
     #[test]
     fn append_yolo_flags_codex_adds_full_auto() {
         let mut args = vec!["codex".to_string()];
-        append_yolo_flags(&mut args, "codex", true, &[]);
+        append_yolo_flags(&mut args, "codex", true, false, &[]);
         assert!(args.contains(&"--full-auto".to_string()));
         assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
     }
@@ -359,7 +380,7 @@ mod tests {
         // codex does not support --disallowedTools; the flag must never appear
         let mut args = vec!["codex".to_string()];
         let tools = vec!["Bash".to_string()];
-        append_yolo_flags(&mut args, "codex", true, &tools);
+        append_yolo_flags(&mut args, "codex", true, false, &tools);
         assert!(!args.contains(&"--disallowedTools".to_string()));
     }
 
@@ -367,7 +388,7 @@ mod tests {
     fn append_yolo_flags_opencode_no_skip_permissions_flag() {
         // opencode has no skip-permissions equivalent; args must be unchanged
         let mut args = vec!["opencode".to_string()];
-        append_yolo_flags(&mut args, "opencode", true, &[]);
+        append_yolo_flags(&mut args, "opencode", true, false, &[]);
         assert_eq!(args, vec!["opencode"]);
     }
 
@@ -375,8 +396,49 @@ mod tests {
     fn append_yolo_flags_opencode_no_disallowed_tools_flag() {
         let mut args = vec!["opencode".to_string()];
         let tools = vec!["Bash".to_string()];
-        append_yolo_flags(&mut args, "opencode", true, &tools);
+        append_yolo_flags(&mut args, "opencode", true, false, &tools);
         assert!(!args.contains(&"--disallowedTools".to_string()));
         assert_eq!(args, vec!["opencode"]);
+    }
+
+    // --- append_yolo_flags --auto mode tests ---
+
+    #[test]
+    fn append_yolo_flags_noop_when_both_false() {
+        let mut args = vec!["claude".to_string()];
+        append_yolo_flags(&mut args, "claude", false, false, &[]);
+        assert_eq!(args, vec!["claude"]);
+    }
+
+    #[test]
+    fn append_yolo_flags_auto_claude_adds_permission_mode_auto() {
+        let mut args = vec!["claude".to_string()];
+        append_yolo_flags(&mut args, "claude", false, true, &[]);
+        assert!(
+            args.contains(&"--permission-mode".to_string()),
+            "claude in auto mode must receive --permission-mode"
+        );
+        assert!(args.contains(&"auto".to_string()), "auto value must be present");
+        assert!(
+            !args.contains(&"--dangerously-skip-permissions".to_string()),
+            "--dangerously-skip-permissions must NOT appear in auto mode"
+        );
+    }
+
+    #[test]
+    fn append_yolo_flags_auto_claude_with_disallowed_tools() {
+        let mut args = vec!["claude".to_string()];
+        let tools = vec!["Bash".to_string()];
+        append_yolo_flags(&mut args, "claude", false, true, &tools);
+        assert!(args.contains(&"--disallowedTools".to_string()));
+    }
+
+    #[test]
+    fn append_yolo_flags_yolo_takes_precedence_over_auto() {
+        // When both are true, yolo wins (uses --dangerously-skip-permissions).
+        let mut args = vec!["claude".to_string()];
+        append_yolo_flags(&mut args, "claude", true, true, &[]);
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(!args.contains(&"auto".to_string()));
     }
 }
