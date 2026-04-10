@@ -252,7 +252,12 @@ where
             app.active_tab_mut().yolo_countdown_expired = false;
             let is_last = app.active_tab().is_last_workflow_step();
             if is_last {
-                finish_workflow(&mut app).await;
+                // On the final step, present the control board instead of auto-finishing.
+                let step = app.active_tab().workflow_current_step.clone().unwrap_or_default();
+                app.active_tab_mut().dialog = Dialog::WorkflowControlBoard {
+                    current_step: step,
+                    error: None,
+                };
             } else {
                 advance_workflow_next_new_container(&mut app).await;
             }
@@ -2973,13 +2978,25 @@ async fn check_workflow_step_completion(app: &mut App) {
                 let _ = workflow::save_workflow_state(&git_root, &wf);
                 let next_steps = wf.next_ready();
                 if wf.all_done() {
-                    app.active_tab_mut().push_output(format!(
-                        "Workflow step '{}' complete. All steps done!", step_name
-                    ));
-                    app.active_tab_mut().workflow_current_step = None;
-                    // Clean up state file.
-                    let state_path = workflow::workflow_state_path(&git_root, wf.work_item, &wf.workflow_name);
-                    let _ = std::fs::remove_file(state_path);
+                    if app.active_tab().yolo_mode {
+                        // In yolo mode, show the workflow control board instead of auto-finishing.
+                        app.active_tab_mut().push_output(format!(
+                            "Workflow step '{}' complete. All steps done — presenting workflow control board.",
+                            step_name
+                        ));
+                        app.active_tab_mut().dialog = Dialog::WorkflowControlBoard {
+                            current_step: step_name,
+                            error: None,
+                        };
+                    } else {
+                        app.active_tab_mut().push_output(format!(
+                            "Workflow step '{}' complete. All steps done!", step_name
+                        ));
+                        app.active_tab_mut().workflow_current_step = None;
+                        // Clean up state file.
+                        let state_path = workflow::workflow_state_path(&git_root, wf.work_item, &wf.workflow_name);
+                        let _ = std::fs::remove_file(state_path);
+                    }
                 } else if next_steps.is_empty() {
                     app.active_tab_mut().push_output(format!(
                         "Workflow step '{}' complete but no steps are ready.", step_name
@@ -4152,8 +4169,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_workflow_step_completion_yolo_all_done_no_dialog() {
-        // Final step completes → all_done() true → no dialog even in yolo mode.
+    async fn check_workflow_step_completion_yolo_all_done_shows_control_board() {
+        // Final step completes in yolo mode → all_done() true → WorkflowControlBoard shown.
         let mut app = new_app();
         let wf = make_workflow(vec![make_step_state("plan", &[], StepStatus::Running)]);
         app.active_tab_mut().workflow = Some(wf);
@@ -4166,14 +4183,14 @@ mod tests {
 
         check_workflow_step_completion(&mut app).await;
 
-        assert_eq!(
-            app.active_tab().dialog,
-            Dialog::None,
-            "all_done path must not show any dialog"
+        assert!(
+            matches!(app.active_tab().dialog, Dialog::WorkflowControlBoard { .. }),
+            "yolo+all_done must show WorkflowControlBoard, got {:?}",
+            app.active_tab().dialog
         );
         assert!(
-            app.active_tab().workflow_current_step.is_none(),
-            "workflow_current_step must be cleared when all steps are done"
+            app.active_tab().workflow_current_step.is_some(),
+            "workflow_current_step must be preserved so finish_workflow can clean up"
         );
     }
 
@@ -4212,8 +4229,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn yolo_countdown_expiry_calls_finish_workflow_on_last_step() {
-        // Simulate: countdown expires on the final step → finish_workflow is called.
+    async fn yolo_countdown_expiry_shows_control_board_on_last_step() {
+        // Simulate: countdown expires on the final step → WorkflowControlBoard is shown.
         let mut app = new_app();
         let wf = make_workflow(vec![make_step_state("impl", &[], StepStatus::Running)]);
         app.active_tab_mut().workflow = Some(wf);
@@ -4227,21 +4244,25 @@ mod tests {
         let is_last = app.active_tab().is_last_workflow_step();
         assert!(is_last, "precondition: impl is the only (last) step");
 
-        finish_workflow(&mut app).await;
+        // Trigger the same logic as the event loop: is_last → show WorkflowControlBoard.
+        app.active_tab_mut().yolo_countdown_expired = true;
+        let is_last = app.active_tab().is_last_workflow_step();
+        app.active_tab_mut().yolo_countdown_expired = false;
+        assert!(is_last);
+        let step = app.active_tab().workflow_current_step.clone().unwrap_or_default();
+        app.active_tab_mut().dialog = Dialog::WorkflowControlBoard {
+            current_step: step,
+            error: None,
+        };
 
-        // finish_workflow marks the step Done and clears workflow_current_step.
         assert!(
-            app.active_tab().workflow_current_step.is_none()
-                || app
-                    .active_tab()
-                    .workflow
-                    .as_ref()
-                    .unwrap()
-                    .get_step("impl")
-                    .unwrap()
-                    .status
-                    == StepStatus::Done,
-            "finish_workflow must mark the last step Done"
+            matches!(app.active_tab().dialog, Dialog::WorkflowControlBoard { .. }),
+            "countdown expiry on last step must show WorkflowControlBoard, got {:?}",
+            app.active_tab().dialog
+        );
+        assert!(
+            app.active_tab().workflow_current_step.is_some(),
+            "workflow_current_step must be preserved so user can finish from the control board"
         );
     }
 }

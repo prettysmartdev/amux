@@ -82,7 +82,9 @@
       "Bash(ls /tmp/cargo-*2)",
       "Bash(curl:*)",
       "Bash(gh api:*)",
-      "Bash(node -e \":*)"
+      "Bash(node -e \":*)",
+      "WebFetch(domain:maki.sh)",
+      "Bash(echo \"EXIT:$?\")"
     ]
   }
 }
