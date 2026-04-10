@@ -1,6 +1,6 @@
 # Agent Sessions
 
-An agent session is a Docker container running your configured AI agent (Claude Code, Codex, or OpenCode) against your project. amux handles starting the container, injecting your credentials, and connecting your terminal to the agent's input/output.
+An agent session is a Docker container running your configured AI agent (Claude Code, Codex, OpenCode, or Maki) against your project. amux handles starting the container, injecting your credentials, and connecting your terminal to the agent's input/output.
 
 There are two session types: **freeform chat** and **work item implementation**.
 
@@ -49,6 +49,7 @@ Run the agent in print/batch mode — no interactivity required. The agent execu
 | Claude | `-p` (print mode) |
 | Codex | `--quiet` |
 | OpenCode | `run` subcommand |
+| Maki | `--print` |
 
 Useful for CI pipelines, scripting, or when you want the output captured rather than live.
 
@@ -61,6 +62,7 @@ Run the agent in read-only mode — it can analyse the codebase and suggest chan
 | Claude | `--plan` |
 | Codex | `--approval-mode plan` |
 | OpenCode | Not supported (flag is silently ignored) |
+| Maki | Not supported (flag is silently ignored) |
 
 `--plan` can be combined with `--non-interactive`.
 
@@ -149,6 +151,9 @@ For Claude Code, amux reads the OAuth token from the macOS Keychain (service: `C
 | `claude` | `CLAUDE_CODE_OAUTH_TOKEN` | `Claude Code-credentials` |
 | `codex` | — | — |
 | `opencode` | — | — |
+| `maki` | via `envPassthrough` | — |
+
+Maki authenticates via API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) passed from your host environment using the `envPassthrough` config field. See [Configuration](07-configuration.md#envpassthrough) for details.
 
 ### Host settings injection
 
@@ -173,7 +178,7 @@ Initialises the current Git repository for use with amux. See [Getting Started](
 
 | Flag | Values | Default |
 |------|--------|---------|
-| `--agent` | `claude`, `codex`, `opencode` | `claude` |
+| `--agent` | `claude`, `codex`, `opencode`, `maki` | `claude` |
 | `--aspec` | (flag) | off |
 
 `--aspec` downloads the `aspec/` folder from `github.com/prettysmartdev/aspec`, providing spec templates and work item scaffolding. Skipped without the flag.

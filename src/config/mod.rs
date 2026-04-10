@@ -19,6 +19,11 @@ pub struct RepoConfig {
     /// `--disallowedTools` to Claude (other agents do not support this flag).
     #[serde(rename = "yoloDisallowedTools", skip_serializing_if = "Option::is_none")]
     pub yolo_disallowed_tools: Option<Vec<String>>,
+    /// Host environment variable names to pass through into agent containers.
+    /// Values are read from the host process environment at launch time.
+    /// Repo config overrides global config when both are set.
+    #[serde(rename = "envPassthrough", skip_serializing_if = "Option::is_none")]
+    pub env_passthrough: Option<Vec<String>>,
 }
 
 /// Global configuration stored at `$HOME/.amux/config.json`.
@@ -37,10 +42,26 @@ pub struct GlobalConfig {
     /// Overridden by per-repo config when set.
     #[serde(rename = "yoloDisallowedTools", skip_serializing_if = "Option::is_none")]
     pub yolo_disallowed_tools: Option<Vec<String>>,
+    /// Host environment variable names to pass through into agent containers.
+    /// Values are read from the host process environment at launch time.
+    /// Overridden by per-repo config when both are set.
+    #[serde(rename = "envPassthrough", skip_serializing_if = "Option::is_none")]
+    pub env_passthrough: Option<Vec<String>>,
 }
 
 /// Built-in default number of scrollback lines for the container terminal emulator.
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+
+/// Returns the effective env passthrough list for a given git root.
+/// Resolution priority: repo config → global config → empty list.
+pub fn effective_env_passthrough(git_root: &Path) -> Vec<String> {
+    let repo = load_repo_config(git_root).unwrap_or_default();
+    if let Some(names) = repo.env_passthrough {
+        return names;
+    }
+    let global = load_global_config().unwrap_or_default();
+    global.env_passthrough.unwrap_or_default()
+}
 
 /// Resolve the effective `yoloDisallowedTools` list for a given git root.
 /// Resolution priority: repo config → global config → empty list (no restriction).
@@ -225,6 +246,7 @@ mod tests {
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
+            env_passthrough: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -258,6 +280,7 @@ mod tests {
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: Some(2_000),
             yolo_disallowed_tools: None,
+            env_passthrough: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -275,6 +298,7 @@ mod tests {
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: Some(999),
             yolo_disallowed_tools: None,
+            env_passthrough: None,
         };
         save_repo_config(tmp.path(), &repo_cfg).unwrap();
 
@@ -294,6 +318,7 @@ mod tests {
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
+            env_passthrough: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -316,6 +341,7 @@ mod tests {
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: Some(5_000),
             yolo_disallowed_tools: None,
+            env_passthrough: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -366,6 +392,7 @@ mod tests {
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: Some(vec!["Bash".to_string(), "computer".to_string()]),
+            env_passthrough: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -383,6 +410,7 @@ mod tests {
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: Some(vec!["Bash".to_string()]),
+            env_passthrough: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let tools = effective_yolo_disallowed_tools(tmp.path());
@@ -399,6 +427,7 @@ mod tests {
             auto_agent_auth_accepted: None,
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: Some(vec!["Bash".to_string(), "computer".to_string()]),
+            env_passthrough: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let tools = effective_yolo_disallowed_tools(tmp.path());
@@ -419,5 +448,141 @@ mod tests {
         // We can't control the global file, so just assert no panic and the
         // return type is correct.
         let _: Vec<String> = tools;
+    }
+
+    // ─── effective_env_passthrough ───────────────────────────────────────────────
+
+    #[test]
+    fn env_passthrough_deserializes_in_repo_config() {
+        let json = r#"{"envPassthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]}"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.env_passthrough,
+            Some(vec!["ANTHROPIC_API_KEY".to_string(), "OPENAI_API_KEY".to_string()])
+        );
+    }
+
+    #[test]
+    fn env_passthrough_absent_in_repo_config_is_none() {
+        let json = r#"{"agent": "maki"}"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.env_passthrough, None);
+    }
+
+    #[test]
+    fn env_passthrough_deserializes_in_global_config() {
+        let json = r#"{"envPassthrough": ["MY_SECRET"]}"#;
+        let config: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.env_passthrough, Some(vec!["MY_SECRET".to_string()]));
+    }
+
+    #[test]
+    fn env_passthrough_absent_in_global_config_is_none() {
+        let json = r#"{"default_agent": "claude"}"#;
+        let config: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.env_passthrough, None);
+    }
+
+    #[test]
+    fn env_passthrough_roundtrips_through_repo_config() {
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: None,
+            env_passthrough: Some(vec!["ANTHROPIC_API_KEY".to_string()]),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        let loaded = load_repo_config(tmp.path()).unwrap();
+        assert_eq!(
+            loaded.env_passthrough,
+            Some(vec!["ANTHROPIC_API_KEY".to_string()])
+        );
+    }
+
+    #[test]
+    fn effective_env_passthrough_returns_repo_value_when_set() {
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: None,
+            env_passthrough: Some(vec!["MY_VAR".to_string(), "OTHER_VAR".to_string()]),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        let names = effective_env_passthrough(tmp.path());
+        assert_eq!(names, vec!["MY_VAR".to_string(), "OTHER_VAR".to_string()]);
+    }
+
+    #[test]
+    fn effective_env_passthrough_repo_wins_over_any_global() {
+        // When repo config has envPassthrough set, it is returned immediately
+        // without consulting global config (repo config wins entirely, no merging).
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: None,
+            env_passthrough: Some(vec!["REPO_ONLY_VAR".to_string()]),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        let names = effective_env_passthrough(tmp.path());
+        // Regardless of any global config, the repo value must win.
+        assert_eq!(names, vec!["REPO_ONLY_VAR".to_string()]);
+    }
+
+    #[test]
+    fn effective_env_passthrough_empty_when_neither_set() {
+        // No config file at all → falls through to empty list.
+        // (We cannot control ~/.amux/config.json in unit tests, so we only assert
+        // no panic and that the repo-absent path reaches the global fallback.)
+        let tmp = TempDir::new().unwrap();
+        assert!(!repo_config_path(tmp.path()).exists());
+        let names = effective_env_passthrough(tmp.path());
+        // If global config has no envPassthrough either, result is empty.
+        // We can't control the global file, so just assert no panic and correct type.
+        let _: Vec<String> = names;
+    }
+
+    #[test]
+    fn effective_env_passthrough_repo_empty_array_wins_over_global() {
+        // If a repo config explicitly sets envPassthrough to an empty array, it wins
+        // entirely — the global list must NOT be used (lists are not merged).
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: None,
+            env_passthrough: Some(vec![]), // explicit empty array
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        let names = effective_env_passthrough(tmp.path());
+        assert!(
+            names.is_empty(),
+            "repo envPassthrough: [] must win over any global envPassthrough list; got {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn effective_env_passthrough_falls_through_to_global_when_repo_field_absent() {
+        // Repo config exists but has no envPassthrough field → falls through to global.
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: Some("maki".to_string()),
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: None,
+            env_passthrough: None,
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        // Since repo.env_passthrough is None, the function must not panic and must
+        // return a Vec<String> (either global config's list or empty).
+        let names = effective_env_passthrough(tmp.path());
+        let _: Vec<String> = names;
     }
 }

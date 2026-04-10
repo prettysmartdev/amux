@@ -3,7 +3,7 @@ use crate::commands::auth::resolve_auth;
 use crate::commands::implement::confirm_mount_scope_stdin;
 use crate::commands::init::find_git_root;
 use crate::commands::output::OutputSink;
-use crate::config::{effective_yolo_disallowed_tools, load_repo_config};
+use crate::config::{effective_env_passthrough, effective_yolo_disallowed_tools, load_repo_config};
 use crate::docker;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -25,10 +25,22 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
         }
     }
 
+    let mut env_vars = credentials.env_vars.clone();
+    let passthrough_names = effective_env_passthrough(&git_root);
+    for name in &passthrough_names {
+        // Skip vars already supplied by keychain credentials — keychain takes precedence.
+        if env_vars.iter().any(|(k, _)| k == name) {
+            continue;
+        }
+        if let Ok(val) = std::env::var(name) {
+            env_vars.push((name.clone(), val));
+        }
+    }
+
     run_with_sink(
         &OutputSink::Stdout,
         Some(mount_path),
-        credentials.env_vars.clone(),
+        env_vars,
         non_interactive,
         plan,
         host_settings.as_ref(),
@@ -99,6 +111,7 @@ fn agent_name(git_root: &PathBuf) -> Result<&'static str> {
     Ok(match config.agent.as_deref().unwrap_or("claude") {
         "codex" => "codex",
         "opencode" => "opencode",
+        "maki" => "maki",
         _ => "claude",
     })
 }
@@ -109,6 +122,7 @@ pub fn chat_entrypoint(agent: &str, plan: bool) -> Vec<String> {
         "claude" => vec!["claude".to_string()],
         "codex" => vec!["codex".to_string()],
         "opencode" => vec!["opencode".to_string()],
+        "maki" => vec!["maki".to_string()],
         _ => vec![agent.to_string()],
     };
     append_plan_flags(&mut args, agent, plan);
@@ -121,6 +135,7 @@ pub fn chat_entrypoint_non_interactive(agent: &str, plan: bool) -> Vec<String> {
         "claude" => vec!["claude".to_string(), "-p".to_string()],
         "codex" => vec!["codex".to_string(), "--quiet".to_string()],
         "opencode" => vec!["opencode".to_string()],
+        "maki" => vec!["maki".to_string(), "--print".to_string()],
         _ => vec![agent.to_string()],
     };
     append_plan_flags(&mut args, agent, plan);
@@ -132,6 +147,7 @@ pub fn chat_entrypoint_non_interactive(agent: &str, plan: bool) -> Vec<String> {
 /// - Claude: `--permission-mode plan`
 /// - Codex: `--approval-mode plan`
 /// - Opencode: no plan mode available (flag is silently ignored)
+/// - Maki: no plan mode available (flag is silently ignored)
 fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
     if !plan {
         return;
@@ -145,6 +161,8 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
             args.push("--approval-mode".to_string());
             args.push("plan".to_string());
         }
+        // Maki has no plan mode.
+        "maki" => {}
         // Opencode and unknown agents have no plan mode.
         _ => {}
     }
@@ -160,6 +178,7 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
 /// - Claude: if disallowed_tools non-empty, `--disallowedTools <t1>,<t2>,...`
 /// - Codex: `--full-auto`; disallowed tools not supported (warning printed)
 /// - Opencode: no equivalent — a warning is printed; disallowed tools not supported
+/// - Maki: `--yolo` (maki's own flag to skip all permission prompts); disallowed tools not supported
 pub fn append_yolo_flags(args: &mut Vec<String>, agent: &str, yolo: bool, auto: bool, disallowed_tools: &[String]) {
     if !yolo && !auto {
         return;
@@ -182,6 +201,17 @@ pub fn append_yolo_flags(args: &mut Vec<String>, agent: &str, yolo: bool, auto: 
             args.push("--full-auto".to_string());
             if !disallowed_tools.is_empty() {
                 eprintln!("WARNING: {}: codex does not support --disallowedTools; yoloDisallowedTools config will be ignored.", flag_name);
+            }
+        }
+        "maki" => {
+            // maki uses --yolo as its own autonomous flag (skips all permission prompts).
+            // Note: the --yolo flag here is maki's flag, not amux's --yolo flag.
+            args.push("--yolo".to_string());
+            if !disallowed_tools.is_empty() {
+                eprintln!(
+                    "WARNING: {}: maki does not support --disallowedTools; yoloDisallowedTools config will be ignored.",
+                    flag_name
+                );
             }
         }
         _ => {
@@ -440,5 +470,187 @@ mod tests {
         append_yolo_flags(&mut args, "claude", true, true, &[]);
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(!args.contains(&"auto".to_string()));
+    }
+
+    // --- maki entrypoints ---
+
+    #[test]
+    fn chat_entrypoint_maki() {
+        let args = chat_entrypoint("maki", false);
+        assert_eq!(args, vec!["maki"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_non_interactive_maki() {
+        let args = chat_entrypoint_non_interactive("maki", false);
+        assert_eq!(args, vec!["maki", "--print"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_plan_maki() {
+        // Maki has no plan mode; the flag is silently ignored.
+        let args = chat_entrypoint("maki", true);
+        assert_eq!(args, vec!["maki"]);
+    }
+
+    // --- append_yolo_flags maki tests ---
+
+    #[test]
+    fn append_yolo_flags_maki_adds_yolo_flag() {
+        let mut args = vec!["maki".to_string()];
+        append_yolo_flags(&mut args, "maki", true, false, &[]);
+        assert!(args.contains(&"--yolo".to_string()), "maki must receive --yolo in yolo mode");
+    }
+
+    #[test]
+    fn append_yolo_flags_maki_never_adds_disallowed_tools_flag() {
+        // maki does not support --disallowedTools; it must never appear regardless of the list.
+        let mut args = vec!["maki".to_string()];
+        let tools = vec!["Bash".to_string(), "computer".to_string()];
+        append_yolo_flags(&mut args, "maki", true, false, &tools);
+        assert!(
+            !args.contains(&"--disallowedTools".to_string()),
+            "--disallowedTools must never appear for maki"
+        );
+        assert!(args.contains(&"--yolo".to_string()), "--yolo must still be appended");
+    }
+
+    #[test]
+    fn append_yolo_flags_maki_prints_warning_when_disallowed_tools_nonempty() {
+        // The warning is emitted via eprintln! and cannot be trivially captured in a unit test
+        // without a custom stderr-redirect harness. This test verifies the code path compiles
+        // and does not panic — the eprintln! path is exercised by calling it with a non-empty list.
+        // If a stderr-capture crate (e.g. `gag`) is added as a dev-dependency, this test should
+        // be upgraded to assert the warning string is present.
+        let mut args = vec!["maki".to_string()];
+        let tools = vec!["Bash".to_string()];
+        // Must not panic; warning is a side effect on stderr.
+        append_yolo_flags(&mut args, "maki", true, false, &tools);
+    }
+
+    #[test]
+    fn append_yolo_flags_maki_no_disallowed_tools_exact_args() {
+        // When disallowed_tools is empty, exactly ["maki", "--yolo"] must result.
+        let mut args = vec!["maki".to_string()];
+        append_yolo_flags(&mut args, "maki", true, false, &[]);
+        assert_eq!(args, vec!["maki", "--yolo"]);
+    }
+
+    // --- passthrough injection tests ---
+
+    #[test]
+    fn passthrough_injection_adds_set_env_var_to_env_vars() {
+        use crate::config::{save_repo_config, RepoConfig};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: None,
+            env_passthrough: Some(vec!["AMUX_TEST_PT_INJECT_PRESENT".to_string()]),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+
+        // SAFETY: test-only env mutation; unique var name avoids races with other tests.
+        unsafe { std::env::set_var("AMUX_TEST_PT_INJECT_PRESENT", "injected_value_99") };
+
+        // Simulate the passthrough injection loop from chat::run.
+        let mut env_vars: Vec<(String, String)> = vec![];
+        let passthrough_names = effective_env_passthrough(tmp.path());
+        for name in &passthrough_names {
+            if let Ok(val) = std::env::var(name) {
+                env_vars.push((name.clone(), val));
+            }
+        }
+
+        // SAFETY: test-only env mutation.
+        unsafe { std::env::remove_var("AMUX_TEST_PT_INJECT_PRESENT") };
+
+        assert!(
+            env_vars.contains(&("AMUX_TEST_PT_INJECT_PRESENT".to_string(), "injected_value_99".to_string())),
+            "set env var must appear in env_vars after passthrough injection"
+        );
+    }
+
+    #[test]
+    fn passthrough_injection_skips_absent_env_var() {
+        use crate::config::{save_repo_config, RepoConfig};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        // Use a var name that is very unlikely to be set in any test environment.
+        let absent_var = "AMUX_TEST_PT_INJECT_DEFINITELY_NOT_SET_XYZ_999";
+        std::env::remove_var(absent_var);
+
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: None,
+            env_passthrough: Some(vec![absent_var.to_string()]),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+
+        // Simulate the passthrough injection loop from chat::run.
+        let mut env_vars: Vec<(String, String)> = vec![];
+        let passthrough_names = effective_env_passthrough(tmp.path());
+        for name in &passthrough_names {
+            if let Ok(val) = std::env::var(name) {
+                env_vars.push((name.clone(), val));
+            }
+        }
+
+        assert!(
+            env_vars.is_empty(),
+            "absent env var must not be added to env_vars; no error or panic should occur"
+        );
+    }
+
+    #[test]
+    fn passthrough_injection_skips_var_already_in_credentials() {
+        use crate::config::{save_repo_config, RepoConfig};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let var_name = "AMUX_TEST_PT_DEDUP_VAR_UNIQUE_456";
+
+        let config = RepoConfig {
+            agent: None,
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: None,
+            env_passthrough: Some(vec![var_name.to_string()]),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        // SAFETY: test-only env mutation; unique var name avoids races with other tests.
+        unsafe { std::env::set_var(var_name, "passthrough_value") };
+
+        // Simulate starting with the var already present (e.g., from keychain credentials).
+        let mut env_vars: Vec<(String, String)> = vec![(var_name.to_string(), "cred_value".to_string())];
+
+        // Simulate the passthrough injection loop from chat::run (with skip-if-present guard).
+        let passthrough_names = effective_env_passthrough(tmp.path());
+        for name in &passthrough_names {
+            if env_vars.iter().any(|(k, _)| k == name) {
+                continue; // keychain takes precedence
+            }
+            if let Ok(val) = std::env::var(name) {
+                env_vars.push((name.clone(), val));
+            }
+        }
+
+        // SAFETY: test-only env mutation.
+        unsafe { std::env::remove_var(var_name) };
+
+        // Keychain credential must be present with its original value.
+        let entry = env_vars.iter().find(|(k, _)| k == var_name);
+        assert!(entry.is_some(), "credential var must remain in env_vars");
+        assert_eq!(entry.unwrap().1, "cred_value", "keychain value must not be overwritten by passthrough");
+
+        // Var must appear exactly once — passthrough entry was skipped.
+        let count = env_vars.iter().filter(|(k, _)| k == var_name).count();
+        assert_eq!(count, 1, "keychain takes precedence: no duplicate -e flag");
     }
 }

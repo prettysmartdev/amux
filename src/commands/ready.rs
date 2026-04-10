@@ -208,6 +208,7 @@ pub fn dockerfile_matches_template(content: &str, agent_name: &str) -> bool {
     let agent = match agent_name {
         "codex" => Agent::Codex,
         "opencode" => Agent::Opencode,
+        "maki" => Agent::Maki,
         _ => Agent::Claude,
     };
     let template = dockerfile_for_agent_embedded(&agent);
@@ -223,6 +224,7 @@ pub async fn check_local_agent(agent_name: &str) -> (StepStatus, String, String)
         "claude" => ("claude", vec!["--print", greeting]),
         "codex" => ("codex", vec!["--quiet", greeting]),
         "opencode" => ("opencode", vec!["run", greeting]),
+        "maki" => ("maki", vec!["--print", greeting]),
         _ => (agent_name, vec!["--print", greeting]),
     };
 
@@ -723,6 +725,7 @@ pub fn audit_entrypoint(agent: &str) -> Vec<String> {
         ],
         "codex" => vec!["codex".into(), AUDIT_PROMPT.into()],
         "opencode" => vec!["opencode".into(), "run".into(), AUDIT_PROMPT.into()],
+        "maki" => vec!["maki".into(), AUDIT_PROMPT.into()],
         _ => vec![agent.into(), AUDIT_PROMPT.into()],
     }
 }
@@ -738,6 +741,7 @@ pub fn audit_entrypoint_non_interactive(agent: &str) -> Vec<String> {
         ],
         "codex" => vec!["codex".into(), "--quiet".into(), AUDIT_PROMPT.into()],
         "opencode" => vec!["opencode".into(), "run".into(), AUDIT_PROMPT.into()],
+        "maki" => vec!["maki".into(), "--print".into(), AUDIT_PROMPT.into()],
         _ => vec![agent.into(), AUDIT_PROMPT.into()],
     }
 }
@@ -746,6 +750,7 @@ fn agent_from_str(name: &str) -> Agent {
     match name {
         "codex" => Agent::Codex,
         "opencode" => Agent::Opencode,
+        "maki" => Agent::Maki,
         _ => Agent::Claude,
     }
 }
@@ -865,7 +870,26 @@ mod tests {
         assert!(matches!(agent_from_str("claude"), Agent::Claude));
         assert!(matches!(agent_from_str("codex"), Agent::Codex));
         assert!(matches!(agent_from_str("opencode"), Agent::Opencode));
+        assert!(matches!(agent_from_str("maki"), Agent::Maki));
         assert!(matches!(agent_from_str("unknown"), Agent::Claude));
+    }
+
+    #[test]
+    fn dockerfile_matches_template_maki_returns_true_for_maki() {
+        let content = dockerfile_for_agent_embedded(&Agent::Maki);
+        assert!(
+            dockerfile_matches_template(&content, "maki"),
+            "maki Dockerfile content must match the 'maki' template"
+        );
+    }
+
+    #[test]
+    fn dockerfile_matches_template_maki_returns_false_for_claude() {
+        let content = dockerfile_for_agent_embedded(&Agent::Maki);
+        assert!(
+            !dockerfile_matches_template(&content, "claude"),
+            "maki Dockerfile content must not match the 'claude' template"
+        );
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub async fn download_dockerfile_template(
         Agent::Claude => "Dockerfile.claude",
         Agent::Codex => "Dockerfile.codex",
         Agent::Opencode => "Dockerfile.opencode",
+        Agent::Maki => "Dockerfile.maki",
     };
     let url = format!("{}/{}", ASPEC_CLI_RAW_BASE, filename);
 

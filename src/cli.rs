@@ -185,6 +185,7 @@ pub enum Agent {
     Claude,
     Codex,
     Opencode,
+    Maki,
 }
 
 impl Agent {
@@ -193,6 +194,7 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
             Agent::Opencode => "opencode",
+            Agent::Maki => "maki",
         }
     }
 }

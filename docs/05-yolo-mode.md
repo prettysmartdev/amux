@@ -51,6 +51,7 @@ The agent-specific skip-permissions flag is appended to the container entrypoint
 | `claude` | `--dangerously-skip-permissions` |
 | `codex` | `--full-auto` |
 | `opencode` | *(no equivalent — a warning is printed, flag omitted)* |
+| `maki` | `--yolo` |
 
 ### 2. Applies `yoloDisallowedTools`
 
@@ -61,6 +62,7 @@ Any tools listed in `yoloDisallowedTools` in your config are passed to the agent
 | `claude` | `--disallowedTools tool1,tool2,...` |
 | `codex` | *(no equivalent — a warning is printed)* |
 | `opencode` | *(no equivalent — a warning is printed)* |
+| `maki` | *(no equivalent — a warning is printed)* |
 
 ### 3. Implies `--worktree` when combined with `--workflow`
 

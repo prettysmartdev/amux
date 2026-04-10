@@ -2,7 +2,7 @@ use crate::commands::agent::run_agent_with_sink;
 use crate::commands::auth::resolve_auth;
 use crate::commands::init::find_git_root;
 use crate::commands::output::OutputSink;
-use crate::config::{effective_yolo_disallowed_tools, load_repo_config};
+use crate::config::{effective_env_passthrough, effective_yolo_disallowed_tools, load_repo_config};
 use crate::docker;
 use crate::workflow::{self, StepStatus, WorkflowState};
 use anyhow::{bail, Context, Result};
@@ -112,6 +112,18 @@ pub async fn run(
         }
     }
 
+    let mut env_vars = credentials.env_vars.clone();
+    let passthrough_names = effective_env_passthrough(&git_root);
+    for name in &passthrough_names {
+        // Skip vars already supplied by keychain credentials — keychain takes precedence.
+        if env_vars.iter().any(|(k, _)| k == name) {
+            continue;
+        }
+        if let Ok(val) = std::env::var(name) {
+            env_vars.push((name.clone(), val));
+        }
+    }
+
     if let Some(wf_path) = workflow_path {
         // Resolve relative paths against the process's working directory so that
         // paths like ./aspec/workflows/implement-feature.md work as expected.
@@ -125,7 +137,7 @@ pub async fn run(
             &resolved_wf,
             &git_root,
             mount_path.clone(),
-            credentials.env_vars,
+            env_vars,
             agent,
             host_settings,
             non_interactive,
@@ -165,7 +177,7 @@ pub async fn run(
         &status,
         &OutputSink::Stdout,
         Some(mount_path.clone()),
-        credentials.env_vars.clone(),
+        env_vars,
         non_interactive,
         host_settings.as_ref(),
         allow_docker,
@@ -257,6 +269,7 @@ fn agent_name(git_root: &PathBuf) -> Result<&'static str> {
     Ok(match config.agent.as_deref().unwrap_or("claude") {
         "codex" => "codex",
         "opencode" => "opencode",
+        "maki" => "maki",
         _ => "claude",
     })
 }
@@ -334,6 +347,10 @@ pub fn agent_entrypoint(agent: &str, work_item: u32, plan: bool) -> Vec<String> 
             "run".to_string(),
             prompt,
         ],
+        "maki" => vec![
+            "maki".to_string(),
+            prompt,
+        ],
         _ => vec![
             agent.to_string(),
             prompt,
@@ -363,6 +380,11 @@ pub fn agent_entrypoint_non_interactive(agent: &str, work_item: u32, plan: bool)
             "run".to_string(),
             prompt,
         ],
+        "maki" => vec![
+            "maki".to_string(),
+            "--print".to_string(),
+            prompt,
+        ],
         _ => vec![
             agent.to_string(),
             prompt,
@@ -380,6 +402,8 @@ pub fn workflow_step_entrypoint(agent: &str, prompt: &str, non_interactive: bool
         ("codex", true) => vec!["codex".to_string(), "--quiet".to_string(), prompt.to_string()],
         ("codex", false) => vec!["codex".to_string(), prompt.to_string()],
         ("opencode", _) => vec!["opencode".to_string(), "run".to_string(), prompt.to_string()],
+        ("maki", true) => vec!["maki".to_string(), "--print".to_string(), prompt.to_string()],
+        ("maki", false) => vec!["maki".to_string(), prompt.to_string()],
         (a, _) => vec![a.to_string(), prompt.to_string()],
     };
     append_plan_flags(&mut args, agent, plan);
@@ -391,6 +415,7 @@ pub fn workflow_step_entrypoint(agent: &str, prompt: &str, non_interactive: bool
 /// - Claude: `--permission-mode plan`
 /// - Codex: `--approval-mode plan`
 /// - Opencode: no plan mode available (flag is silently ignored)
+/// - Maki: no plan mode available (flag is silently ignored)
 fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
     if !plan {
         return;
@@ -404,6 +429,8 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
             args.push("--approval-mode".to_string());
             args.push("plan".to_string());
         }
+        // Maki has no plan mode.
+        "maki" => {}
         // Opencode and unknown agents have no plan mode.
         _ => {}
     }
@@ -419,6 +446,7 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
 /// - Claude: if disallowed_tools non-empty, `--disallowedTools <t1>,<t2>,...`
 /// - Codex: `--full-auto`; disallowed tools not supported (warning printed)
 /// - Opencode: no equivalent — a warning is printed; disallowed tools not supported
+/// - Maki: `--yolo` (maki's own flag to skip all permission prompts); disallowed tools not supported
 pub fn append_yolo_flags(args: &mut Vec<String>, agent: &str, yolo: bool, auto: bool, disallowed_tools: &[String]) {
     if !yolo && !auto {
         return;
@@ -441,6 +469,17 @@ pub fn append_yolo_flags(args: &mut Vec<String>, agent: &str, yolo: bool, auto: 
             args.push("--full-auto".to_string());
             if !disallowed_tools.is_empty() {
                 eprintln!("WARNING: {}: codex does not support --disallowedTools; yoloDisallowedTools config will be ignored.", flag_name);
+            }
+        }
+        "maki" => {
+            // maki uses --yolo as its own autonomous flag (skips all permission prompts).
+            // Note: the --yolo flag here is maki's flag, not amux's --yolo flag.
+            args.push("--yolo".to_string());
+            if !disallowed_tools.is_empty() {
+                eprintln!(
+                    "WARNING: {}: maki does not support --disallowedTools; yoloDisallowedTools config will be ignored.",
+                    flag_name
+                );
             }
         }
         _ => {

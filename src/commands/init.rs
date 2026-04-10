@@ -98,6 +98,7 @@ pub async fn run_with_sink(
         auto_agent_auth_accepted: None,
         terminal_scrollback_lines: None,
         yolo_disallowed_tools: None,
+        env_passthrough: None,
     };
     save_repo_config(&git_root, &config)?;
     out.println(format!(
@@ -444,6 +445,7 @@ pub fn dockerfile_for_agent_embedded(agent: &Agent) -> String {
         Agent::Claude => include_str!("../../templates/Dockerfile.claude").to_string(),
         Agent::Codex => include_str!("../../templates/Dockerfile.codex").to_string(),
         Agent::Opencode => include_str!("../../templates/Dockerfile.opencode").to_string(),
+        Agent::Maki => include_str!("../../templates/Dockerfile.maki").to_string(),
     }
 }
 
@@ -525,7 +527,7 @@ mod tests {
 
     #[test]
     fn dockerfile_for_agent_embedded_uses_debian_slim_base() {
-        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode] {
+        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki] {
             let content = dockerfile_for_agent_embedded(agent);
             assert!(
                 content.contains("debian:bookworm-slim"),
@@ -537,7 +539,7 @@ mod tests {
 
     #[test]
     fn dockerfile_for_agent_embedded_does_not_use_npm_install() {
-        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode] {
+        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki] {
             let content = dockerfile_for_agent_embedded(agent);
             assert!(
                 !content.contains("npm install"),
@@ -549,7 +551,7 @@ mod tests {
 
     #[test]
     fn dockerfile_templates_install_via_apt_or_direct_download() {
-        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode] {
+        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki] {
             let content = dockerfile_for_agent_embedded(agent);
             assert!(
                 content.contains("apt-get") || content.contains("curl"),
@@ -557,6 +559,15 @@ mod tests {
                 agent
             );
         }
+    }
+
+    #[test]
+    fn dockerfile_for_agent_embedded_maki_uses_official_installer() {
+        let content = dockerfile_for_agent_embedded(&Agent::Maki);
+        assert!(
+            content.contains("maki.sh/install.sh"),
+            "Dockerfile.maki must install maki via the official maki.sh/install.sh installer"
+        );
     }
 
     #[test]

@@ -14,15 +14,17 @@ This file is created by `amux init` and should be committed to source control. I
 {
   "agent": "claude",
   "terminal_scrollback_lines": 10000,
-  "yoloDisallowedTools": ["Bash", "computer"]
+  "yoloDisallowedTools": ["Bash", "computer"],
+  "envPassthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `agent` | string | `"claude"` | Agent to use for this repository: `claude`, `codex`, or `opencode` |
+| `agent` | string | `"claude"` | Agent to use for this repository: `claude`, `codex`, `opencode`, or `maki` |
 | `terminal_scrollback_lines` | integer | `10000` | Number of scrollback lines in the container terminal emulator. Overrides the global value |
 | `yoloDisallowedTools` | string array | `[]` | Tools the agent cannot use when `--yolo` is active. Overrides the global list entirely |
+| `envPassthrough` | string array | `[]` | Host environment variable names to inject into agent containers at launch. Overrides the global list entirely. See [`envPassthrough`](#envpassthrough) |
 
 ---
 
@@ -37,16 +39,18 @@ Applies to all projects on the machine unless overridden by a per-repo config.
   "default_agent": "claude",
   "terminal_scrollback_lines": 10000,
   "runtime": "docker",
-  "yoloDisallowedTools": ["Bash"]
+  "yoloDisallowedTools": ["Bash"],
+  "envPassthrough": ["ANTHROPIC_API_KEY"]
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `default_agent` | string | `"claude"` | Default agent when no per-repo agent is configured |
+| `default_agent` | string | `"claude"` | Default agent when no per-repo agent is configured: `claude`, `codex`, `opencode`, or `maki` |
 | `terminal_scrollback_lines` | integer | `10000` | Default scrollback lines for all repos unless overridden |
 | `runtime` | string | `"docker"` | Container runtime: `"docker"` or `"apple-containers"` (macOS 26+ only) |
 | `yoloDisallowedTools` | string array | `[]` | Global fallback list of tools forbidden when `--yolo` is active |
+| `envPassthrough` | string array | `[]` | Host environment variable names to inject into agent containers at launch. See [`envPassthrough`](#envpassthrough) |
 
 **Note:** `runtime` is a global (machine-level) setting only. It is not available in the per-repo config — container runtime is a property of the machine, not the project.
 
@@ -59,11 +63,69 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 | `agent` / `default_agent` | Per-repo → Global → Built-in default (`claude`) |
 | `terminal_scrollback_lines` | Per-repo → Global → Built-in default (10,000) |
 | `yoloDisallowedTools` | Per-repo → Global → Empty list (no restriction) |
+| `envPassthrough` | Per-repo → Global → Empty list (no passthrough) |
 | `runtime` | Global only |
 
-For `yoloDisallowedTools`, if a per-repo list is set it **replaces** the global list entirely — lists are not merged. To inherit the global list for a repo, omit the field from the repo config.
+For `yoloDisallowedTools` and `envPassthrough`, if a per-repo list is set it **replaces** the global list entirely — lists are not merged. To inherit the global list for a repo, omit the field from the repo config.
 
 A 10,000-line scrollback buffer at 80 columns uses approximately 3 MB per tab. Increase for long-running build or test sessions; decrease when running many simultaneous tabs.
+
+---
+
+## `envPassthrough`
+
+`envPassthrough` is an allowlist of host environment variable names that amux reads from your current shell and injects into agent containers at launch time. It applies to all agents — not just maki — but is the primary way to authenticate agents that use API keys rather than a system keychain.
+
+### Why an allowlist?
+
+amux deliberately cannot forward your entire host environment into a container. You must name each variable explicitly. This preserves the security principle that containers receive only the minimum secrets they need.
+
+### Configuration
+
+Add the field to your global config to apply it to all projects:
+
+```json
+{
+  "envPassthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+}
+```
+
+Or add it to a per-repo config to apply it to one project only:
+
+```json
+{
+  "agent": "maki",
+  "envPassthrough": ["ANTHROPIC_API_KEY", "ZHIPU_API_KEY"]
+}
+```
+
+When a variable is listed but not present in your shell environment, it is silently skipped — no error or warning is produced. This is intentional: you may list variables that are only set in some contexts (e.g. CI vs. local).
+
+### Using maki with `envPassthrough`
+
+Maki authenticates exclusively via API keys. There is no system keychain integration. A typical maki setup looks like:
+
+**Global config** (`~/.amux/config.json`):
+```json
+{
+  "envPassthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+}
+```
+
+**Per-repo config** (`aspec/.amux.json`):
+```json
+{
+  "agent": "maki"
+}
+```
+
+With this setup, `amux chat` reads `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from your shell and passes them into the maki container as `-e` flags on the `docker run` invocation. The values are masked (`***`) in all displayed Docker commands.
+
+### Precedence and deduplication
+
+Per-repo config wins entirely over global config — lists are not merged. To use the global list for a specific repo, omit `envPassthrough` from the repo config.
+
+If a variable name appears in both `envPassthrough` and the agent's keychain credentials (e.g. a user who configured `CLAUDE_CODE_OAUTH_TOKEN` in both places), the keychain value takes precedence and the passthrough entry for that name is skipped.
 
 ---
 

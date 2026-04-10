@@ -1162,7 +1162,7 @@ fn pending_command_ready_build_no_cache_fields() {
 
 #[test]
 fn docker_format_build_cmd_no_cache() {
-    let cmd = amux::docker::format_build_cmd_no_cache("img:latest", "Dockerfile.dev", "/repo");
+    let cmd = amux::docker::format_build_cmd_no_cache("docker", "img:latest", "Dockerfile.dev", "/repo");
     assert!(cmd.contains("--no-cache"), "Should contain --no-cache flag");
     assert!(cmd.contains("img:latest"), "Should contain image tag");
     assert!(cmd.contains("Dockerfile.dev"), "Should contain dockerfile");
