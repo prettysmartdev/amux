@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 pub async fn run(command: Command, runtime: Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
     match command {
-        Command::Init { agent, aspec } => init::run(agent, aspec).await,
+        Command::Init { agent, aspec } => init::run(agent, aspec, runtime).await,
         Command::Ready {
             refresh,
             build,

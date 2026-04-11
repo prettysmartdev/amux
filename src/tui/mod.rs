@@ -16,8 +16,8 @@ use crate::commands::new::WorkItemKind;
 use crate::commands::specs::{amend_agent_entrypoint, interview_agent_entrypoint};
 use crate::commands::{claws, init, new, ready, status};
 use crate::commands::ready::{ReadyOptions, print_interactive_notice, print_summary};
-use crate::config::{effective_scrollback_lines, load_repo_config};
-use crate::docker;
+use crate::config::{effective_env_passthrough, effective_scrollback_lines, load_repo_config};
+use crate::runtime::docker as docker;
 use crate::tui::input::Action;
 use crate::tui::pty::{spawn_text_command, PtySession};
 use crate::tui::render::{calculate_container_inner_size, workflow_strip_height};
@@ -813,8 +813,9 @@ async fn execute_command(app: &mut App, cmd: &str) {
             let tx = app.active_tab().output_tx.clone();
             let aspec = parts.iter().any(|p| *p == "--aspec");
             let tab_cwd = app.active_tab().cwd.clone();
+            let runtime = app.runtime.clone();
             spawn_text_command(tx, exit_tx, move |sink| async move {
-                init::run_with_sink(agent, aspec, false, false, &sink, &tab_cwd).await
+                init::run_with_sink(agent, aspec, false, false, &sink, &tab_cwd, runtime).await
             });
         }
 
@@ -1023,11 +1024,18 @@ async fn launch_ready(app: &mut App) {
 
     // Auto-passthrough: always pass credentials from keychain if available.
     let credentials = agent_keychain_credentials(&agent_name);
-    let env_vars = credentials.env_vars;
+    let mut env_vars = credentials.env_vars;
+    for name in &effective_env_passthrough(&git_root) {
+        if env_vars.iter().any(|(k, _)| k == name) {
+            continue;
+        }
+        if let Ok(val) = std::env::var(name) {
+            env_vars.push((name.clone(), val));
+        }
+    }
 
     // Prepare host settings (sanitized config files in a temp dir).
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
-        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
+    app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     {
         let dockerfile = git_root.join("Dockerfile.dev");
         let msg = app.active_tab_mut().host_settings.as_mut()
@@ -1435,11 +1443,18 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
 
     // Auto-passthrough: always pass credentials from keychain if available.
     let credentials = agent_keychain_credentials(&agent_name);
-    let env_vars = credentials.env_vars;
+    let mut env_vars = credentials.env_vars;
+    for name in &effective_env_passthrough(&git_root) {
+        if env_vars.iter().any(|(k, _)| k == name) {
+            continue;
+        }
+        if let Ok(val) = std::env::var(name) {
+            env_vars.push((name.clone(), val));
+        }
+    }
 
     // Prepare host settings (sanitized config files in a temp dir).
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
-        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
+    app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     {
         let dockerfile = git_root.join("Dockerfile.dev");
         let msg = app.active_tab_mut().host_settings.as_mut()
@@ -1535,9 +1550,9 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         command_display = format!("implement {:04}", work_item);
     }
 
-    // Apply yolo/auto flags to the entrypoint.
-    use crate::commands::implement::append_yolo_flags;
-    append_yolo_flags(&mut effective_entrypoint, &agent_name, yolo, auto, &disallowed_tools);
+    // Apply autonomous-mode flags to the entrypoint.
+    use crate::commands::agent::append_autonomous_flags;
+    append_autonomous_flags(&mut effective_entrypoint, &agent_name, yolo, auto, &disallowed_tools);
 
     let entrypoint = effective_entrypoint;
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
@@ -1692,11 +1707,18 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
 
     // Auto-passthrough: always pass credentials from keychain if available.
     let credentials = agent_keychain_credentials(&agent_name);
-    let env_vars = credentials.env_vars;
+    let mut env_vars = credentials.env_vars;
+    for name in &effective_env_passthrough(&git_root) {
+        if env_vars.iter().any(|(k, _)| k == name) {
+            continue;
+        }
+        if let Ok(val) = std::env::var(name) {
+            env_vars.push((name.clone(), val));
+        }
+    }
 
     // Prepare host settings (sanitized config files in a temp dir).
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
-        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
+    app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     {
         let dockerfile = git_root.join("Dockerfile.dev");
         let msg = app.active_tab_mut().host_settings.as_mut()
@@ -1724,8 +1746,8 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
     } else {
         vec![]
     };
-    use crate::commands::chat::append_yolo_flags as chat_append_yolo_flags;
-    chat_append_yolo_flags(&mut entrypoint, &agent_name, yolo, auto, &chat_disallowed_tools);
+    use crate::commands::agent::append_autonomous_flags;
+    append_autonomous_flags(&mut entrypoint, &agent_name, yolo, auto, &chat_disallowed_tools);
 
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
@@ -2038,11 +2060,10 @@ async fn launch_claws_ready(app: &mut App) {
     // Prepare sanitized host config (same as `chat`/`implement` auto-configuration).
     // Stored in tab.host_settings so the temp dir outlives all phases of the wizard
     // and remains valid through the subsequent PTY exec session.
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
-        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
+    app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     // A path-only view is moved into the closure; the actual TempDir lives in the tab.
     let closure_host_settings = app.active_tab().host_settings.as_ref().map(|hs| {
-        docker::HostSettings::from_paths(hs.config_path.clone(), hs.claude_dir_path.clone())
+        hs.clone_view()
     });
 
     app.active_tab_mut().claws_phase = ClawsPhase::PreAudit;
@@ -2134,7 +2155,7 @@ async fn launch_claws_init_post_audit(app: &mut App) {
 
     // Path-only clone of host_settings for the background closure.
     let closure_host_settings = app.active_tab().host_settings.as_ref().map(|hs| {
-        docker::HostSettings::from_paths(hs.config_path.clone(), hs.claude_dir_path.clone())
+        hs.clone_view()
     });
 
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
@@ -2196,9 +2217,9 @@ async fn launch_claws_start_container_status_only(app: &mut App) {
     let env_vars = credentials.env_vars;
 
     let settings_dir = claws::nanoclaw_settings_dir();
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare_to_dir(&agent_name, &settings_dir);
+    app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings_to_dir(&settings_dir);
     let closure_host_settings = app.active_tab().host_settings.as_ref().map(|hs| {
-        docker::HostSettings::from_paths(hs.config_path.clone(), hs.claude_dir_path.clone())
+        hs.clone_view()
     });
 
     app.active_tab_mut().claws_phase = ClawsPhase::Setup;
@@ -2321,9 +2342,9 @@ async fn launch_claws_delete_and_start_fresh(app: &mut App, container_id: String
     let env_vars = credentials.env_vars;
 
     let settings_dir = claws::nanoclaw_settings_dir();
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare_to_dir(&agent_name, &settings_dir);
+    app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings_to_dir(&settings_dir);
     let closure_host_settings = app.active_tab().host_settings.as_ref().map(|hs| {
-        docker::HostSettings::from_paths(hs.config_path.clone(), hs.claude_dir_path.clone())
+        hs.clone_view()
     });
 
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
@@ -2640,8 +2661,7 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
     let credentials = agent_keychain_credentials(&agent_name);
     let env_vars = credentials.env_vars;
 
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
-        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
+    app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     {
         let dockerfile = git_root.join("Dockerfile.dev");
         let msg = app.active_tab_mut().host_settings.as_mut()
@@ -2757,8 +2777,7 @@ async fn launch_specs_interview_agent(
     let credentials = agent_keychain_credentials(&agent_name);
     let env_vars = credentials.env_vars;
 
-    app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent_name)
-        .or_else(|| docker::HostSettings::prepare_minimal(&agent_name));
+    app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     {
         let dockerfile = git_root.join("Dockerfile.dev");
         let msg = app.active_tab_mut().host_settings.as_mut()
@@ -2850,19 +2869,28 @@ async fn launch_specs_interview_agent(
 }
 
 fn parse_agent_flag(parts: &[&str]) -> Option<Agent> {
-    parts.iter().find_map(|part| {
+    let mut iter = parts.iter().peekable();
+    while let Some(part) = iter.next() {
+        // Support both --agent=<value> and --agent <value>.
         let value = if let Some(v) = part.strip_prefix("--agent=") {
-            v
+            v.to_string()
+        } else if *part == "--agent" {
+            match iter.next() {
+                Some(v) => v.to_string(),
+                None => return None,
+            }
         } else {
-            return None;
+            continue;
         };
-        match value {
+        return match value.as_str() {
             "claude" => Some(Agent::Claude),
             "codex" => Some(Agent::Codex),
             "opencode" => Some(Agent::Opencode),
+            "maki" => Some(Agent::Maki),
             _ => None,
-        }
-    })
+        };
+    }
+    None
 }
 
 // ─── Multi-step workflow helpers ──────────────────────────────────────────────
@@ -2943,12 +2971,36 @@ async fn finish_workflow(app: &mut App) {
     // Clean up workflow state (prints "All steps done!", removes state file, clears current_step).
     mark_workflow_complete_if_needed(app, &current_step);
 
-    // Stop the running container so the PTY exits and the session summary is shown.
-    if let Some(name) = app.active_tab().container_info.as_ref().map(|i| i.container_name.clone()) {
-        let stop_runtime = app.runtime.clone();
-        tokio::task::spawn_blocking(move || {
-            let _ = stop_runtime.stop_container(&name);
-        });
+    // If the container already exited (e.g. yolo+workflow: the PTY exit set WorktreeMergePrompt
+    // but check_workflow_step_completion overwrote it with WorkflowControlBoard), show the
+    // worktree merge dialog directly.  If the container is still running, stop it and the PTY
+    // exit handler will show the dialog when it fires.
+    let already_done = matches!(
+        app.active_tab().phase,
+        state::ExecutionPhase::Done { .. } | state::ExecutionPhase::Error { .. }
+    );
+    if already_done {
+        if let (Some(branch), Some(wt_path), Some(git_root)) = (
+            app.active_tab().worktree_branch.clone(),
+            app.active_tab().worktree_active_path.clone(),
+            app.active_tab().worktree_git_root.clone(),
+        ) {
+            let had_error = matches!(app.active_tab().phase, state::ExecutionPhase::Error { .. });
+            app.active_tab_mut().dialog = Dialog::WorktreeMergePrompt {
+                branch,
+                worktree_path: wt_path,
+                git_root,
+                had_error,
+            };
+        }
+    } else {
+        // Stop the running container so the PTY exits and the session summary is shown.
+        if let Some(name) = app.active_tab().container_info.as_ref().map(|i| i.container_name.clone()) {
+            let stop_runtime = app.runtime.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = stop_runtime.stop_container(&name);
+            });
+        }
     }
 }
 
@@ -3096,8 +3148,8 @@ async fn launch_next_workflow_step(app: &mut App) {
     };
     let mut entrypoint = workflow_step_entrypoint(&agent_name, &prompt, false, false);
     {
-        use crate::commands::implement::append_yolo_flags;
-        append_yolo_flags(&mut entrypoint, &agent_name, yolo_mode, auto_mode, &yolo_disallowed_tools);
+        use crate::commands::agent::append_autonomous_flags;
+        append_autonomous_flags(&mut entrypoint, &agent_name, yolo_mode, auto_mode, &yolo_disallowed_tools);
     }
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
@@ -3105,8 +3157,7 @@ async fn launch_next_workflow_step(app: &mut App) {
     let container_name = docker::generate_container_name();
 
     if app.active_tab().host_settings.is_none() {
-        app.active_tab_mut().host_settings = docker::HostSettings::prepare(&agent)
-            .or_else(|| docker::HostSettings::prepare_minimal(&agent));
+        app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
         if yolo_mode {
             if let Some(ref s) = app.active_tab().host_settings {
                 let _ = s.apply_yolo_settings();

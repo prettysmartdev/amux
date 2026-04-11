@@ -3,8 +3,8 @@
 mod cli;
 mod commands;
 mod config;
-mod docker;
 mod git;
+mod passthrough;
 mod runtime;
 mod tui;
 mod workflow;

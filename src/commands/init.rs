@@ -4,9 +4,11 @@ use crate::commands::download;
 use crate::commands::output::OutputSink;
 use crate::commands::ready::{audit_entrypoint, print_interactive_notice, StepStatus};
 use crate::config::{save_repo_config, RepoConfig};
-use crate::docker;
+use crate::runtime::docker as docker;
+use crate::runtime::AgentRuntime;
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Summary of what happened during `amux init`.
 #[derive(Clone, Debug)]
@@ -31,7 +33,7 @@ impl Default for InitSummary {
 }
 
 /// Command-mode entry point: prompts interactively then runs init.
-pub async fn run(agent: Agent, aspec: bool) -> Result<()> {
+pub async fn run(agent: Agent, aspec: bool, runtime: Arc<dyn AgentRuntime>) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let git_root = find_git_root_from(&cwd).context("Not inside a Git repository")?;
 
@@ -67,7 +69,7 @@ pub async fn run(agent: Agent, aspec: bool) -> Result<()> {
         ask_yes_no_stdin("Run the agent audit container after creating Dockerfile.dev?")
     };
 
-    run_with_sink(agent, aspec, replace_aspec, run_audit, &OutputSink::Stdout, &cwd).await
+    run_with_sink(agent, aspec, replace_aspec, run_audit, &OutputSink::Stdout, &cwd, runtime).await
 }
 
 /// Core logic shared between command mode and TUI mode.
@@ -85,6 +87,7 @@ pub async fn run_with_sink(
     run_audit: bool,
     out: &OutputSink,
     cwd: &std::path::Path,
+    runtime: Arc<dyn AgentRuntime>,
 ) -> Result<()> {
     let git_root = find_git_root_from(cwd).context("Not inside a Git repository")?;
     let mut summary = InitSummary::default();
@@ -179,19 +182,19 @@ pub async fn run_with_sink(
             let credentials = resolve_auth(&git_root, agent.as_str())
                 .unwrap_or_default();
             let env_vars = credentials.env_vars;
-            let host_settings = docker::HostSettings::prepare(agent.as_str());
+            let host_settings = crate::passthrough::passthrough_for_agent(agent.as_str()).prepare_host_settings();
 
             // Build the image before running audit.
             out.println(format!("Building image {}...", image_tag));
-            let build_cmd = docker::format_build_cmd("docker", &image_tag, &dockerfile_str, &git_root_str);
+            let build_cmd = docker::format_build_cmd(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str);
             out.println(format!("$ {}", build_cmd));
             let out_clone = out.clone();
-            match docker::build_image_streaming(
+            match runtime.build_image_streaming(
                 &image_tag,
-                &dockerfile_str,
-                &git_root_str,
+                std::path::Path::new(&dockerfile_str),
+                std::path::Path::new(&git_root_str),
                 false,
-                |line| {
+                &mut |line| {
                     out_clone.println(line);
                 },
             ) {
@@ -212,7 +215,7 @@ pub async fn run_with_sink(
             print_interactive_notice(out, agent.as_str());
             let entrypoint = audit_entrypoint(agent.as_str());
             let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
-            match docker::run_container(
+            match runtime.run_container(
                 &image_tag,
                 &mount_path,
                 &entrypoint_refs,
@@ -235,12 +238,12 @@ pub async fn run_with_sink(
             // the audit may have partially modified Dockerfile.dev).
             out.println(format!("Rebuilding image {} after audit...", image_tag));
             let out_clone2 = out.clone();
-            match docker::build_image_streaming(
+            match runtime.build_image_streaming(
                 &image_tag,
-                &dockerfile_str,
-                &git_root_str,
+                std::path::Path::new(&dockerfile_str),
+                std::path::Path::new(&git_root_str),
                 false,
-                |line| {
+                &mut |line| {
                     out_clone2.println(line);
                 },
             ) {
@@ -269,15 +272,15 @@ pub async fn run_with_sink(
             let git_root_str = git_root.to_str().unwrap().to_string();
             out.println(format!("Building image {}...", image_tag));
             let build_cmd =
-                docker::format_build_cmd("docker", &image_tag, &dockerfile_str, &git_root_str);
+                docker::format_build_cmd(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str);
             out.println(format!("$ {}", build_cmd));
             let out_clone = out.clone();
-            match docker::build_image_streaming(
+            match runtime.build_image_streaming(
                 &image_tag,
-                &dockerfile_str,
-                &git_root_str,
+                std::path::Path::new(&dockerfile_str),
+                std::path::Path::new(&git_root_str),
                 false,
-                |line| {
+                &mut |line| {
                     out_clone.println(line);
                 },
             ) {
@@ -491,7 +494,8 @@ mod tests {
         // We don't run the real init (it would write files) but we verify the function
         // signature and that it calls the sink. Run from within the project's git root.
         let cwd = std::env::current_dir().unwrap();
-        let result = run_with_sink(Agent::Claude, false, false, false, &sink, &cwd).await;
+        let runtime = std::sync::Arc::new(crate::runtime::docker::DockerRuntime::new());
+        let result = run_with_sink(Agent::Claude, false, false, false, &sink, &cwd, runtime).await;
         // May succeed or fail depending on environment; we just verify sink received calls.
         drop(result);
         // Should have received at least one message via the channel.
@@ -632,8 +636,9 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let sink = OutputSink::Channel(tx);
         let cwd = std::env::current_dir().unwrap();
+        let runtime = std::sync::Arc::new(crate::runtime::docker::DockerRuntime::new());
         // aspec=false means the aspec folder download is skipped.
-        let result = run_with_sink(Agent::Claude, false, false, false, &sink, &cwd).await;
+        let result = run_with_sink(Agent::Claude, false, false, false, &sink, &cwd, runtime).await;
         drop(result);
 
         let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();

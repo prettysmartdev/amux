@@ -7,12 +7,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install maki via official installer.
-# The installer auto-detects CPU architecture (amd64/arm64) and downloads the
-# correct statically-linked Rust binary. If the installer ever stops auto-detecting
-# arch, switch to the dpkg --print-architecture pattern used in Dockerfile.codex.
-# NOTE: The installer places the binary in ~/.local/bin by default. If that default
-# changes, update the cp path below accordingly.
-RUN curl -fsSL https://maki.sh/install.sh | sh \
-    && cp /root/.local/bin/maki /usr/local/bin/maki
+RUN curl -fsSL https://maki.sh/install.sh | sh 
 
 WORKDIR /workspace

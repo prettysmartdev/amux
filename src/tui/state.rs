@@ -1,7 +1,7 @@
 use crate::commands::claws::ClawsAuditCtx;
 use crate::commands::ready::{ReadyContext, ReadyOptions, ReadySummary};
 use crate::commands::status::TuiTabInfo;
-use crate::docker;
+use crate::runtime::docker as docker;
 use crate::tui::pty::PtySession;
 use crate::workflow::{StepStatus, WorkflowState};
 use ratatui::layout::Rect;

@@ -49,7 +49,8 @@ async fn init_via_sink_produces_output_lines() {
     // run_with_sink from inside a git repo (the amux repo itself)
     // aspec=false to avoid downloading; run_audit=false to skip Docker.
     let cwd = std::env::current_dir().unwrap();
-    let result = init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink, &cwd).await;
+    let runtime = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
+    let result = init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink, &cwd, runtime).await;
     drop(result); // may succeed or fail; we only care that the sink was used.
 
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -115,7 +116,7 @@ fn ready_audit_entrypoint_for_each_agent() {
 
 #[test]
 fn ready_uses_project_specific_image_tag() {
-    let tag = amux::docker::project_image_tag(std::path::Path::new("/home/user/myproject"));
+    let tag = amux::runtime::docker::project_image_tag(std::path::Path::new("/home/user/myproject"));
     assert_eq!(tag, "amux-myproject:latest");
 }
 
@@ -211,7 +212,8 @@ fn init_via_sink_includes_whats_next() {
     // Run init without aspec, without audit (no Docker needed).
     let rt = tokio::runtime::Runtime::new().unwrap();
     let cwd = std::env::current_dir().unwrap();
-    let _ = rt.block_on(init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink, &cwd));
+    let runtime = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
+    let _ = rt.block_on(init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink, &cwd, runtime));
 
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let all = messages.join("\n");
@@ -340,7 +342,8 @@ fn autocomplete_implement_shows_non_interactive_flag() {
 #[test]
 fn agent_env_vars_passed_to_container() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-test".into())];
-    let args = amux::docker::build_run_args("img", "/repo", &[], &env, None, false, None, None);
+    use amux::runtime::{AgentRuntime};
+    let args = amux::runtime::docker::DockerRuntime::new().build_run_args_pty("img", "/repo", &[], &env, None, false, None, None);
     assert!(args.contains(&"-e".to_string()));
     assert!(args.contains(&"ANTHROPIC_API_KEY=sk-test".to_string()));
 }
@@ -348,14 +351,15 @@ fn agent_env_vars_passed_to_container() {
 #[test]
 fn display_args_mask_env_var_values() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-secret".into())];
-    let args = amux::docker::build_run_args_display("img", "/repo", &[], &env, None, false, None, None);
+    use amux::runtime::{AgentRuntime};
+    let args = amux::runtime::docker::DockerRuntime::new().build_run_args_display("img", "/repo", &[], &env, None, false, None, None);
     assert!(
         args.contains(&"ANTHROPIC_API_KEY=***".to_string()),
         "Display args must mask env var values, got: {:?}",
         args
     );
     assert!(
-        !args.iter().any(|a| a.contains("sk-secret")),
+        !args.iter().any(|a: &String| a.contains("sk-secret")),
         "Display args must not contain actual secret"
     );
 }
@@ -757,9 +761,9 @@ fn container_pty_output_routing() {
 
 #[test]
 fn docker_stats_parsing() {
-    assert!((amux::docker::parse_cpu_percent("5.23%") - 5.23).abs() < 0.001);
-    assert!((amux::docker::parse_memory_mb("200MiB") - 200.0).abs() < 0.1);
-    assert!((amux::docker::parse_memory_mb("1.5GiB") - 1536.0).abs() < 0.1);
+    assert!((amux::runtime::docker::parse_cpu_percent("5.23%") - 5.23).abs() < 0.001);
+    assert!((amux::runtime::docker::parse_memory_mb("200MiB") - 200.0).abs() < 0.1);
+    assert!((amux::runtime::docker::parse_memory_mb("1.5GiB") - 1536.0).abs() < 0.1);
 }
 
 // ---------------------------------------------------------------------------
@@ -768,7 +772,7 @@ fn docker_stats_parsing() {
 
 #[test]
 fn container_name_generation() {
-    let name = amux::docker::generate_container_name();
+    let name = amux::runtime::docker::generate_container_name();
     assert!(name.starts_with("amux-"));
 }
 
@@ -805,14 +809,15 @@ fn agent_display_names() {
 
 #[test]
 fn pty_args_container_name() {
-    let args = amux::docker::build_run_args_pty(
-        "img", "/repo", &[], &[], Some("amux-test-42"), None, false, None,
+    use amux::runtime::AgentRuntime;
+    let args = amux::runtime::docker::DockerRuntime::new().build_run_args_pty(
+        "img", "/repo", &[], &[], None, false, Some("amux-test-42"), None,
     );
     assert!(args.contains(&"--name".to_string()));
     assert!(args.contains(&"amux-test-42".to_string()));
 
-    let args_no_name = amux::docker::build_run_args_pty(
-        "img", "/repo", &[], &[], None, None, false, None,
+    let args_no_name = amux::runtime::docker::DockerRuntime::new().build_run_args_pty(
+        "img", "/repo", &[], &[], None, false, None, None,
     );
     assert!(!args_no_name.contains(&"--name".to_string()));
 }
@@ -921,7 +926,8 @@ fn agent_credentials_default_is_empty() {
 #[test]
 fn docker_args_without_settings_has_workspace_mount_only() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-ant-oat01-test".into())];
-    let args = amux::docker::build_run_args("img", "/repo", &[], &env, None, false, None, None);
+    use amux::runtime::AgentRuntime;
+    let args = amux::runtime::docker::DockerRuntime::new().build_run_args_pty("img", "/repo", &[], &env, None, false, None, None);
     // Without host_settings or allow_docker, only the workspace mount should be present.
     let volume_mounts: Vec<&String> = args.windows(2)
         .filter(|w| w[0] == "-v")
@@ -929,7 +935,7 @@ fn docker_args_without_settings_has_workspace_mount_only() {
         .collect();
     assert_eq!(volume_mounts.len(), 1, "Expected exactly one volume mount (workspace only). Got: {:?}", volume_mounts);
     assert!(volume_mounts[0].contains(":/workspace"), "The only mount should be the workspace");
-    assert!(!args.iter().any(|a| a.contains("credentials")), "Must not mount any credential files");
+    assert!(!args.iter().any(|a: &String| a.contains("credentials")), "Must not mount any credential files");
 }
 
 // ---------------------------------------------------------------------------
@@ -939,9 +945,10 @@ fn docker_args_without_settings_has_workspace_mount_only() {
 #[test]
 fn docker_display_args_mask_secrets() {
     let env = vec![("ANTHROPIC_API_KEY".into(), "sk-ant-oat01-secret".into())];
-    let args = amux::docker::build_run_args_display("img", "/repo", &[], &env, None, false, None, None);
+    use amux::runtime::AgentRuntime;
+    let args = amux::runtime::docker::DockerRuntime::new().build_run_args_display("img", "/repo", &[], &env, None, false, None, None);
     assert!(args.contains(&"ANTHROPIC_API_KEY=***".to_string()), "API key should be masked");
-    assert!(!args.iter().any(|a| a.contains("sk-ant-oat01-secret")), "Secret must not appear");
+    assert!(!args.iter().any(|a: &String| a.contains("sk-ant-oat01-secret")), "Secret must not appear");
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,8 +1036,10 @@ fn chat_and_implement_share_docker_args() {
     let chat_ep_refs: Vec<&str> = chat_ep.iter().map(String::as_str).collect();
     let impl_ep_refs: Vec<&str> = impl_ep.iter().map(String::as_str).collect();
 
-    let chat_args = amux::docker::build_run_args("img", "/repo", &chat_ep_refs, &[], None, false, None, None);
-    let impl_args = amux::docker::build_run_args("img", "/repo", &impl_ep_refs, &[], None, false, None, None);
+    use amux::runtime::AgentRuntime;
+    let rt = amux::runtime::docker::DockerRuntime::new();
+    let chat_args = rt.build_run_args_pty("img", "/repo", &chat_ep_refs, &[], None, false, None, None);
+    let impl_args = rt.build_run_args_pty("img", "/repo", &impl_ep_refs, &[], None, false, None, None);
 
     // Both should start with the same Docker flags.
     assert_eq!(chat_args[0], impl_args[0]); // "run"
@@ -1162,7 +1171,7 @@ fn pending_command_ready_build_no_cache_fields() {
 
 #[test]
 fn docker_format_build_cmd_no_cache() {
-    let cmd = amux::docker::format_build_cmd_no_cache("docker", "img:latest", "Dockerfile.dev", "/repo");
+    let cmd = amux::runtime::docker::format_build_cmd_no_cache("docker", "img:latest", "Dockerfile.dev", "/repo");
     assert!(cmd.contains("--no-cache"), "Should contain --no-cache flag");
     assert!(cmd.contains("img:latest"), "Should contain image tag");
     assert!(cmd.contains("Dockerfile.dev"), "Should contain dockerfile");
@@ -1641,12 +1650,12 @@ fn pending_command_ready_allow_docker_field() {
 
 #[test]
 fn allow_docker_adds_socket_mount_to_implement_run_args() {
-    use amux::docker::build_run_args;
+    use amux::runtime::AgentRuntime;
 
-    let socket_path = amux::docker::docker_socket_path();
+    let socket_path = amux::runtime::docker::docker_socket_path();
     let socket_str = socket_path.to_string_lossy().to_string();
 
-    let args = build_run_args(
+    let args = amux::runtime::docker::DockerRuntime::new().build_run_args_pty(
         "test-image",
         "/workspace",
         &["entrypoint.sh"],
@@ -1671,12 +1680,12 @@ fn allow_docker_adds_socket_mount_to_implement_run_args() {
 
 #[test]
 fn no_allow_docker_omits_socket_mount_from_implement_run_args() {
-    use amux::docker::build_run_args;
+    use amux::runtime::AgentRuntime;
 
-    let socket_path = amux::docker::docker_socket_path();
+    let socket_path = amux::runtime::docker::docker_socket_path();
     let socket_str = socket_path.to_string_lossy().to_string();
 
-    let args = build_run_args(
+    let args = amux::runtime::docker::DockerRuntime::new().build_run_args_pty(
         "test-image",
         "/workspace",
         &["entrypoint.sh"],
@@ -1750,8 +1759,9 @@ async fn init_uses_explicit_cwd_not_process_cwd() {
     let sink1 = OutputSink::Channel(tx1);
 
     // Run init pointing at the git repo — should succeed.
+    let runtime1 = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
     let result_ok =
-        init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink1, git_repo.path())
+        init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink1, git_repo.path(), runtime1)
             .await;
     assert!(
         result_ok.is_ok(),
@@ -1773,8 +1783,9 @@ async fn init_uses_explicit_cwd_not_process_cwd() {
     let sink2 = OutputSink::Channel(tx2);
 
     // Run init pointing at a directory without a git repo — should fail.
+    let runtime2 = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
     let result_err =
-        init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink2, no_repo.path())
+        init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink2, no_repo.path(), runtime2)
             .await;
     assert!(
         result_err.is_err(),
@@ -2213,7 +2224,7 @@ fn print_claws_summary_outputs_all_rows() {
 #[test]
 fn audit_container_name_has_amux_prefix() {
     // The audit container must have an amux- name so it is identifiable in docker ps.
-    let name = amux::docker::generate_container_name();
+    let name = amux::runtime::docker::generate_container_name();
     assert!(
         name.starts_with("amux-"),
         "Audit container name must have amux- prefix, got: {}",
@@ -2224,25 +2235,24 @@ fn audit_container_name_has_amux_prefix() {
 #[test]
 fn build_run_args_pty_at_path_includes_name_and_prompt() {
     use amux::commands::ready::audit_entrypoint;
-    use amux::docker;
+    use amux::runtime::AgentRuntime;
 
     let nanoclaw_str = "/home/user/.nanoclaw";
     let agent_name = "claude";
-    let container_name = docker::generate_container_name();
+    let container_name = amux::runtime::docker::generate_container_name();
     let entrypoint = audit_entrypoint(agent_name);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    let args = docker::build_run_args_pty_at_path(
+    let args = amux::runtime::docker::DockerRuntime::new().build_run_args_pty_at_path(
         amux::commands::claws::NANOCLAW_IMAGE_TAG,
         nanoclaw_str,
         nanoclaw_str,
         nanoclaw_str,
         &entrypoint_refs,
         &[],
-        Some(&container_name),
         None,
         false,
-        None,
+        Some(&container_name),
     );
 
     // Container name must appear.

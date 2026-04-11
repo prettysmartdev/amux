@@ -178,7 +178,8 @@ async fn init_downloads_aspec_folder_when_missing() {
     let out = OutputSink::Channel(tx);
 
     // Pass aspec=true so the aspec folder is downloaded.
-    let result = init::run_with_sink(Agent::Claude, true, false, false, &out, tmp.path()).await;
+    let runtime = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
+    let result = init::run_with_sink(Agent::Claude, true, false, false, &out, tmp.path(), runtime).await;
 
     assert!(result.is_ok(), "Init failed: {:?}", result.err());
 
@@ -217,7 +218,8 @@ async fn init_skips_aspec_download_when_folder_exists() {
     let out = OutputSink::Channel(tx);
 
     // Pass aspec=true so init tries to download, but the folder already exists.
-    let result = init::run_with_sink(Agent::Claude, true, false, false, &out, tmp.path()).await;
+    let runtime = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
+    let result = init::run_with_sink(Agent::Claude, true, false, false, &out, tmp.path(), runtime).await;
 
     assert!(result.is_ok(), "Init failed: {:?}", result.err());
 

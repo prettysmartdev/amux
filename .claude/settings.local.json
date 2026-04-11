@@ -84,7 +84,27 @@
       "Bash(gh api:*)",
       "Bash(node -e \":*)",
       "WebFetch(domain:maki.sh)",
-      "Bash(echo \"EXIT:$?\")"
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(sed -n '25,33p' /workspace/src/cli.rs)",
+      "Bash(sed -n '18,21p' /workspace/src/commands/mod.rs)",
+      "Bash(sed -n '34,35p' /workspace/src/commands/init.rs)",
+      "Bash(sed -n '81,88p' /workspace/src/commands/init.rs)",
+      "Bash(sed -n '808,818p' /workspace/src/tui/mod.rs)",
+      "Bash(sed -n '20,21p' /workspace/src/main.rs)",
+      "Bash(sed -n '569,590p' /workspace/src/runtime/mod.rs)",
+      "Bash(sed -n '189,209p' /workspace/src/commands/init.rs)",
+      "Bash(sed -n '238,256p' /workspace/src/commands/init.rs)",
+      "Bash(sed -n '275,295p' /workspace/src/commands/init.rs)",
+      "Bash(sed -n '413,426p' /workspace/src/commands/init.rs)",
+      "Bash(sed -n '193,200p' /workspace/src/docker/mod.rs)",
+      "Bash(sed -n '271,280p' /workspace/src/docker/mod.rs)",
+      "Bash(sed -n '29,50p' /workspace/src/config/mod.rs)",
+      "Bash(sed -n '146,157p' /workspace/src/config/mod.rs)",
+      "Bash(sed -n '124,132p' /workspace/src/config/mod.rs)",
+      "Bash(sed -n '5,27p' /workspace/src/config/mod.rs)",
+      "WebFetch(domain:geminicli.com)",
+      "Bash(RUSTFLAGS=\"-W unused-imports -W dead-code -W unused-variables -W unused-mut\" cargo build)",
+      "Bash(perl:*)"
     ]
   }
 }

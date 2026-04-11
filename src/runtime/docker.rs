@@ -2,14 +2,17 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::runtime::{AgentRuntime, ContainerStats, HostSettings, StoppedContainerInfo};
+use crate::runtime::{AgentRuntime, StoppedContainerInfo};
+
+// Re-export shared types so callers can use `use crate::runtime::docker as docker`
+// and access docker::HostSettings, docker::ContainerStats directly.
+pub use crate::runtime::ContainerStats;
+pub use crate::runtime::HostSettings;
 
 /// Docker-backed implementation of `AgentRuntime`.
 ///
-/// Calls the `docker` CLI directly. The companion free functions in
-/// `crate::docker` are separate and remain for backward compatibility; this
-/// struct implements the `AgentRuntime` trait independently so that
-/// `runtime::DockerRuntime` has no import cycle with `crate::docker`.
+/// Calls the `docker` CLI directly. Free utility functions (`check_docker_socket`,
+/// `project_image_tag`, etc.) are also defined in this module alongside the trait impl.
 pub struct DockerRuntime;
 
 impl DockerRuntime {
@@ -26,7 +29,7 @@ impl Default for DockerRuntime {
 
 // ─── Private helpers ────────────────────────────────────────────────────────
 
-fn docker_socket_path() -> PathBuf {
+pub fn docker_socket_path() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         PathBuf::from(r"\\.\pipe\docker_engine")
@@ -60,26 +63,38 @@ fn append_docker_socket_mount_args(args: &mut Vec<String>) {
 }
 
 fn append_settings_mounts(args: &mut Vec<String>, settings: &HostSettings) {
-    args.push("-v".into());
-    args.push(format!(
-        "{}:{}/.claude.json",
-        settings.config_path.display(),
-        settings.container_home,
-    ));
-    args.push("-v".into());
-    args.push(format!(
-        "{}:{}/.claude",
-        settings.claude_dir_path.display(),
-        settings.container_home,
-    ));
+    if settings.mount_claude_files {
+        args.push("-v".into());
+        args.push(format!(
+            "{}:{}/.claude.json",
+            settings.config_path.display(),
+            settings.container_home,
+        ));
+        args.push("-v".into());
+        args.push(format!(
+            "{}:{}/.claude",
+            settings.claude_dir_path.display(),
+            settings.container_home,
+        ));
+    }
+    if let Some((host_dir, container_dir)) = &settings.agent_config_dir {
+        args.push("-v".into());
+        args.push(format!("{}:{}", host_dir.display(), container_dir));
+    }
 }
 
 fn append_settings_mounts_display(args: &mut Vec<String>, settings: Option<&HostSettings>) {
     let home = settings.map(|s| s.container_home.as_str()).unwrap_or("/root");
-    args.push("-v".into());
-    args.push(format!("<settings>:{}/.claude.json", home));
-    args.push("-v".into());
-    args.push(format!("<settings>:{}/.claude", home));
+    if settings.map(|s| s.mount_claude_files).unwrap_or(true) {
+        args.push("-v".into());
+        args.push(format!("<settings>:{}/.claude.json", home));
+        args.push("-v".into());
+        args.push(format!("<settings>:{}/.claude", home));
+    }
+    if settings.and_then(|s| s.agent_config_dir.as_ref()).is_some() {
+        args.push("-v".into());
+        args.push("<agent-config>:<agent-config-dir>".into());
+    }
 }
 
 fn append_entrypoint(args: &mut Vec<String>, image: &str, entrypoint: &[&str]) {
@@ -872,11 +887,97 @@ impl AgentRuntime for DockerRuntime {
     }
 }
 
+// ─── Free utilities ─────────────────────────────────────────────────────────
+
+/// Checks that the host Docker daemon socket file exists and is accessible.
+///
+/// Returns the socket path on success, or an error if the socket is not found.
+pub fn check_docker_socket() -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::bail;
+    let path = docker_socket_path();
+    if !path.exists() {
+        bail!(
+            "Docker socket not found at {}. Ensure the Docker daemon is running and accessible.",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+/// Derives the project-specific image tag from the Git root folder name.
+///
+/// E.g. `/home/user/myproject` → `amux-myproject:latest`.
+pub fn project_image_tag(git_root: &Path) -> String {
+    let project_name = git_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+    format!("amux-{}:latest", project_name)
+}
+
+/// Generate a unique container name for amux-managed containers.
+pub fn generate_container_name() -> String {
+    use std::time::SystemTime;
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let pid = std::process::id();
+    format!("amux-{}-{}", pid, ts.subsec_nanos())
+}
+
+/// Parse a CPU percentage string like "5.23%" into a f64 (5.23).
+pub fn parse_cpu_percent(s: &str) -> f64 {
+    s.trim_end_matches('%').trim().parse::<f64>().unwrap_or(0.0)
+}
+
+/// Parse a memory string like "200MiB" or "1.5GiB" into megabytes as f64.
+pub fn parse_memory_mb(s: &str) -> f64 {
+    let s = s.trim();
+    if let Some(val) = s.strip_suffix("GiB") {
+        val.trim().parse::<f64>().unwrap_or(0.0) * 1024.0
+    } else if let Some(val) = s.strip_suffix("MiB") {
+        val.trim().parse::<f64>().unwrap_or(0.0)
+    } else if let Some(val) = s.strip_suffix("KiB") {
+        val.trim().parse::<f64>().unwrap_or(0.0) / 1024.0
+    } else if let Some(val) = s.strip_suffix("B") {
+        val.trim().parse::<f64>().unwrap_or(0.0) / (1024.0 * 1024.0)
+    } else {
+        0.0
+    }
+}
+
+/// Formats a build invocation as a single-line CLI string for display.
+pub fn format_build_cmd(binary: &str, tag: &str, dockerfile: &str, context: &str) -> String {
+    format!("{} build -t {} -f {} {}", binary, tag, dockerfile, context)
+}
+
+/// Formats a build `--no-cache` invocation as a single-line CLI string for display.
+pub fn format_build_cmd_no_cache(binary: &str, tag: &str, dockerfile: &str, context: &str) -> String {
+    format!("{} build --no-cache -t {} -f {} {}", binary, tag, dockerfile, context)
+}
+
+/// Returns true if the Docker daemon is running and accessible.
+pub fn is_daemon_running() -> bool {
+    Command::new("docker")
+        .args(["info", "--format", "{{.ServerVersion}}"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::DockerRuntime;
+    use super::{
+        check_docker_socket, docker_socket_path, format_build_cmd, format_build_cmd_no_cache,
+        generate_container_name, parse_cpu_percent, parse_memory_mb,
+        project_image_tag, DockerRuntime,
+    };
+    #[allow(unused_imports)]
+    use super::is_daemon_running;
     use crate::runtime::{AgentRuntime, HostSettings};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn rt() -> DockerRuntime {
         DockerRuntime::new()
@@ -1195,5 +1296,114 @@ mod tests {
         }
         let result = rt().get_container_workspace_mount("amux-test-nonexistent-container-zzz-99999");
         assert!(result.is_none());
+    }
+
+    // ─── Free utility tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn project_image_tag_from_git_root() {
+        let tag = project_image_tag(Path::new("/home/user/myproject"));
+        assert_eq!(tag, "amux-myproject:latest");
+    }
+
+    #[test]
+    fn project_image_tag_handles_root_path() {
+        let tag = project_image_tag(Path::new("/"));
+        assert_eq!(tag, "amux-project:latest");
+    }
+
+    #[test]
+    fn generate_container_name_is_unique() {
+        let name1 = generate_container_name();
+        // Small sleep to ensure different nanos
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let name2 = generate_container_name();
+        assert!(name1.starts_with("amux-"));
+        assert!(name2.starts_with("amux-"));
+        assert_ne!(name1, name2);
+    }
+
+    #[test]
+    fn parse_cpu_percent_valid() {
+        assert!((parse_cpu_percent("5.23%") - 5.23).abs() < 0.001);
+        assert!((parse_cpu_percent("0.00%") - 0.0).abs() < 0.001);
+        assert!((parse_cpu_percent("100%") - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_cpu_percent_invalid() {
+        assert!((parse_cpu_percent("not-a-number") - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_memory_mb_various_units() {
+        assert!((parse_memory_mb("200MiB") - 200.0).abs() < 0.1);
+        assert!((parse_memory_mb("1.5GiB") - 1536.0).abs() < 0.1);
+        assert!((parse_memory_mb("512KiB") - 0.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn format_build_cmd_produces_valid_string() {
+        let cmd = format_build_cmd("docker", "amux-test:latest", "Dockerfile.dev", "/repo");
+        assert_eq!(
+            cmd,
+            "docker build -t amux-test:latest -f Dockerfile.dev /repo"
+        );
+    }
+
+    #[test]
+    fn format_build_cmd_no_cache_produces_valid_string() {
+        let cmd = format_build_cmd_no_cache("docker", "amux-test:latest", "Dockerfile.dev", "/repo");
+        assert_eq!(
+            cmd,
+            "docker build --no-cache -t amux-test:latest -f Dockerfile.dev /repo"
+        );
+    }
+
+    #[test]
+    fn docker_socket_path_is_nonempty() {
+        let path = docker_socket_path();
+        assert!(!path.as_os_str().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_socket_path_linux() {
+        let path = docker_socket_path();
+        assert_eq!(path.to_str().unwrap(), "/var/run/docker.sock");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn docker_socket_path_macos() {
+        let path = docker_socket_path();
+        assert_eq!(path.to_str().unwrap(), "/var/run/docker.sock");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn docker_socket_path_windows() {
+        let path = docker_socket_path();
+        let s = path.to_string_lossy();
+        assert!(s.contains("docker_engine"), "Windows path should reference docker_engine pipe");
+    }
+
+    #[test]
+    fn check_docker_socket_fails_on_missing_path() {
+        // On a system where Docker is not installed at the default path, this
+        // test verifies the error message. If the socket exists (Docker is running),
+        // we skip the negative assertion.
+        let path = docker_socket_path();
+        if path.exists() {
+            // Socket exists — check_docker_socket should succeed.
+            let result = check_docker_socket();
+            assert!(result.is_ok(), "Socket exists but check_docker_socket failed");
+        } else {
+            // Socket missing — check_docker_socket should return an error.
+            let result = check_docker_socket();
+            assert!(result.is_err(), "Expected error when socket is missing");
+            let msg = format!("{}", result.unwrap_err());
+            assert!(msg.contains("Docker socket not found"), "Error message should mention socket: {}", msg);
+        }
     }
 }

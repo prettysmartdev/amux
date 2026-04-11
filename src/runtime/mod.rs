@@ -60,22 +60,34 @@ pub struct StoppedContainerInfo {
 
 /// Host-machine agent settings prepared for injection into a container.
 ///
-/// Stores sanitized config files in a temporary directory. The directory is
-/// bind-mounted into the container as `<container_home>/.claude.json` and
-/// `<container_home>/.claude`. The temp directory is automatically cleaned up
-/// when this struct is dropped (RAII via `tempfile::TempDir`).
+/// Stores sanitized config files in a temporary directory. The temp directory is
+/// automatically cleaned up when this struct is dropped (RAII via `tempfile::TempDir`).
+///
+/// For claude: bind-mounts `<container_home>/.claude.json` and `<container_home>/.claude`.
+/// For other agents (e.g. opencode): only `agent_config_dir` is mounted.
 pub struct HostSettings {
     /// Kept alive so the temp dir survives as long as the container runs.
-    /// `None` when created via `from_paths` (caller manages the backing directory).
+    /// `None` when created via `from_paths` or `clone_view` (caller manages the directory).
     _temp_dir: Option<tempfile::TempDir>,
-    /// Path to the sanitized `.claude.json` inside the temp dir.
+    /// Path to the sanitized `.claude.json` inside the temp dir (claude-only).
+    /// Empty when `mount_claude_files` is false.
     pub config_path: PathBuf,
-    /// Path to the copied `.claude/` directory inside the temp dir.
+    /// Path to the copied `.claude/` directory inside the temp dir (claude-only).
+    /// Empty when `mount_claude_files` is false.
     pub claude_dir_path: PathBuf,
     /// Home directory path inside the container for mounting agent settings.
     /// Defaults to `/root`. Set to `/home/<username>` when `Dockerfile.dev`
     /// specifies a non-root USER directive.
     pub container_home: String,
+    /// When `true`, the `.claude.json` and `.claude/` bind-mounts are added to the
+    /// container run args. Set to `false` for non-claude agents (e.g. opencode).
+    pub mount_claude_files: bool,
+    /// Optional agent-specific config directory to bind-mount (read-write).
+    ///
+    /// `(host_path, container_path)`. Example for opencode:
+    /// `(~/.local/share/opencode/, /root/.local/share/opencode)`.
+    /// Mounted read-write because the source is a temp copy, not the live host directory.
+    pub agent_config_dir: Option<(PathBuf, String)>,
 }
 
 /// Top-level entries in `~/.claude/` that are large, host-specific, or
@@ -153,6 +165,8 @@ impl HostSettings {
             config_path,
             claude_dir_path,
             container_home: "/root".to_string(),
+            mount_claude_files: true,
+            agent_config_dir: None,
         })
     }
 
@@ -206,6 +220,8 @@ impl HostSettings {
             config_path,
             claude_dir_path,
             container_home: "/root".to_string(),
+            mount_claude_files: true,
+            agent_config_dir: None,
         })
     }
 
@@ -220,6 +236,45 @@ impl HostSettings {
             config_path,
             claude_dir_path,
             container_home: "/root".to_string(),
+            mount_claude_files: true,
+            agent_config_dir: None,
+        }
+    }
+
+    /// Creates a `HostSettings` for non-claude agents that use a single config directory.
+    ///
+    /// Sets `mount_claude_files = false` so the `.claude.json` and `.claude/` bind-mounts
+    /// are skipped. The `agent_config_dir` mount is used instead (e.g. opencode's
+    /// `~/.local/share/opencode/`). `config_path` and `claude_dir_path` are set to empty
+    /// placeholder values that are never mounted.
+    pub(crate) fn new_agent_dir(
+        temp_dir: Option<tempfile::TempDir>,
+        container_home: String,
+        agent_config_dir: Option<(PathBuf, String)>,
+    ) -> Self {
+        HostSettings {
+            _temp_dir: temp_dir,
+            config_path: PathBuf::new(),
+            claude_dir_path: PathBuf::new(),
+            container_home,
+            mount_claude_files: false,
+            agent_config_dir,
+        }
+    }
+
+    /// Creates a non-owning view of `self` for use in closures.
+    ///
+    /// The backing `TempDir` is NOT included — the caller must ensure that the
+    /// original `HostSettings` (which owns the `TempDir`) stays alive for as long as
+    /// this view is used. Preserves `mount_claude_files` and `agent_config_dir`.
+    pub fn clone_view(&self) -> Self {
+        HostSettings {
+            _temp_dir: None,
+            config_path: self.config_path.clone(),
+            claude_dir_path: self.claude_dir_path.clone(),
+            container_home: self.container_home.clone(),
+            mount_claude_files: self.mount_claude_files,
+            agent_config_dir: self.agent_config_dir.clone(),
         }
     }
 
@@ -228,7 +283,12 @@ impl HostSettings {
     /// Claude Code shows a one-time confirmation dialog when first launched with
     /// `--dangerously-skip-permissions`. Setting this key suppresses the dialog so
     /// unattended `--yolo` runs are not blocked waiting for user input.
+    ///
+    /// No-op for non-claude agents (`mount_claude_files == false`).
     pub fn apply_yolo_settings(&self) -> std::io::Result<()> {
+        if !self.mount_claude_files {
+            return Ok(()); // Not a Claude agent; no yolo settings file to modify.
+        }
         let settings_path = self.claude_dir_path.join("settings.json");
         let mut settings: serde_json::Value = if settings_path.exists() {
             let raw = std::fs::read_to_string(&settings_path)?;
@@ -264,6 +324,8 @@ impl HostSettings {
             config_path,
             claude_dir_path,
             container_home: "/root".to_string(),
+            mount_claude_files: true,
+            agent_config_dir: None,
         })
     }
 }
@@ -304,6 +366,9 @@ pub fn container_home_for_user(username: &str) -> String {
 /// Detects the last USER directive in `Dockerfile.dev` and, if it names a non-root user,
 /// updates `container_home` in `settings` and returns a message to display to the user.
 ///
+/// Also remaps any `agent_config_dir` container path that starts with `/root/` to the
+/// correct home directory for the detected user (e.g. `/home/agent/.local/share/opencode`).
+///
 /// Returns `None` if the file has no USER directive, if the effective user is `root`, or
 /// if the file cannot be read. Settings are mutated only when a non-root user is found.
 pub fn apply_dockerfile_user(settings: &mut HostSettings, dockerfile_path: &Path) -> Option<String> {
@@ -313,8 +378,17 @@ pub fn apply_dockerfile_user(settings: &mut HostSettings, dockerfile_path: &Path
     }
     let home = container_home_for_user(&user);
     settings.container_home = home.clone();
+    // Remap agent_config_dir container path from /root/ to the correct home.
+    if let Some((host_path, container_path)) = settings.agent_config_dir.take() {
+        let new_container_path = if let Some(relative) = container_path.strip_prefix("/root/") {
+            format!("{}/{}", home, relative)
+        } else {
+            container_path
+        };
+        settings.agent_config_dir = Some((host_path, new_container_path));
+    }
     Some(format!(
-        "Dockerfile.dev sets USER to '{}'; mounting Claude settings at {}",
+        "Dockerfile.dev sets USER to '{}'; mounting agent settings at {}",
         user, home
     ))
 }

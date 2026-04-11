@@ -2,13 +2,12 @@ use crate::commands::agent::run_agent_with_sink;
 use crate::commands::auth::resolve_auth;
 use crate::commands::implement::{confirm_mount_scope_stdin, find_work_item, parse_work_item};
 use crate::commands::init::{find_git_root, find_git_root_from};
-use crate::commands::new::{
-    create_file_return_number, is_vscode_terminal, open_in_vscode, prompt_kind, prompt_title,
-    WorkItemKind,
-};
+#[cfg(not(test))]
+use crate::commands::new::{is_vscode_terminal, open_in_vscode};
+use crate::commands::new::{create_file_return_number, prompt_kind, prompt_title, WorkItemKind};
 use crate::commands::output::OutputSink;
 use crate::config::load_repo_config;
-use crate::docker;
+use crate::runtime::docker as docker;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -165,7 +164,7 @@ pub async fn run_new_with_sink(
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
     let agent = agent_name_from_config(&git_root)?;
     let credentials = resolve_auth(&git_root, &agent)?;
-    let host_settings = docker::HostSettings::prepare(&agent);
+    let host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
 
     let entrypoint = interview_agent_entrypoint(&agent, number, &kind, &title, &summary);
 
@@ -190,10 +189,9 @@ pub async fn run_new_with_sink(
     .await?;
 
     // Open the work item file in VS Code after the agent finishes.
-    let work_item_path = find_work_item(&git_root, number).ok();
     #[cfg(not(test))]
     if is_vscode_terminal() {
-        if let Some(path) = work_item_path {
+        if let Some(path) = find_work_item(&git_root, number).ok() {
             open_in_vscode(&path);
             out.println(format!("Opened work item {:04} in VS Code.", number));
         }
@@ -217,7 +215,7 @@ pub async fn run_amend(
     let _ = find_work_item(&git_root, work_item)?;
 
     let credentials = resolve_auth(&git_root, &agent)?;
-    let host_settings = docker::HostSettings::prepare(&agent);
+    let host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
 
     let entrypoint = if non_interactive {
         amend_agent_entrypoint_non_interactive(&agent, work_item)

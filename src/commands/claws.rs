@@ -5,7 +5,7 @@ use crate::commands::download;
 use crate::commands::output::OutputSink;
 use crate::commands::ready::StepStatus;
 use crate::config::load_repo_config;
-use crate::docker;
+use crate::runtime::docker as docker;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -899,7 +899,7 @@ async fn run_first_time_wizard(out: &OutputSink, summary: &mut ClawsSummary, run
     };
     let credentials = agent_keychain_credentials(&agent_name);
     // Prepare sanitized host config kept alive for the full duration of the wizard.
-    let host_settings = docker::HostSettings::prepare(&agent_name);
+    let host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
 
     // Download Dockerfile.nanoclaw, build image once, show audit explanation dialog.
     let ctx = build_nanoclaw_image(out, &credentials.env_vars, summary, host_settings.as_ref(), runtime).await?;
@@ -1010,7 +1010,7 @@ async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary, runt
                         let agent_name = agent_name_owned.as_str();
                         let credentials = agent_keychain_credentials(agent_name);
                         let settings_dir = nanoclaw_settings_dir();
-                        let host_settings = docker::HostSettings::prepare_to_dir(agent_name, &settings_dir);
+                        let host_settings = crate::passthrough::passthrough_for_agent(agent_name).prepare_host_settings_to_dir(&settings_dir);
                         out.println(format!("Starting nanoclaw controller container {}...", NANOCLAW_CONTROLLER_NAME));
                         let container_id = runtime.run_container_detached(
                             NANOCLAW_IMAGE_TAG,
@@ -1071,7 +1071,7 @@ async fn run_subsequent_check(out: &OutputSink, summary: &mut ClawsSummary, runt
     let credentials = agent_keychain_credentials(agent_name);
     // Prepare sanitized host config (same as `chat`/`implement` auto-configuration).
     let settings_dir = nanoclaw_settings_dir();
-    let host_settings = docker::HostSettings::prepare_to_dir(agent_name, &settings_dir);
+    let host_settings = crate::passthrough::passthrough_for_agent(agent_name).prepare_host_settings_to_dir(&settings_dir);
 
     // Launch controller container.
     out.println(format!("Starting nanoclaw controller container {}...", NANOCLAW_CONTROLLER_NAME));

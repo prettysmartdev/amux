@@ -4,7 +4,7 @@ use crate::commands::implement::confirm_mount_scope_stdin;
 use crate::commands::init::{ask_yes_no_stdin, dockerfile_for_agent_embedded, find_git_root, find_git_root_from, write_dockerfile};
 use crate::commands::output::OutputSink;
 use crate::config::{load_repo_config, migrate_legacy_repo_config};
-use crate::docker;
+use crate::runtime::docker as docker;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
@@ -276,7 +276,7 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
     let agent_name = config.agent.as_deref().unwrap_or("claude");
     let credentials = resolve_auth(&git_root, agent_name)?;
     let env_vars = credentials.env_vars.clone();
-    let host_settings = crate::runtime::HostSettings::prepare(agent_name);
+    let host_settings = crate::passthrough::passthrough_for_agent(agent_name).prepare_host_settings();
     let out = &OutputSink::Stdout;
 
     // Determine whether to auto-create Dockerfile.dev or prompt the user.

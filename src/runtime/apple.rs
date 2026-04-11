@@ -58,33 +58,45 @@ fn append_ssh_mount(args: &mut Vec<String>, ssh_dir: Option<&Path>) {
 fn append_docker_socket_mount_args(args: &mut Vec<String>) {
     // When running inside Apple Containers with allow_docker, mount the
     // Docker socket so nested Docker calls work.
-    let path = crate::docker::docker_socket_path();
+    let path = crate::runtime::docker::docker_socket_path();
     let path_str = path.to_string_lossy().to_string();
     args.push("-v".into());
     args.push(format!("{}:{}", path_str, path_str));
 }
 
 fn append_settings_mounts(args: &mut Vec<String>, settings: &HostSettings) {
-    args.push("-v".into());
-    args.push(format!(
-        "{}:{}/.claude.json",
-        settings.config_path.display(),
-        settings.container_home,
-    ));
-    args.push("-v".into());
-    args.push(format!(
-        "{}:{}/.claude",
-        settings.claude_dir_path.display(),
-        settings.container_home,
-    ));
+    if settings.mount_claude_files {
+        args.push("-v".into());
+        args.push(format!(
+            "{}:{}/.claude.json",
+            settings.config_path.display(),
+            settings.container_home,
+        ));
+        args.push("-v".into());
+        args.push(format!(
+            "{}:{}/.claude",
+            settings.claude_dir_path.display(),
+            settings.container_home,
+        ));
+    }
+    if let Some((host_dir, container_dir)) = &settings.agent_config_dir {
+        args.push("-v".into());
+        args.push(format!("{}:{}", host_dir.display(), container_dir));
+    }
 }
 
 fn append_settings_mounts_display(args: &mut Vec<String>, settings: Option<&HostSettings>) {
     let home = settings.map(|s| s.container_home.as_str()).unwrap_or("/root");
-    args.push("-v".into());
-    args.push(format!("<settings>:{}/.claude.json", home));
-    args.push("-v".into());
-    args.push(format!("<settings>:{}/.claude", home));
+    if settings.map(|s| s.mount_claude_files).unwrap_or(true) {
+        args.push("-v".into());
+        args.push(format!("<settings>:{}/.claude.json", home));
+        args.push("-v".into());
+        args.push(format!("<settings>:{}/.claude", home));
+    }
+    if settings.and_then(|s| s.agent_config_dir.as_ref()).is_some() {
+        args.push("-v".into());
+        args.push("<agent-config>:<agent-config-dir>".into());
+    }
 }
 
 fn append_entrypoint(args: &mut Vec<String>, image: &str, entrypoint: &[&str]) {
