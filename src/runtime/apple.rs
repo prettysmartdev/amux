@@ -13,7 +13,7 @@
 //! - Container ID == container name (no separate short hex ID)
 
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::runtime::{AgentRuntime, ContainerStats, HostSettings, StoppedContainerInfo};

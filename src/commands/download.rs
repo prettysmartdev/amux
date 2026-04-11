@@ -9,7 +9,7 @@ const ASPEC_CLI_RAW_BASE: &str =
 
 /// URL for downloading the aspec repo tarball.
 const ASPEC_REPO_TARBALL: &str =
-    "https://api.github.com/repos/prettysmartdev/amux/tarball/main";
+    "https://api.github.com/repos/prettysmartdev/aspec/tarball/main";
 
 /// Download a Dockerfile template for the given agent from GitHub.
 ///
@@ -125,7 +125,7 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>> {
 
 /// Extract the `aspec/` directory from a gzipped tarball into `dest`.
 ///
-/// The tarball from GitHub has a top-level directory like `prettysmartdev-amux-<sha>/`.
+/// The tarball from GitHub has a top-level directory like `prettysmartdev-aspec-<sha>/`.
 /// We look for entries under `<top>/aspec/` and strip that prefix.
 pub fn extract_aspec_from_tarball(tarball_bytes: &[u8], dest: &Path) -> Result<()> {
     use flate2::read::GzDecoder;
@@ -143,7 +143,7 @@ pub fn extract_aspec_from_tarball(tarball_bytes: &[u8], dest: &Path) -> Result<(
         let path_str = path.to_string_lossy().to_string();
 
         // GitHub tarballs have format: <owner>-<repo>-<sha>/aspec/...
-        // e.g. prettysmartdev-amux-abc123/aspec/foundation.md
+        // e.g. prettysmartdev-aspec-abc123/aspec/foundation.md
         // Find the first `/` to get the top-level dir, then look for /aspec/ after it.
         let components: Vec<&str> = path_str.split('/').collect();
         if components.len() < 2 {

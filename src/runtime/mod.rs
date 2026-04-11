@@ -646,6 +646,7 @@ pub fn resolve_runtime(
     let rt: std::sync::Arc<dyn AgentRuntime> = match config.runtime.as_deref().unwrap_or("docker") {
         #[cfg(target_os = "macos")]
         "apple-containers" => std::sync::Arc::new(apple::AppleContainersRuntime::new()),
+        #[cfg(not(target_os = "macos"))]
         "apple-containers" => {
             anyhow::bail!(
                 "'apple-containers' runtime requires macOS. \
