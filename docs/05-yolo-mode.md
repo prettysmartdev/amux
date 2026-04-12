@@ -52,6 +52,7 @@ The agent-specific skip-permissions flag is appended to the container entrypoint
 | `codex` | `--full-auto` |
 | `opencode` | *(no equivalent — a warning is printed, flag omitted)* |
 | `maki` | `--yolo` |
+| `gemini` | `--yolo` |
 
 ### 2. Applies `yoloDisallowedTools`
 
@@ -63,6 +64,7 @@ Any tools listed in `yoloDisallowedTools` in your config are passed to the agent
 | `codex` | *(no equivalent — a warning is printed)* |
 | `opencode` | *(no equivalent — a warning is printed)* |
 | `maki` | *(no equivalent — a warning is printed)* |
+| `gemini` | *(no equivalent — a warning is printed)* |
 
 ### 3. Implies `--worktree` when combined with `--workflow`
 
@@ -122,12 +124,31 @@ See [Configuration](07-configuration.md) for the full config reference.
 
 ---
 
+## `--auto` mode
+
+`--auto` is a less permissive alternative to `--yolo`. The agent auto-approves file edits and writes but still pauses before shell commands and other high-risk operations. Use it when you want to reduce confirmation prompts without granting full autonomy.
+
+| Agent | `--auto` flag |
+|-------|--------------|
+| `claude` | `--permission-mode auto` |
+| `codex` | `--full-auto` |
+| `opencode` | *(no equivalent — warning printed)* |
+| `maki` | `--yolo` (maki's own flag) |
+| `gemini` | `--approval-mode=auto_edit` |
+
+`--auto` applies `yoloDisallowedTools` config identically to `--yolo`. Combined with `--workflow`, it implies `--worktree` but does **not** auto-advance stuck steps (the countdown is `--yolo`-only).
+
+When both `--yolo` and `--auto` are passed, `--yolo` wins.
+
+---
+
 ## Security considerations
 
 - `--yolo` removes the human checkpoints that catch unintended agent actions. Only use it with agents and work items you trust.
 - The `yoloDisallowedTools` config provides a floor — operations the agent can never perform autonomously, even with `--yolo`.
 - Combine `--yolo` with `--workflow` to get automatic `--worktree` isolation, making it easy to review the full diff before merging into your main branch.
 - `--yolo --workflow` is the recommended pattern for long-running autonomous tasks: isolated branch, structured phases, auto-advancing, easy to discard if the output isn't right.
+- Gemini's `--yolo` flag skips all tool confirmations including shell commands. Gemini's `--approval-mode=auto_edit` (amux `--auto`) is the more conservative choice — file writes are approved automatically but shell operations are not.
 
 ---
 

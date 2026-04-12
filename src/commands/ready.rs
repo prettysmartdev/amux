@@ -209,6 +209,7 @@ pub fn dockerfile_matches_template(content: &str, agent_name: &str) -> bool {
         "codex" => Agent::Codex,
         "opencode" => Agent::Opencode,
         "maki" => Agent::Maki,
+        "gemini" => Agent::Gemini,
         _ => Agent::Claude,
     };
     let template = dockerfile_for_agent_embedded(&agent);
@@ -225,6 +226,7 @@ pub async fn check_local_agent(agent_name: &str) -> (StepStatus, String, String)
         "codex" => ("codex", vec!["--quiet", greeting]),
         "opencode" => ("opencode", vec!["run", greeting]),
         "maki" => ("maki", vec!["--print", greeting]),
+        "gemini" => ("gemini", vec!["-p", greeting]),
         _ => (agent_name, vec!["--print", greeting]),
     };
 
@@ -726,6 +728,7 @@ pub fn audit_entrypoint(agent: &str) -> Vec<String> {
         "codex" => vec!["codex".into(), AUDIT_PROMPT.into()],
         "opencode" => vec!["opencode".into(), "run".into(), AUDIT_PROMPT.into()],
         "maki" => vec!["maki".into(), AUDIT_PROMPT.into()],
+        "gemini" => vec!["gemini".into(), AUDIT_PROMPT.into()],
         _ => vec![agent.into(), AUDIT_PROMPT.into()],
     }
 }
@@ -742,6 +745,7 @@ pub fn audit_entrypoint_non_interactive(agent: &str) -> Vec<String> {
         "codex" => vec!["codex".into(), "--quiet".into(), AUDIT_PROMPT.into()],
         "opencode" => vec!["opencode".into(), "run".into(), AUDIT_PROMPT.into()],
         "maki" => vec!["maki".into(), "--print".into(), AUDIT_PROMPT.into()],
+        "gemini" => vec!["gemini".into(), "-p".into(), AUDIT_PROMPT.into()],
         _ => vec![agent.into(), AUDIT_PROMPT.into()],
     }
 }
@@ -751,6 +755,7 @@ fn agent_from_str(name: &str) -> Agent {
         "codex" => Agent::Codex,
         "opencode" => Agent::Opencode,
         "maki" => Agent::Maki,
+        "gemini" => Agent::Gemini,
         _ => Agent::Claude,
     }
 }
@@ -872,6 +877,44 @@ mod tests {
         assert!(matches!(agent_from_str("opencode"), Agent::Opencode));
         assert!(matches!(agent_from_str("maki"), Agent::Maki));
         assert!(matches!(agent_from_str("unknown"), Agent::Claude));
+    }
+
+    #[test]
+    fn agent_from_str_gemini() {
+        assert!(matches!(agent_from_str("gemini"), Agent::Gemini));
+    }
+
+    #[test]
+    fn audit_entrypoint_gemini() {
+        let args = audit_entrypoint("gemini");
+        assert_eq!(args[0], "gemini");
+        assert!(args[1].contains("scan this project"), "second arg must be the audit prompt");
+    }
+
+    #[test]
+    fn audit_entrypoint_non_interactive_gemini() {
+        let args = audit_entrypoint_non_interactive("gemini");
+        assert_eq!(args[0], "gemini");
+        assert_eq!(args[1], "-p");
+        assert!(args[2].contains("scan this project"), "third arg must be the audit prompt");
+    }
+
+    #[test]
+    fn dockerfile_matches_template_gemini_returns_true_for_gemini() {
+        let content = dockerfile_for_agent_embedded(&Agent::Gemini);
+        assert!(
+            dockerfile_matches_template(&content, "gemini"),
+            "gemini Dockerfile content must match the 'gemini' template"
+        );
+    }
+
+    #[test]
+    fn dockerfile_matches_template_gemini_returns_false_for_claude() {
+        let content = dockerfile_for_agent_embedded(&Agent::Gemini);
+        assert!(
+            !dockerfile_matches_template(&content, "claude"),
+            "gemini Dockerfile content must not match the 'claude' template"
+        );
     }
 
     #[test]

@@ -111,6 +111,7 @@ fn agent_name(git_root: &PathBuf) -> Result<&'static str> {
         "codex" => "codex",
         "opencode" => "opencode",
         "maki" => "maki",
+        "gemini" => "gemini",
         _ => "claude",
     })
 }
@@ -122,6 +123,7 @@ pub fn chat_entrypoint(agent: &str, plan: bool) -> Vec<String> {
         "codex" => vec!["codex".to_string()],
         "opencode" => vec!["opencode".to_string()],
         "maki" => vec!["maki".to_string()],
+        "gemini" => vec!["gemini".to_string()],
         _ => vec![agent.to_string()],
     };
     append_plan_flags(&mut args, agent, plan);
@@ -135,6 +137,8 @@ pub fn chat_entrypoint_non_interactive(agent: &str, plan: bool) -> Vec<String> {
         "codex" => vec!["codex".to_string(), "--quiet".to_string()],
         "opencode" => vec!["opencode".to_string()],
         "maki" => vec!["maki".to_string(), "--print".to_string()],
+        // Gemini supports -p / --prompt for headless/non-interactive output.
+        "gemini" => vec!["gemini".to_string(), "-p".to_string()],
         _ => vec![agent.to_string()],
     };
     append_plan_flags(&mut args, agent, plan);
@@ -145,6 +149,7 @@ pub fn chat_entrypoint_non_interactive(agent: &str, plan: bool) -> Vec<String> {
 ///
 /// - Claude: `--permission-mode plan`
 /// - Codex: `--approval-mode plan`
+/// - Gemini: `--approval-mode=plan`
 /// - Opencode: no plan mode available (flag is silently ignored)
 /// - Maki: no plan mode available (flag is silently ignored)
 fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
@@ -159,6 +164,9 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
         "codex" => {
             args.push("--approval-mode".to_string());
             args.push("plan".to_string());
+        }
+        "gemini" => {
+            args.push("--approval-mode=plan".to_string());
         }
         // Maki has no plan mode.
         "maki" => {}
@@ -319,6 +327,32 @@ mod tests {
         // Maki has no plan mode; the flag is silently ignored.
         let args = chat_entrypoint("maki", true);
         assert_eq!(args, vec!["maki"]);
+    }
+
+    // --- gemini entrypoints ---
+
+    #[test]
+    fn chat_entrypoint_gemini() {
+        let args = chat_entrypoint("gemini", false);
+        assert_eq!(args, vec!["gemini"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_non_interactive_gemini() {
+        let args = chat_entrypoint_non_interactive("gemini", false);
+        assert_eq!(args, vec!["gemini", "-p"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_plan_gemini() {
+        let args = chat_entrypoint("gemini", true);
+        assert_eq!(args, vec!["gemini", "--approval-mode=plan"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_non_interactive_plan_gemini() {
+        let args = chat_entrypoint_non_interactive("gemini", true);
+        assert_eq!(args, vec!["gemini", "-p", "--approval-mode=plan"]);
     }
 
     // --- passthrough injection tests ---

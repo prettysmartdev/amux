@@ -147,13 +147,16 @@ pub async fn run_agent_with_sink(
 ///
 /// When `yolo` is true:
 /// - Claude: `--dangerously-skip-permissions`
+/// - Gemini: `--yolo` (gemini's own flag; skips all tool-call confirmations)
 /// When `auto` is true (and not yolo):
 /// - Claude: `--permission-mode auto`
+/// - Gemini: `--approval-mode=auto_edit` (auto-approves file edits/writes; prompts for shell tools)
 /// Both modes:
 /// - Claude: if disallowed_tools non-empty, `--disallowedTools <t1>,<t2>,...`
 /// - Codex: `--full-auto`; disallowed tools not supported (warning printed)
 /// - Opencode: no equivalent — a warning is printed; disallowed tools not supported
 /// - Maki: `--yolo` (maki's own flag to skip all permission prompts); disallowed tools not supported
+/// - Gemini: disallowed tools not supported (warning printed)
 pub fn append_autonomous_flags(args: &mut Vec<String>, agent: &str, yolo: bool, auto: bool, disallowed_tools: &[String]) {
     if !yolo && !auto {
         return;
@@ -185,6 +188,24 @@ pub fn append_autonomous_flags(args: &mut Vec<String>, agent: &str, yolo: bool, 
             if !disallowed_tools.is_empty() {
                 eprintln!(
                     "WARNING: {}: maki does not support --disallowedTools; yoloDisallowedTools config will be ignored.",
+                    flag_name
+                );
+            }
+        }
+        "gemini" => {
+            if yolo {
+                // gemini's --yolo skips all tool-call confirmations.
+                // Note: this is gemini's own flag, not amux's --yolo flag.
+                args.push("--yolo".to_string());
+            } else {
+                // --auto maps to gemini's auto_edit approval mode (auto-approves file
+                // edits/writes but prompts before shell tool calls — more conservative
+                // than --yolo).
+                args.push("--approval-mode=auto_edit".to_string());
+            }
+            if !disallowed_tools.is_empty() {
+                eprintln!(
+                    "WARNING: {}: gemini does not support --disallowedTools; yoloDisallowedTools config will be ignored.",
                     flag_name
                 );
             }
@@ -354,6 +375,69 @@ mod tests {
         let mut args = vec!["maki".to_string()];
         append_autonomous_flags(&mut args, "maki", true, false, &[]);
         assert_eq!(args, vec!["maki", "--yolo"]);
+    }
+
+    // --- gemini autonomous flags ---
+
+    #[test]
+    fn append_autonomous_flags_gemini_yolo_adds_yolo_flag() {
+        let mut args = vec!["gemini".to_string()];
+        append_autonomous_flags(&mut args, "gemini", true, false, &[]);
+        assert!(args.contains(&"--yolo".to_string()), "gemini must receive --yolo in yolo mode");
+    }
+
+    #[test]
+    fn append_autonomous_flags_gemini_yolo_never_adds_disallowed_tools_flag() {
+        // gemini does not support --disallowedTools; the flag must never appear.
+        let mut args = vec!["gemini".to_string()];
+        let tools = vec!["Bash".to_string(), "computer".to_string()];
+        append_autonomous_flags(&mut args, "gemini", true, false, &tools);
+        assert!(
+            !args.contains(&"--disallowedTools".to_string()),
+            "--disallowedTools must never appear for gemini"
+        );
+        assert!(args.contains(&"--yolo".to_string()), "--yolo must still be appended");
+    }
+
+    #[test]
+    fn append_autonomous_flags_gemini_auto_adds_approval_mode_auto_edit() {
+        let mut args = vec!["gemini".to_string()];
+        append_autonomous_flags(&mut args, "gemini", false, true, &[]);
+        assert!(
+            args.contains(&"--approval-mode=auto_edit".to_string()),
+            "gemini in auto mode must receive --approval-mode=auto_edit"
+        );
+        assert!(
+            !args.contains(&"--dangerously-skip-permissions".to_string()),
+            "--dangerously-skip-permissions must NOT appear for gemini"
+        );
+        assert!(
+            !args.contains(&"--yolo".to_string()),
+            "--yolo must NOT appear in auto mode"
+        );
+    }
+
+    #[test]
+    fn append_autonomous_flags_gemini_yolo_with_nonempty_disallowed_tools_prints_warning() {
+        // Warning is emitted via eprintln! — verify the code path compiles and does not panic.
+        let mut args = vec!["gemini".to_string()];
+        let tools = vec!["Bash".to_string()];
+        append_autonomous_flags(&mut args, "gemini", true, false, &tools);
+        // --yolo must still be appended despite the warning.
+        assert!(args.contains(&"--yolo".to_string()));
+        assert!(!args.contains(&"--disallowedTools".to_string()));
+    }
+
+    #[test]
+    fn append_autonomous_flags_gemini_yolo_takes_precedence_over_auto() {
+        // When both yolo and auto are true, yolo wins for gemini.
+        let mut args = vec!["gemini".to_string()];
+        append_autonomous_flags(&mut args, "gemini", true, true, &[]);
+        assert!(args.contains(&"--yolo".to_string()), "--yolo must appear when yolo=true");
+        assert!(
+            !args.contains(&"--approval-mode=auto_edit".to_string()),
+            "--approval-mode=auto_edit must NOT appear when yolo=true"
+        );
     }
 
     #[tokio::test]

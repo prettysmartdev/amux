@@ -1,6 +1,6 @@
 # Agent Sessions
 
-An agent session is a Docker container running your configured AI agent (Claude Code, Codex, OpenCode, or Maki) against your project. amux handles starting the container, injecting your credentials, and connecting your terminal to the agent's input/output.
+An agent session is a Docker container running your configured AI agent (Claude Code, Codex, OpenCode, Maki, or Gemini) against your project. amux handles starting the container, injecting your credentials, and connecting your terminal to the agent's input/output.
 
 There are two session types: **freeform chat** and **work item implementation**.
 
@@ -50,6 +50,7 @@ Run the agent in print/batch mode — no interactivity required. The agent execu
 | Codex | `--quiet` |
 | OpenCode | `run` subcommand |
 | Maki | `--print` |
+| Gemini | `-p` (`--prompt`) |
 
 Useful for CI pipelines, scripting, or when you want the output captured rather than live.
 
@@ -63,6 +64,7 @@ Run the agent in read-only mode — it can analyse the codebase and suggest chan
 | Codex | `--approval-mode plan` |
 | OpenCode | Not supported (flag is silently ignored) |
 | Maki | Not supported (flag is silently ignored) |
+| Gemini | `--approval-mode=plan` |
 
 `--plan` can be combined with `--non-interactive`.
 
@@ -77,6 +79,22 @@ Mount your host `~/.ssh` directory read-only into the container, allowing the ag
 ### `--worktree`
 
 Run the agent in an isolated Git worktree instead of your main working tree. After the agent finishes you choose to merge, discard, or keep the branch. See [Security & Isolation](03-security-and-isolation.md#worktree-isolation).
+
+### `--auto`
+
+Enable intermediate autonomous operation — the agent auto-approves file edits and writes, but still prompts before shell commands and other high-risk operations. Less permissive than `--yolo`.
+
+| Agent | Flag used |
+|-------|-----------|
+| `claude` | `--permission-mode auto` |
+| `codex` | `--full-auto` |
+| `opencode` | *(no equivalent — a warning is printed, flag omitted)* |
+| `maki` | `--yolo` (maki's own flag) |
+| `gemini` | `--approval-mode=auto_edit` |
+
+`--auto` applies `yoloDisallowedTools` config the same way `--yolo` does. Combined with `--workflow`, it implies `--worktree` but does **not** auto-advance stuck workflow steps.
+
+When both `--yolo` and `--auto` are passed, `--yolo` wins.
 
 ### `--yolo`
 
@@ -152,8 +170,9 @@ For Claude Code, amux reads the OAuth token from the macOS Keychain (service: `C
 | `codex` | — | — |
 | `opencode` | — | — |
 | `maki` | via `envPassthrough` | — |
+| `gemini` | via `envPassthrough` or `~/.gemini/` mount | — |
 
-Maki authenticates via API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) passed from your host environment using the `envPassthrough` config field. See [Configuration](07-configuration.md#envpassthrough) for details.
+Maki and Gemini authenticate via API keys or OAuth tokens passed from your host environment. See [Configuration](07-configuration.md#envpassthrough) for details and [Gemini authentication](#gemini-authentication) below for the full Gemini auth options.
 
 ### Host settings injection
 
@@ -168,6 +187,46 @@ Your original files are never modified. The copies are created in a temporary di
 
 ---
 
+## Gemini authentication
+
+Gemini supports two authentication paths. You can use either or both — amux sets up both automatically.
+
+### API key (`envPassthrough`)
+
+Add `GEMINI_API_KEY` (or one of the Vertex AI variables) to your `envPassthrough` config:
+
+```json
+{ "envPassthrough": ["GEMINI_API_KEY"] }
+```
+
+Get a free API key from [Google AI Studio](https://aistudio.google.com/apikey) (1,000 requests/day on the free tier). amux reads the value from your host shell and injects it into the container as a `-e` flag on the `docker run` invocation. The value is masked (`***`) in all displayed Docker commands.
+
+Supported Gemini auth environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `GEMINI_API_KEY` | API key from Google AI Studio |
+| `GOOGLE_API_KEY` | Vertex AI API key (takes precedence over `GEMINI_API_KEY`) |
+| `GOOGLE_CLOUD_PROJECT` | Vertex AI project ID |
+| `GOOGLE_CLOUD_LOCATION` | Vertex AI region |
+| `GOOGLE_GENAI_USE_VERTEXAI` | Set to `true` to enable the Vertex AI auth path |
+
+> **Note on `GOOGLE_APPLICATION_CREDENTIALS`:** This variable points to a file path on the host. Passing it via `envPassthrough` injects the path string but not the file itself, so the container cannot read it. Service account JSON authentication requires either embedding the key in your `Dockerfile.dev` or mounting it manually. For most users, `GEMINI_API_KEY` is simpler.
+
+### OAuth token (`~/.gemini/` mount)
+
+Gemini's default interactive auth stores OAuth tokens in `~/.gemini/settings.json` on your host after you run `gemini` for the first time and complete the browser login flow. amux automatically copies `~/.gemini/` into a temporary directory and mounts it into the container at `/root/.gemini`, so the agent picks up your existing OAuth session without a manual login step.
+
+If `~/.gemini/` does not exist on the host (you've never run `gemini` locally), amux creates an empty directory and mounts that instead. Gemini will prompt for authentication inside the container on first use.
+
+The mount is a copy, not a bind mount — changes the agent makes to its auth state inside the container are isolated and do not affect the live `~/.gemini/` on your host.
+
+### Auth precedence
+
+When both an API key env var and OAuth tokens are present, Gemini uses the API key. This is Gemini's own resolution logic — amux does not arbitrate. If you want to use OAuth auth exclusively, omit the key variables from `envPassthrough`.
+
+---
+
 ## Reference: `amux init`
 
 ```sh
@@ -178,7 +237,7 @@ Initialises the current Git repository for use with amux. See [Getting Started](
 
 | Flag | Values | Default |
 |------|--------|---------|
-| `--agent` | `claude`, `codex`, `opencode`, `maki` | `claude` |
+| `--agent` | `claude`, `codex`, `opencode`, `maki`, `gemini` | `claude` |
 | `--aspec` | (flag) | off |
 
 `--aspec` downloads the `aspec/` folder from `github.com/prettysmartdev/aspec`, providing spec templates and work item scaffolding. Skipped without the flag.
@@ -214,6 +273,7 @@ Use `--refresh` after your project's toolchain changes to update `Dockerfile.dev
 | `--allow-docker` | ✓ | ✓ | Mount host Docker socket |
 | `--mount-ssh` | ✓ | ✓ | Mount `~/.ssh` read-only |
 | `--worktree` | — | ✓ | Run in isolated Git worktree |
+| `--auto` | ✓ | ✓ | Auto-approve file edits, prompt for shell commands |
 | `--yolo` | ✓ | ✓ | Fully autonomous mode |
 | `--workflow=<path>` | — | ✓ | Multi-step workflow file |
 

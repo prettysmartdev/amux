@@ -449,6 +449,7 @@ pub fn dockerfile_for_agent_embedded(agent: &Agent) -> String {
         Agent::Codex => include_str!("../../templates/Dockerfile.codex").to_string(),
         Agent::Opencode => include_str!("../../templates/Dockerfile.opencode").to_string(),
         Agent::Maki => include_str!("../../templates/Dockerfile.maki").to_string(),
+        Agent::Gemini => include_str!("../../templates/Dockerfile.gemini").to_string(),
     }
 }
 
@@ -531,7 +532,7 @@ mod tests {
 
     #[test]
     fn dockerfile_for_agent_embedded_uses_debian_slim_base() {
-        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki] {
+        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki, Agent::Gemini] {
             let content = dockerfile_for_agent_embedded(agent);
             assert!(
                 content.contains("debian:bookworm-slim"),
@@ -543,6 +544,10 @@ mod tests {
 
     #[test]
     fn dockerfile_for_agent_embedded_does_not_use_npm_install() {
+        // Agent::Gemini is exempted: it installs the gemini CLI globally via
+        // `npm install -g`, which is the standard deployment method for the package.
+        // The guard here catches accidental local project installs (bare `npm install`),
+        // not intentional global CLI installations.
         for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki] {
             let content = dockerfile_for_agent_embedded(agent);
             assert!(
@@ -555,7 +560,7 @@ mod tests {
 
     #[test]
     fn dockerfile_templates_install_via_apt_or_direct_download() {
-        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki] {
+        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki, Agent::Gemini] {
             let content = dockerfile_for_agent_embedded(agent);
             assert!(
                 content.contains("apt-get") || content.contains("curl"),
@@ -571,6 +576,23 @@ mod tests {
         assert!(
             content.contains("maki.sh/install.sh"),
             "Dockerfile.maki must install maki via the official maki.sh/install.sh installer"
+        );
+    }
+
+    #[test]
+    fn dockerfile_for_agent_embedded_gemini_contains_expected_strings() {
+        let content = dockerfile_for_agent_embedded(&Agent::Gemini);
+        assert!(
+            content.contains("debian:bookworm-slim"),
+            "Dockerfile.gemini must use debian:bookworm-slim base image"
+        );
+        assert!(
+            content.contains("nodesource"),
+            "Dockerfile.gemini must install Node.js via NodeSource"
+        );
+        assert!(
+            content.contains("@google/gemini-cli"),
+            "Dockerfile.gemini must install @google/gemini-cli"
         );
     }
 

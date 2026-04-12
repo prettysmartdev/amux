@@ -24,6 +24,7 @@ pub async fn download_dockerfile_template(
         Agent::Codex => "Dockerfile.codex",
         Agent::Opencode => "Dockerfile.opencode",
         Agent::Maki => "Dockerfile.maki",
+        Agent::Gemini => "Dockerfile.gemini",
     };
     let url = format!("{}/{}", ASPEC_CLI_RAW_BASE, filename);
 

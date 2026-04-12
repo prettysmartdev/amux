@@ -1061,6 +1061,33 @@ mod tests {
     }
 
     #[test]
+    fn build_run_args_pty_with_agent_config_dir_adds_gemini_mount() {
+        // Verify that agent_config_dir (used by GeminiPassthrough and others) produces
+        // a -v flag mapping the host path to the container path.
+        let host_gemini = PathBuf::from("/tmp/fake/gemini-data");
+        let settings = HostSettings::new_agent_dir(
+            None,
+            "/root".to_string(),
+            Some((host_gemini.clone(), "/root/.gemini".to_string())),
+        );
+        let args = rt().build_run_args_pty("img", "/h", &["gemini"], &[], Some(&settings), false, None, None);
+
+        // The -v flag for the gemini config dir must appear.
+        let expected_mount = format!("{}:/root/.gemini", host_gemini.display());
+        assert!(
+            args.windows(2).any(|w| w[0] == "-v" && w[1] == expected_mount),
+            "expected -v {}:/root/.gemini in run args: {:?}",
+            host_gemini.display(),
+            args
+        );
+        // Claude-specific mounts must NOT appear when mount_claude_files = false.
+        assert!(
+            !args.iter().any(|a| a.contains("/.claude")),
+            "claude mounts must not appear for gemini agent_config_dir settings"
+        );
+    }
+
+    #[test]
     fn build_run_args_pty_with_allow_docker_adds_socket_mount() {
         let args_no = rt().build_run_args_pty("img", "/h", &[], &[], None, false, None, None);
         let args_yes = rt().build_run_args_pty("img", "/h", &[], &[], None, true, None, None);

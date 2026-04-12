@@ -21,7 +21,7 @@ This file is created by `amux init` and should be committed to source control. I
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `agent` | string | `"claude"` | Agent to use for this repository: `claude`, `codex`, `opencode`, or `maki` |
+| `agent` | string | `"claude"` | Agent to use for this repository: `claude`, `codex`, `opencode`, `maki`, or `gemini` |
 | `terminal_scrollback_lines` | integer | `10000` | Number of scrollback lines in the container terminal emulator. Overrides the global value |
 | `yoloDisallowedTools` | string array | `[]` | Tools the agent cannot use when `--yolo` is active. Overrides the global list entirely |
 | `envPassthrough` | string array | `[]` | Host environment variable names to inject into agent containers at launch. Overrides the global list entirely. See [`envPassthrough`](#envpassthrough) |
@@ -46,7 +46,7 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `default_agent` | string | `"claude"` | Default agent when no per-repo agent is configured: `claude`, `codex`, `opencode`, or `maki` |
+| `default_agent` | string | `"claude"` | Default agent when no per-repo agent is configured: `claude`, `codex`, `opencode`, `maki`, or `gemini` |
 | `terminal_scrollback_lines` | integer | `10000` | Default scrollback lines for all repos unless overridden |
 | `runtime` | string | `"docker"` | Container runtime: `"docker"` or `"apple-containers"` (macOS 26+ only) |
 | `yoloDisallowedTools` | string array | `[]` | Global fallback list of tools forbidden when `--yolo` is active |
@@ -120,6 +120,34 @@ Maki authenticates exclusively via API keys. There is no system keychain integra
 ```
 
 With this setup, `amux chat` reads `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from your shell and passes them into the maki container as `-e` flags on the `docker run` invocation. The values are masked (`***`) in all displayed Docker commands.
+
+### Using gemini with `envPassthrough`
+
+Gemini supports API-key-based authentication via `envPassthrough`. A typical setup for users with a Google AI Studio key:
+
+**Global config** (`~/.amux/config.json`):
+```json
+{
+  "envPassthrough": ["GEMINI_API_KEY"]
+}
+```
+
+**Per-repo config** (`aspec/.amux.json`):
+```json
+{
+  "agent": "gemini"
+}
+```
+
+For Vertex AI, include the relevant variables:
+
+```json
+{
+  "envPassthrough": ["GOOGLE_API_KEY", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "GOOGLE_GENAI_USE_VERTEXAI"]
+}
+```
+
+In addition to `envPassthrough`, amux automatically copies `~/.gemini/` (your OAuth token directory) into a temporary directory and mounts it at `/root/.gemini` inside the container. This means that if you've already authenticated gemini on the host (`gemini auth login`), the container picks up your session automatically with no extra config. See [Gemini authentication](02-agent-sessions.md#gemini-authentication) for the full auth details.
 
 ### Precedence and deduplication
 

@@ -167,6 +167,59 @@ impl AgentPassthrough for CodexPassthrough {
     }
 }
 
+// ─── Gemini ──────────────────────────────────────────────────────────────────
+
+/// Top-level entries in `~/.gemini/` to exclude from the container copy.
+const GEMINI_DIR_DENYLIST: &[&str] = &["logs"];
+
+/// Passthrough for the Google Gemini CLI agent.
+///
+/// - **Keychain**: none (gemini does not use the system keychain).
+/// - **Env vars**: none (API keys passed via the `envPassthrough` config key).
+/// - **Settings**: copies `~/.gemini/` into a temp dir and mounts it (read-write) at
+///   `/root/.gemini` inside the container. The mount is read-write because the source is
+///   a temp copy, not the live host directory.
+///   If `~/.gemini/` does not exist on the host, creates an empty temp dir and mounts
+///   that instead, so the container starts with a clean gemini state (gemini will prompt
+///   for auth on first use).
+pub struct GeminiPassthrough;
+
+impl AgentPassthrough for GeminiPassthrough {
+    fn prepare_host_settings(&self) -> Option<HostSettings> {
+        let home = dirs::home_dir()?;
+        let src = home.join(".gemini");
+        let temp_dir = tempfile::TempDir::new().ok()?;
+        let dst = temp_dir.path().join("gemini-data");
+        if src.exists() {
+            crate::runtime::copy_dir_filtered(&src, &dst, GEMINI_DIR_DENYLIST).ok()?;
+        } else {
+            std::fs::create_dir_all(&dst).ok()?;
+        }
+        Some(HostSettings::new_agent_dir(
+            Some(temp_dir),
+            "/root".to_string(),
+            Some((dst, "/root/.gemini".to_string())),
+        ))
+    }
+
+    fn prepare_host_settings_to_dir(&self, dir: &Path) -> Option<HostSettings> {
+        let home = dirs::home_dir()?;
+        let src = home.join(".gemini");
+        std::fs::create_dir_all(dir).ok()?;
+        let dst = dir.join("gemini-data");
+        if src.exists() {
+            crate::runtime::copy_dir_filtered(&src, &dst, GEMINI_DIR_DENYLIST).ok()?;
+        } else {
+            std::fs::create_dir_all(&dst).ok()?;
+        }
+        Some(HostSettings::new_agent_dir(
+            None,
+            "/root".to_string(),
+            Some((dst, "/root/.gemini".to_string())),
+        ))
+    }
+}
+
 // ─── Noop ─────────────────────────────────────────────────────────────────────
 
 /// Passthrough for agents with no special auth or settings requirements.
@@ -193,12 +246,14 @@ impl AgentPassthrough for NoopPassthrough {
 /// - `"claude"` → [`ClaudePassthrough`]
 /// - `"opencode"` → [`OpencodePassthrough`]
 /// - `"codex"` → [`CodexPassthrough`]
+/// - `"gemini"` → [`GeminiPassthrough`]
 /// - Any other agent → [`NoopPassthrough`]
 pub fn passthrough_for_agent(agent: &str) -> Box<dyn AgentPassthrough> {
     match agent {
         "claude" => Box::new(ClaudePassthrough),
         "opencode" => Box::new(OpencodePassthrough),
         "codex" => Box::new(CodexPassthrough),
+        "gemini" => Box::new(GeminiPassthrough),
         _ => Box::new(NoopPassthrough),
     }
 }
@@ -434,5 +489,137 @@ mod tests {
 
         assert!(dst.join("config.toml").exists(), "config.toml must be copied");
         assert!(!dst.join("logs").exists(), "logs must be excluded by denylist");
+    }
+
+    // ─── GeminiPassthrough ────────────────────────────────────────────────────
+
+    #[test]
+    fn gemini_passthrough_no_keychain_credentials() {
+        assert!(GeminiPassthrough.keychain_credentials().env_vars.is_empty());
+    }
+
+    #[test]
+    fn gemini_passthrough_no_extra_env_vars() {
+        assert!(GeminiPassthrough.extra_env_vars().is_empty());
+    }
+
+    #[test]
+    fn gemini_passthrough_always_returns_some() {
+        // GeminiPassthrough must always return Some — even when ~/.gemini/ does not exist
+        // it falls back to an empty temp dir so the container gets a clean gemini state.
+        let settings = GeminiPassthrough.prepare_host_settings();
+        assert!(settings.is_some(), "GeminiPassthrough must always return Some");
+    }
+
+    #[test]
+    fn gemini_passthrough_settings_contract_when_some() {
+        let settings = GeminiPassthrough
+            .prepare_host_settings()
+            .expect("GeminiPassthrough must always return Some");
+        assert!(
+            !settings.mount_claude_files,
+            "Gemini settings must have mount_claude_files = false"
+        );
+        let (_, container_path) = settings
+            .agent_config_dir
+            .expect("Gemini settings must set agent_config_dir");
+        assert_eq!(container_path, "/root/.gemini");
+    }
+
+    #[test]
+    fn gemini_passthrough_prepare_to_dir_settings_contract() {
+        // Same contract as prepare_host_settings but with a caller-supplied stable dir.
+        let tmp = TempDir::new().unwrap();
+        let settings = GeminiPassthrough
+            .prepare_host_settings_to_dir(tmp.path())
+            .expect("GeminiPassthrough.prepare_host_settings_to_dir must always return Some");
+        assert!(!settings.mount_claude_files);
+        let (_, container_path) = settings
+            .agent_config_dir
+            .expect("Gemini settings must set agent_config_dir");
+        assert_eq!(container_path, "/root/.gemini");
+    }
+
+    #[test]
+    fn gemini_passthrough_copy_excludes_logs() {
+        use std::io::Write;
+
+        // Build a fake ~/.gemini source directory.
+        let fake_src = TempDir::new().unwrap();
+        let settings_file = fake_src.path().join("settings.json");
+        std::fs::File::create(&settings_file).unwrap().write_all(b"{}").unwrap();
+        std::fs::create_dir(fake_src.path().join("logs")).unwrap();
+
+        // Copy using the same denylist as GeminiPassthrough.
+        let dst_tmp = TempDir::new().unwrap();
+        let dst = dst_tmp.path().join("gemini-data");
+        crate::runtime::copy_dir_filtered(fake_src.path(), &dst, GEMINI_DIR_DENYLIST).unwrap();
+
+        assert!(dst.join("settings.json").exists(), "settings.json must be copied");
+        assert!(!dst.join("logs").exists(), "logs must be excluded by denylist");
+    }
+
+    #[test]
+    fn passthrough_for_agent_returns_gemini_impl() {
+        let p = passthrough_for_agent("gemini");
+        // Gemini passthrough has no keychain credentials.
+        assert!(p.keychain_credentials().env_vars.is_empty());
+        assert!(p.extra_env_vars().is_empty());
+        // Always returns Some (even without ~/.gemini/).
+        let settings = p.prepare_host_settings();
+        assert!(settings.is_some(), "gemini passthrough must always return Some");
+        assert!(!settings.unwrap().mount_claude_files);
+    }
+
+    #[test]
+    fn passthrough_for_agent_noop_for_maki_unchanged() {
+        // maki continues to return NoopPassthrough after gemini was added.
+        let p = passthrough_for_agent("maki");
+        assert!(p.prepare_host_settings().is_none());
+        assert!(p.keychain_credentials().env_vars.is_empty());
+        assert!(p.extra_env_vars().is_empty());
+    }
+
+    // ─── envPassthrough: GEMINI_API_KEY injection ─────────────────────────────
+    //
+    // The generic passthrough injection loop (tested in chat.rs) handles any env
+    // var listed in `envPassthrough`. The test below confirms that GEMINI_API_KEY
+    // specifically reaches the injected vars, validating the gemini API-key path.
+
+    #[test]
+    fn passthrough_injection_gemini_api_key_reaches_env_vars() {
+        use crate::config::{save_repo_config, RepoConfig};
+
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            agent: Some("gemini".to_string()),
+            auto_agent_auth_accepted: None,
+            terminal_scrollback_lines: None,
+            yolo_disallowed_tools: None,
+            env_passthrough: Some(vec!["AMUX_TEST_GEMINI_API_KEY_PT_999".to_string()]),
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+
+        // SAFETY: test-only env mutation; unique var name avoids races.
+        unsafe { std::env::set_var("AMUX_TEST_GEMINI_API_KEY_PT_999", "test-gemini-key") };
+
+        let mut env_vars: Vec<(String, String)> = vec![];
+        let passthrough_names = crate::config::effective_env_passthrough(tmp.path());
+        for name in &passthrough_names {
+            if let Ok(val) = std::env::var(name) {
+                env_vars.push((name.clone(), val));
+            }
+        }
+
+        // SAFETY: test-only env mutation.
+        unsafe { std::env::remove_var("AMUX_TEST_GEMINI_API_KEY_PT_999") };
+
+        assert!(
+            env_vars.contains(&(
+                "AMUX_TEST_GEMINI_API_KEY_PT_999".to_string(),
+                "test-gemini-key".to_string()
+            )),
+            "GEMINI_API_KEY (simulated) must be injected via envPassthrough"
+        );
     }
 }

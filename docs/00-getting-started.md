@@ -59,7 +59,7 @@ When you run `amux implement 0001`, amux finds the matching file, constructs a p
 - **A container runtime** — one of:
   - **Docker** (default, all platforms) — a running Docker daemon ([install Docker](https://docs.docker.com/get-docker/))
   - **Apple Containers** (macOS 26+ only) — Apple's native `container` CLI; no Docker Desktop required
-- **A supported agent** — Claude Code installed and authenticated on your machine
+- **A supported agent** — one of: Claude Code, OpenAI Codex, OpenCode, Maki, or Google Gemini CLI installed and authenticated on your machine
 
 ---
 
