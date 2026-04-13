@@ -62,11 +62,15 @@ amux init
 # 2. Open the TUI for multi-agent coordination
 amux
 
-# 3. Starts an agent chat session
+# 3. (optional) run the Dockerfile.dev refresh agent
+# to scan your codebase and configure every tool you need
+ready --refresh
+
+# 4. Starts a containerized agent chat session
 chat
 
-# 4. Quit the agent container and then amux
-ctrl-c twice to quit agent, twice again to quit amux
+# 5. Quit the agent container and then amux
+ctrl-c # twice to quit agent, twice again to quit amux
 ```
 
 See the [Getting Started Guide](docs/getting-started.md) for a full walkthrough. All commands are available directly via the CLI in addition to the TUI.
@@ -80,31 +84,21 @@ Running agents one at a time is a waste. Running them directly on your machine i
 - **Parallel sessions** — open multiple tabs, each running a different agent against the same or different projects simultaneously
 - **Hard isolation** — every agent runs in a container; your filesystem, credentials, and environment are never exposed to agent-generated code execution
 - **Secure claw agents** — `amux` sets up and manages a fully containerized nanoclaw install that lives securely on your machine for 24/7 subagents, workflows, and messaging app chat.
-- **Agent-agnostic** — supports Claude Code, Nanoclaw, Codex, and OpenCode out of the box
+- **Agent-agnostic** — supports Claude Code, Nanoclaw, Codex, OpenCode, Maki, and Gemini out of the box
+- **Pluggable runtimes** — use Docker (default, all platforms) or Apple Containers (macOS 26+, no Docker Desktop required)
 
 ---
 
 ### Multi-tab agent coordination
 
-Each tab is fully independent — its own working directory, running command, and container session. Tabs continue running in the background when you switch away.
+Each tab is fully independent — its own working directory, running command, and container session. Tabs continue running in the background when you switch away. Move between them with Ctrl+A and Ctrl+D
 
-Tab colors reflect live state:
-
-| Color | Meaning |
-|-------|---------|
-| Grey | Idle |
-| Blue | Command running |
-| Green | Agent container active |
-| Purple | Claw session running |
-| Red | Exited with error |
-| Yellow | stuck agent detected |
-
-Stuck agent detection: amux detects when an agent is stuck and needs help, it will alert you with a yellow tab so you can intervene.
+**Stuck agent detection**: amux detects when an agent is stuck and needs help, it will alert you with a yellow tab so you can intervene.
 
 ### Interactive container terminal
 
 When an agent container starts, a dedicated terminal appears with:
-- Full interactive terminal emulator (arrow keys, Ctrl+O, all agent shortcuts work natively)
+- Full interactive terminal emulator (every agent runs fullscreen as it normally would)
 - Mouse scroll for terminal scrollback history
 - Live container stats: CPU, memory, total runtime
 - Press **Esc** to minimize (agent keeps running); **c** to maximize
@@ -147,13 +141,14 @@ amux init                        # set up a project for amux
 amux ready [--refresh]           # verify environment; refresh and rebuild Dockerfile.dev
 amux specs new [--interview]     # create a work item; --interview has the agent fill it out
 amux specs amend <nnnn>          # update a spec to match what was actually built
-amux implement <nnnn> [--plan] [--workflow <path>] [--worktree] [--mount-ssh]  # launch an agent to implement a work item
-amux chat [--plan]               # start a freeform agent session
+amux implement <nnnn> [--plan] [--auto] [--yolo] [--workflow <path>] [--worktree] [--mount-ssh]  # launch an agent to implement a work item
+amux chat [--plan] [--auto] [--yolo]  # start a freeform agent session
 amux status [--watch]            # live dashboard of all running agent containers
+amux claws init                  # interactive setup of containerized nanoclaw
 amux claws ready                 # check/start the persistent nanoclaw container
 ```
 
-All commands work in both TUI mode (type without `amux` prefix) and command mode.
+All commands work in both TUI mode (type without `amux` prefix) and CLI mode.
 
 ---
 
