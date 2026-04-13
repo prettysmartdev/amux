@@ -277,13 +277,13 @@ pub struct LastContainerSummary {
 }
 
 /// Human-readable display name for an agent.
+/// Delegates to `Agent::display_name` so the TUI and CLI always agree.
 pub fn agent_display_name(agent: &str) -> &str {
-    match agent {
-        "claude" => "Claude Code",
-        "codex" => "Codex",
-        "opencode" => "Opencode",
-        _ => agent,
-    }
+    use crate::cli::Agent;
+    Agent::all()
+        .iter()
+        .find(|a| a.as_str() == agent)
+        .map_or(agent, |a| a.display_name())
 }
 
 /// Format a duration in seconds into a human-readable string (e.g. "5s", "12m", "1h 23m").

@@ -108,6 +108,14 @@ fn ready_audit_entrypoint_for_each_agent() {
     assert_eq!(opencode[0], "opencode");
     assert_eq!(opencode[1], "run");
     assert!(opencode[2].contains("scan this project"));
+
+    let maki = audit_entrypoint("maki");
+    assert_eq!(maki[0], "maki");
+    assert!(maki[1].contains("scan this project"));
+
+    let gemini = audit_entrypoint("gemini");
+    assert_eq!(gemini[0], "gemini");
+    assert!(gemini[1].contains("scan this project"));
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +144,21 @@ fn ready_audit_entrypoint_non_interactive_for_each_agent() {
     assert_eq!(codex[0], "codex");
     assert_eq!(codex[1], "--quiet");
     assert!(codex[2].contains("scan this project"));
+
+    let opencode = audit_entrypoint_non_interactive("opencode");
+    assert_eq!(opencode[0], "opencode");
+    assert_eq!(opencode[1], "run");
+    assert!(opencode[2].contains("scan this project"));
+
+    let maki = audit_entrypoint_non_interactive("maki");
+    assert_eq!(maki[0], "maki");
+    assert_eq!(maki[1], "--print");
+    assert!(maki[2].contains("scan this project"));
+
+    let gemini = audit_entrypoint_non_interactive("gemini");
+    assert_eq!(gemini[0], "gemini");
+    assert_eq!(gemini[1], "-p");
+    assert!(gemini[2].contains("scan this project"));
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +424,14 @@ fn implement_entrypoint_for_each_agent() {
     assert_eq!(opencode[0], "opencode");
     assert_eq!(opencode[1], "run");
     assert!(opencode[2].contains("work item 0003"));
+
+    let maki = agent_entrypoint("maki", 4, false);
+    assert_eq!(maki[0], "maki");
+    assert!(maki[1].contains("work item 0004"));
+
+    let gemini = agent_entrypoint("gemini", 5, false);
+    assert_eq!(gemini[0], "gemini");
+    assert!(gemini[1].contains("work item 0005"));
 }
 
 #[test]
@@ -419,6 +450,16 @@ fn implement_entrypoint_non_interactive_for_each_agent() {
     assert_eq!(opencode[0], "opencode");
     assert_eq!(opencode[1], "run");
     assert!(opencode[2].contains("work item 0003"));
+
+    let maki = agent_entrypoint_non_interactive("maki", 4, false);
+    assert_eq!(maki[0], "maki");
+    assert_eq!(maki[1], "--print");
+    assert!(maki[2].contains("work item 0004"));
+
+    let gemini = agent_entrypoint_non_interactive("gemini", 5, false);
+    assert_eq!(gemini[0], "gemini");
+    assert_eq!(gemini[1], "-p");
+    assert!(gemini[2].contains("work item 0005"));
 }
 
 #[test]
@@ -796,11 +837,51 @@ fn duration_formatting() {
 
 #[test]
 fn agent_display_names() {
+    use amux::cli::Agent;
     use amux::tui::state::agent_display_name;
+    // Every agent known to the CLI must have a non-empty display name in the TUI.
+    for agent in Agent::all() {
+        let name = agent_display_name(agent.as_str());
+        assert!(!name.is_empty(), "display name for '{}' must not be empty", agent.as_str());
+        assert_ne!(
+            name, agent.as_str(),
+            "agent '{}' should have a human-readable display name, not just its id",
+            agent.as_str()
+        );
+    }
+    // Spot-check known values.
     assert_eq!(agent_display_name("claude"), "Claude Code");
     assert_eq!(agent_display_name("codex"), "Codex");
     assert_eq!(agent_display_name("opencode"), "Opencode");
+    assert_eq!(agent_display_name("maki"), "Maki");
+    assert_eq!(agent_display_name("gemini"), "Gemini");
     assert_eq!(agent_display_name("unknown"), "unknown");
+}
+
+// ---------------------------------------------------------------------------
+// 22b. TUI init autocomplete suggestions cover every CLI agent
+//
+// The TUI command-bar suggests `init --agent=<name>` for every agent.  This
+// test guarantees that the suggestion list stays in sync with Agent::all():
+// if a new agent is added to the enum but not to flag_suggestions_for("init"),
+// this test catches it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tui_init_autocomplete_covers_all_cli_agents() {
+    use amux::cli::Agent;
+    use amux::tui::input::autocomplete_suggestions;
+
+    // "init --" triggers flag-completion for the init subcommand.
+    let suggestions = autocomplete_suggestions("init --");
+    for agent in Agent::all() {
+        let expected = format!("init --agent={}", agent.as_str());
+        assert!(
+            suggestions.contains(&expected),
+            "TUI autocomplete missing '{}' — Agent::all() and flag_suggestions_for(\"init\") are out of sync",
+            expected,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -351,6 +351,10 @@ pub fn agent_entrypoint(agent: &str, work_item: u32, plan: bool) -> Vec<String> 
             "maki".to_string(),
             prompt,
         ],
+        "gemini" => vec![
+            "gemini".to_string(),
+            prompt,
+        ],
         _ => vec![
             agent.to_string(),
             prompt,
@@ -385,6 +389,11 @@ pub fn agent_entrypoint_non_interactive(agent: &str, work_item: u32, plan: bool)
             "--print".to_string(),
             prompt,
         ],
+        "gemini" => vec![
+            "gemini".to_string(),
+            "-p".to_string(),
+            prompt,
+        ],
         _ => vec![
             agent.to_string(),
             prompt,
@@ -404,6 +413,8 @@ pub fn workflow_step_entrypoint(agent: &str, prompt: &str, non_interactive: bool
         ("opencode", _) => vec!["opencode".to_string(), "run".to_string(), prompt.to_string()],
         ("maki", true) => vec!["maki".to_string(), "--print".to_string(), prompt.to_string()],
         ("maki", false) => vec!["maki".to_string(), prompt.to_string()],
+        ("gemini", true) => vec!["gemini".to_string(), "-p".to_string(), prompt.to_string()],
+        ("gemini", false) => vec!["gemini".to_string(), prompt.to_string()],
         (a, _) => vec![a.to_string(), prompt.to_string()],
     };
     append_plan_flags(&mut args, agent, plan);
@@ -414,6 +425,7 @@ pub fn workflow_step_entrypoint(agent: &str, prompt: &str, non_interactive: bool
 ///
 /// - Claude: `--permission-mode plan`
 /// - Codex: `--approval-mode plan`
+/// - Gemini: `--approval-mode=plan`
 /// - Opencode: no plan mode available (flag is silently ignored)
 /// - Maki: no plan mode available (flag is silently ignored)
 fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
@@ -428,6 +440,9 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
         "codex" => {
             args.push("--approval-mode".to_string());
             args.push("plan".to_string());
+        }
+        "gemini" => {
+            args.push("--approval-mode=plan".to_string());
         }
         // Maki has no plan mode.
         "maki" => {}
@@ -861,6 +876,53 @@ mod tests {
         assert_eq!(args[0], "opencode");
         assert_eq!(args[1], "run");
         assert!(args[2].contains("work item 0003"));
+    }
+
+    #[test]
+    fn agent_entrypoint_gemini() {
+        let args = agent_entrypoint("gemini", 4, false);
+        assert_eq!(args[0], "gemini");
+        assert!(args[1].contains("work item 0004"));
+    }
+
+    #[test]
+    fn agent_entrypoint_non_interactive_gemini() {
+        let args = agent_entrypoint_non_interactive("gemini", 4, false);
+        assert_eq!(args[0], "gemini");
+        assert_eq!(args[1], "-p");
+        assert!(args[2].contains("work item 0004"));
+    }
+
+    #[test]
+    fn agent_entrypoint_plan_gemini() {
+        let args = agent_entrypoint("gemini", 4, true);
+        assert_eq!(args[0], "gemini");
+        assert!(args[1].contains("work item 0004"));
+        assert_eq!(args[2], "--approval-mode=plan");
+    }
+
+    #[test]
+    fn agent_entrypoint_non_interactive_plan_gemini() {
+        let args = agent_entrypoint_non_interactive("gemini", 4, true);
+        assert_eq!(args[0], "gemini");
+        assert_eq!(args[1], "-p");
+        assert!(args[2].contains("work item 0004"));
+        assert_eq!(args[3], "--approval-mode=plan");
+    }
+
+    #[test]
+    fn workflow_step_entrypoint_gemini_interactive() {
+        let args = workflow_step_entrypoint("gemini", "my prompt", false, false);
+        assert_eq!(args[0], "gemini");
+        assert_eq!(args[1], "my prompt");
+    }
+
+    #[test]
+    fn workflow_step_entrypoint_gemini_non_interactive() {
+        let args = workflow_step_entrypoint("gemini", "my prompt", true, false);
+        assert_eq!(args[0], "gemini");
+        assert_eq!(args[1], "-p");
+        assert_eq!(args[2], "my prompt");
     }
 
     // --- Plan mode tests ---

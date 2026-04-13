@@ -1367,11 +1367,10 @@ pub fn autocomplete_suggestions(input: &str) -> Vec<String> {
 
 fn flag_suggestions_for(cmd: &str, _typed: &str) -> Vec<String> {
     match cmd {
-        "init" => vec![
-            "init --agent=claude".into(),
-            "init --agent=codex".into(),
-            "init --agent=opencode".into(),
-        ],
+        "init" => {
+            use crate::cli::Agent;
+            Agent::all().iter().map(|a| format!("init --agent={}", a.as_str())).collect()
+        }
         "ready" => vec![
             "ready --refresh".into(),
             "ready --build".into(),

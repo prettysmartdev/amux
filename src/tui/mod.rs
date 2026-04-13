@@ -2882,13 +2882,8 @@ fn parse_agent_flag(parts: &[&str]) -> Option<Agent> {
         } else {
             continue;
         };
-        return match value.as_str() {
-            "claude" => Some(Agent::Claude),
-            "codex" => Some(Agent::Codex),
-            "opencode" => Some(Agent::Opencode),
-            "maki" => Some(Agent::Maki),
-            _ => None,
-        };
+        // Drive from Agent::all() so this never drifts from the CLI's agent list.
+        return Agent::all().iter().find(|a| a.as_str() == value.as_str()).cloned();
     }
     None
 }
@@ -3549,8 +3544,38 @@ fn extract_selection_text(tab: &state::TabState) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::Agent;
     use crate::tui::state::{App, Dialog, ExecutionPhase};
     use crate::workflow::{StepStatus, WorkflowState, WorkflowStepState};
+
+    /// Every agent in Agent::all() must be parseable via both flag forms.
+    /// This test fails immediately when a new agent is added to Agent::all()
+    /// but parse_agent_flag is not updated — keeping TUI and CLI in sync.
+    #[test]
+    fn parse_agent_flag_covers_all_cli_agents() {
+        for agent in Agent::all() {
+            let eq_form = format!("--agent={}", agent.as_str());
+            let parts_eq: Vec<&str> = vec!["init", &eq_form];
+            assert_eq!(
+                parse_agent_flag(&parts_eq).as_ref().map(Agent::as_str),
+                Some(agent.as_str()),
+                "--agent={} not parsed by TUI",
+                agent.as_str(),
+            );
+
+            let parts_space: Vec<&str> = vec!["init", "--agent", agent.as_str()];
+            assert_eq!(
+                parse_agent_flag(&parts_space).as_ref().map(Agent::as_str),
+                Some(agent.as_str()),
+                "--agent {} not parsed by TUI",
+                agent.as_str(),
+            );
+        }
+        // Unknown agents return None.
+        assert!(parse_agent_flag(&["init", "--agent=notanagent"]).is_none());
+        // Missing value after --agent returns None.
+        assert!(parse_agent_flag(&["init", "--agent"]).is_none());
+    }
 
     fn new_app() -> App {
         App::new(std::path::PathBuf::new())

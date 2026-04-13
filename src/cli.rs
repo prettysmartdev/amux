@@ -199,6 +199,22 @@ impl Agent {
             Agent::Gemini => "gemini",
         }
     }
+
+    /// All supported agents, in the canonical order used by CLI and TUI alike.
+    /// This is the single source of truth — add new agents here only.
+    pub fn all() -> &'static [Agent] {
+        &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki, Agent::Gemini]
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Agent::Claude => "Claude Code",
+            Agent::Codex => "Codex",
+            Agent::Opencode => "Opencode",
+            Agent::Maki => "Maki",
+            Agent::Gemini => "Gemini",
+        }
+    }
 }
 
 #[cfg(test)]
