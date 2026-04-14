@@ -175,6 +175,51 @@ This summary persists until a new container is launched.
 
 ---
 
+## Config dialog
+
+Type `config show` in the command box and press **Enter** to open the config dialog — a large centered modal overlay that lets you view and edit all configuration fields without leaving the TUI.
+
+```
+╭─── Configuration ────────────────────────────────────────────────────────╮
+│                                                                            │
+│  Field                       Global              Repo        Effective     │
+│ ─────────────────────────────────────────────────────────────────────────  │
+│  default_agent               claude (built-in)   N/A         claude        │
+│  runtime                     docker (built-in)   N/A         docker        │
+│▶ terminal_scrollback_lines   10000 (built-in)    5000        5000          │
+│  yolo_disallowed_tools       (empty)             (not set)   (empty)       │
+│  env_passthrough             (empty)             (not set)   (empty)       │
+│  agent                       N/A                 codex       codex         │
+│  auto_agent_auth_accepted    N/A                 true        true          │
+│                                                                            │
+│  Accepted values: positive integer                                         │
+│                                                                            │
+│  ↑↓ navigate · e edit · Ctrl+Enter save · Esc close                       │
+╰────────────────────────────────────────────────────────────────────────────╯
+```
+
+### Navigation and editing
+
+| Key | Action |
+|-----|--------|
+| **↑ / ↓** | Move between rows |
+| **← / →** | Move between columns (Global, Repo, Effective) |
+| **e** | Enter edit mode for the selected field |
+| **Enter** (edit mode) | Confirm the new value and exit edit mode |
+| **Esc** (edit mode) | Cancel edit without saving |
+| **Ctrl+Enter** | Save all pending changes to the appropriate config files |
+| **Esc** (navigation) | Close the dialog and return to the previous view |
+
+When a row is selected, a hint line below the table shows the accepted values for that field (e.g. `claude | codex | opencode | maki | gemini`).
+
+Fields marked `(read-only)` — such as `auto_agent_auth_accepted` — are skipped during navigation for edit purposes. Their values are shown but cannot be changed from this dialog.
+
+### Scope and saving
+
+The dialog loads both config files when it opens. Each edit targets the repo config by default; global-only fields (like `runtime` and `default_agent`) write to the global config. Changes are not written to disk until you press **Ctrl+Enter**. Pressing **Esc** without saving discards all edits made in this session.
+
+---
+
 ## Multi-tab support
 
 Press **Ctrl+T** to open a new tab. Each tab has its own working directory, execution window, and container session. Tabs run independently in the background when you switch away.
@@ -232,6 +277,13 @@ For workflow tabs, amux goes further: the [workflow control board](04-workflows.
 | Mouse scroll | Container window | Scroll scrollback history |
 | Mouse drag | Container window | Select text |
 | **y / n / Esc** | Quit dialog | Confirm / cancel quit |
+| **↑ / ↓** | Config dialog | Navigate between fields |
+| **← / →** | Config dialog | Navigate between columns |
+| **e** | Config dialog | Enter edit mode for selected field |
+| **Enter** | Config dialog (edit mode) | Confirm value and exit edit mode |
+| **Esc** | Config dialog (edit mode) | Cancel edit without saving |
+| **Ctrl+Enter** | Config dialog | Save all changes to config files |
+| **Esc** | Config dialog (navigation) | Close dialog |
 
 ---
 

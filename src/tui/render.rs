@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
     Frame,
 };
 
@@ -800,6 +800,10 @@ fn draw_suggestions(frame: &mut Frame, tab: &TabState, area: Rect) {
 
 fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
     // Special dialogs that do their own rendering.
+    if let Dialog::ConfigShow(state) = &tab.dialog {
+        draw_config_dialog(frame, state, area);
+        return;
+    }
     if let Dialog::NewInterviewSummary { kind, title, work_item_number, summary, cursor_pos } = &tab.dialog {
         draw_interview_summary_dialog(frame, kind, title, *work_item_number, summary, *cursor_pos, area);
         return;
@@ -1011,6 +1015,8 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
         Dialog::WorktreeCommitPrompt { .. } => return,
         // WorktreePreCommitMessage is handled by the early return above — unreachable here.
         Dialog::WorktreePreCommitMessage { .. } => return,
+        // ConfigShow is handled by the early return above — unreachable here.
+        Dialog::ConfigShow { .. } => return,
     };
 
     let popup_width = 72u16.min(area.width.saturating_sub(4));
@@ -1794,6 +1800,166 @@ fn step_box_label_and_style(
     // Fit label in box: " ● name "
     let label = format!(" {} {} ", status_char, truncated_name);
     (label, style)
+}
+
+// ── Config dialog ─────────────────────────────────────────────────────────────
+
+fn draw_config_dialog(
+    frame: &mut Frame,
+    state: &crate::tui::state::ConfigDialogState,
+    area: Rect,
+) {
+    use crate::commands::config::{
+        ALL_FIELDS, effective_display, global_display, override_indicator, repo_display,
+    };
+
+    // Large centered popup — use most of the terminal.
+    let popup_width = area.width.saturating_sub(4).min(110);
+    let popup_height = area.height.saturating_sub(4).min(26);
+    let popup = centered_rect(popup_width, popup_height, area);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" amux config ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    // inner layout: table rows, separator, hint line, key hints
+    let bottom_height = if state.error_msg.is_some() { 3u16 } else { 2u16 };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(bottom_height)])
+        .split(inner);
+
+    let table_area = chunks[0];
+    let hint_area = chunks[1];
+
+    // Build header row.
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let header = Row::new(vec![
+        Cell::from("Field").style(header_style),
+        Cell::from("Global").style(header_style),
+        Cell::from("Repo").style(header_style),
+        Cell::from("Effective").style(header_style),
+        Cell::from("Override").style(header_style),
+    ])
+    .height(1)
+    .bottom_margin(0);
+
+    // Build data rows.
+    let repo_opt = if state.git_root.is_some() { Some(&state.repo_config) } else { None };
+
+    let rows: Vec<Row> = ALL_FIELDS.iter().enumerate().map(|(i, field)| {
+        let is_selected = i == state.selected_row;
+
+        let gval = if is_selected && state.edit_mode && state.selected_col == 0 {
+            // Show inline edit cursor in Global column.
+            let ev = &state.edit_value;
+            let cursor = state.edit_cursor;
+            format!("{}|{}", &ev[..cursor], &ev[cursor..])
+        } else {
+            global_display(field, &state.global_config)
+        };
+
+        let rval = if is_selected && state.edit_mode && state.selected_col == 1 {
+            // Show inline edit cursor in Repo column.
+            let ev = &state.edit_value;
+            let cursor = state.edit_cursor;
+            format!("{}|{}", &ev[..cursor], &ev[cursor..])
+        } else {
+            repo_display(field, repo_opt)
+        };
+
+        let ev = effective_display(field, &state.global_config, repo_opt);
+        let ov = override_indicator(field, &state.global_config, repo_opt);
+
+        // Highlight selected column within selected row.
+        let (gcell, rcell) = if is_selected && !state.edit_mode {
+            let col_style = Style::default().fg(Color::Black).bg(Color::White);
+            if state.selected_col == 0 {
+                (Cell::from(gval).style(col_style), Cell::from(rval))
+            } else {
+                (Cell::from(gval), Cell::from(rval).style(col_style))
+            }
+        } else if is_selected && state.edit_mode {
+            let edit_style = Style::default().fg(Color::Black).bg(Color::Green);
+            if state.selected_col == 0 {
+                (Cell::from(gval).style(edit_style), Cell::from(rval))
+            } else {
+                (Cell::from(gval), Cell::from(rval).style(edit_style))
+            }
+        } else {
+            (Cell::from(gval), Cell::from(rval))
+        };
+
+        let row = Row::new(vec![
+            Cell::from(field.key),
+            gcell,
+            rcell,
+            Cell::from(ev),
+            Cell::from(ov),
+        ]);
+
+        if is_selected {
+            row.style(Style::default().fg(Color::White).bg(Color::DarkGray))
+        } else {
+            row
+        }
+    }).collect();
+
+    // Column widths (Percentage-based so they scale with popup width).
+    let widths = [
+        Constraint::Percentage(26),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(14),
+    ];
+
+    let table = Table::new(rows, widths).header(header);
+    frame.render_widget(table, table_area);
+
+    // Bottom hint area.
+    let selected_field = &ALL_FIELDS[state.selected_row];
+    let mut hint_lines: Vec<Line> = Vec::new();
+
+    if let Some(ref err) = state.error_msg {
+        hint_lines.push(Line::from(Span::styled(
+            format!("Error: {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    if state.edit_mode {
+        hint_lines.push(Line::from(Span::styled(
+            format!("  Editing {}  |  Accepted: {}  |  Enter=save  Esc=cancel", selected_field.key, selected_field.hint),
+            Style::default().fg(Color::Green),
+        )));
+    } else {
+        hint_lines.push(Line::from(vec![
+            Span::styled("  ↑↓", Style::default().fg(Color::Yellow)),
+            Span::raw("=row  "),
+            Span::styled("←→", Style::default().fg(Color::Yellow)),
+            Span::raw("=col(Both fields)  "),
+            Span::styled("e", Style::default().fg(Color::Yellow)),
+            Span::raw("=edit  "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw("=close  "),
+            Span::styled("Hint:", Style::default().fg(Color::Cyan)),
+            Span::raw(format!(" {}", selected_field.hint)),
+        ]));
+    }
+
+    let hint_para = Paragraph::new(hint_lines).wrap(Wrap { trim: false });
+    frame.render_widget(hint_para, hint_area);
 }
 
 #[cfg(test)]

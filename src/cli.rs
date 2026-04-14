@@ -145,6 +145,34 @@ pub enum Command {
         #[arg(long)]
         watch: bool,
     },
+
+    /// View and edit global and repo configuration.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+/// Subcommands for `amux config`.
+#[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Display all config fields at both global and repo level.
+    Show,
+    /// Show a single field's global value, repo value, and effective value.
+    Get {
+        /// Config field name (e.g. terminal_scrollback_lines).
+        field: String,
+    },
+    /// Set a config field value (repo scope by default).
+    Set {
+        /// Config field name (e.g. terminal_scrollback_lines).
+        field: String,
+        /// New value for the field.
+        value: String,
+        /// Write to global config instead of repo config.
+        #[arg(long)]
+        global: bool,
+    },
 }
 
 /// Subcommands for `amux specs`.
@@ -955,5 +983,71 @@ mod tests {
             }
             _ => panic!("expected implement"),
         }
+    }
+
+    // ── config subcommand parsing ─────────────────────────────────────────────
+
+    #[test]
+    fn config_show_parsed() {
+        let cli = parse(&["amux", "config", "show"]);
+        assert!(matches!(
+            cli.command.unwrap(),
+            Command::Config { action: ConfigAction::Show }
+        ));
+    }
+
+    #[test]
+    fn config_get_parsed() {
+        let cli = parse(&["amux", "config", "get", "terminal_scrollback_lines"]);
+        match cli.command.unwrap() {
+            Command::Config { action: ConfigAction::Get { field } } => {
+                assert_eq!(field, "terminal_scrollback_lines");
+            }
+            _ => panic!("expected config get"),
+        }
+    }
+
+    #[test]
+    fn config_set_parsed_without_global() {
+        let cli = parse(&["amux", "config", "set", "agent", "codex"]);
+        match cli.command.unwrap() {
+            Command::Config { action: ConfigAction::Set { field, value, global } } => {
+                assert_eq!(field, "agent");
+                assert_eq!(value, "codex");
+                assert!(!global);
+            }
+            _ => panic!("expected config set"),
+        }
+    }
+
+    #[test]
+    fn config_set_parsed_with_global_flag() {
+        let cli = parse(&["amux", "config", "set", "--global", "default_agent", "gemini"]);
+        match cli.command.unwrap() {
+            Command::Config { action: ConfigAction::Set { field, value, global } } => {
+                assert_eq!(field, "default_agent");
+                assert_eq!(value, "gemini");
+                assert!(global);
+            }
+            _ => panic!("expected config set --global"),
+        }
+    }
+
+    #[test]
+    fn config_set_global_flag_default_false() {
+        let cli = parse(&["amux", "config", "set", "agent", "claude"]);
+        match cli.command.unwrap() {
+            Command::Config { action: ConfigAction::Set { global, .. } } => {
+                assert!(!global);
+            }
+            _ => panic!("expected config set"),
+        }
+    }
+
+    #[test]
+    fn config_show_listed_in_help() {
+        // Smoke-test that the Config variant is wired into the top-level help.
+        let cli = parse(&["amux"]);
+        assert!(cli.command.is_none()); // no subcommand given
     }
 }

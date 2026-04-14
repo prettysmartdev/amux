@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Per-repository configuration stored at `GITROOT/.amux/config.json`.
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RepoConfig {
     pub agent: Option<String>,
     /// Whether the user has consented to mounting agent credentials into containers.
@@ -27,7 +27,7 @@ pub struct RepoConfig {
 }
 
 /// Global configuration stored at `$HOME/.amux/config.json`.
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GlobalConfig {
     pub default_agent: Option<String>,
     /// Default number of scrollback lines for the container terminal emulator.

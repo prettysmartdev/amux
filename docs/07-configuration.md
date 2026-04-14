@@ -2,6 +2,8 @@
 
 amux uses two JSON config files: a per-repository config and a global config. Most settings can live in either; the per-repo config takes precedence.
 
+You can view and edit configuration from the terminal using the `amux config` subcommand — no need to manually edit JSON files.
+
 ---
 
 ## Per-repository config
@@ -69,6 +71,118 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 For `yoloDisallowedTools` and `envPassthrough`, if a per-repo list is set it **replaces** the global list entirely — lists are not merged. To inherit the global list for a repo, omit the field from the repo config.
 
 A 10,000-line scrollback buffer at 80 columns uses approximately 3 MB per tab. Increase for long-running build or test sessions; decrease when running many simultaneous tabs.
+
+---
+
+## Managing config from the terminal
+
+The `amux config` subcommand lets you view and edit configuration without opening any JSON files. It understands both scopes, shows built-in defaults for unset fields, and warns you when one scope is silently overriding another.
+
+### `amux config show`
+
+Displays every configuration field — even fields not set in either file — as a table showing the global value, repo value, effective (applied) value, and whether the repo is overriding the global:
+
+```
+Field                       Global              Repo              Effective          Override
+──────────────────────────  ──────────────────  ────────────────  ─────────────────  ────────
+default_agent               claude (built-in)   N/A               claude             —
+runtime                     docker (built-in)   N/A               docker             —
+terminal_scrollback_lines   10000 (built-in)    5000              5000               yes
+yolo_disallowed_tools       (empty)             (not set)         (empty)            —
+env_passthrough             HOME, PATH          (not set)         HOME, PATH         —
+agent                       N/A                 codex             codex              yes
+auto_agent_auth_accepted    N/A                 true (read-only)  true               —
+```
+
+Column meanings:
+
+| Column | Meaning |
+|--------|---------|
+| **Global** | Value from `~/.amux/config.json`, with `(built-in)` suffix when not set in the file. `N/A` for repo-only fields |
+| **Repo** | Value from `aspec/.amux.json`, or `(not set)` when absent. `N/A` for global-only fields |
+| **Effective** | The value amux actually uses, after applying precedence rules |
+| **Override** | `yes` when the repo value is set and differs from the global value; `—` otherwise |
+
+When run outside a git repository, `config show` succeeds and shows global fields only, with a note that repo config is unavailable.
+
+### `amux config get <field>`
+
+Shows the global, repo, and effective values for a single field, with an explicit note about which scope wins:
+
+```sh
+amux config get terminal_scrollback_lines
+```
+
+```
+Field: terminal_scrollback_lines
+  Global:     10000 (built-in default)
+  Repo:       5000
+  Effective:  5000  ← repo overrides global
+```
+
+When neither scope has the field set, the built-in default is shown for both Global and Effective, and Repo is marked `(not set)`.
+
+Passing an unknown field name prints a helpful error listing all valid names:
+
+```
+error: Unknown config field 'scrollback'. Valid fields: default_agent, runtime, terminal_scrollback_lines, yolo_disallowed_tools, env_passthrough, agent, auto_agent_auth_accepted
+```
+
+### `amux config set [--global] <field> <value>`
+
+Writes a config value at the repo level (default) or global level (`--global`):
+
+```sh
+# Set agent for this repo
+amux config set agent codex
+
+# Set default agent globally
+amux config set --global default_agent gemini
+
+# Set scrollback lines globally
+amux config set --global terminal_scrollback_lines 20000
+
+# Set disallowed tools for this repo
+amux config set yolo_disallowed_tools "Bash,computer"
+
+# Clear disallowed tools for this repo (empty string sets an empty list)
+amux config set yolo_disallowed_tools ""
+```
+
+After writing, `config set` prints a confirmation showing the new effective value:
+
+```
+Set agent = codex (repo config)
+Effective: codex
+```
+
+**Scope enforcement**: each field has a natural scope. Writing across scopes produces an error:
+
+```
+error: 'runtime' is a global-only field. Use --global to set it.
+
+error: 'agent' is a repo-only field. Cannot be set with --global.
+```
+
+**Override warnings**: if the value you're setting will be silently shadowed, `config set` warns you:
+
+```
+Warning: repo config overrides this field; the new global value will not take effect in this repo.
+
+Note: repo value matches global; no override is active.
+```
+
+**Clearing list fields**: passing an empty string (`""`) for `yolo_disallowed_tools` or `env_passthrough` sets the field to an empty list — it does not remove the field from the config. This matters because an empty repo list actively overrides a non-empty global list. To stop overriding the global list, omit the field from the repo config entirely (edit the file directly).
+
+**Read-only field**: `auto_agent_auth_accepted` is managed by the agent auth flow and cannot be set via `amux config set`. Attempting it exits with:
+
+```
+error: 'auto_agent_auth_accepted' is managed by the agent auth flow and cannot be set via 'amux config set'.
+```
+
+**Platform note**: setting `runtime = apple-containers` on Linux or Windows emits a warning that this value is unsupported on the current platform and will fall back to `docker` at runtime, but the value is still written.
+
+**Missing config files**: `config show` and `config get` never error on missing files — absent files are treated as all-unset. `config set` creates the file and its parent directory (`aspec/.amux/` or `$HOME/.amux/`) as needed.
 
 ---
 

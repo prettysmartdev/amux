@@ -939,6 +939,47 @@ async fn execute_command(app: &mut App, cmd: &str) {
             }
         }
 
+        "config" => {
+            // Only "config show" (or bare "config") opens the TUI config dialog.
+            match parts.get(1) {
+                Some(&"show") | None => {
+                    let git_root = find_git_root_from(&app.active_tab().cwd);
+                    let global_config = crate::config::load_global_config().unwrap_or_default();
+                    let repo_config = git_root
+                        .as_deref()
+                        .and_then(|r| {
+                            let _ = crate::config::migrate_legacy_repo_config(r);
+                            crate::config::load_repo_config(r).ok()
+                        })
+                        .unwrap_or_default();
+
+                    // Determine initial selected_col based on the first field's scope.
+                    use crate::commands::config::{ALL_FIELDS, FieldScope};
+                    let initial_col = match ALL_FIELDS[0].scope {
+                        FieldScope::RepoOnly => 1,
+                        _ => 0,
+                    };
+
+                    let state = crate::tui::state::ConfigDialogState {
+                        selected_row: 0,
+                        selected_col: initial_col,
+                        edit_mode: false,
+                        edit_value: String::new(),
+                        edit_cursor: 0,
+                        git_root,
+                        global_config,
+                        repo_config,
+                        error_msg: None,
+                    };
+                    app.active_tab_mut().dialog = state::Dialog::ConfigShow(state);
+                }
+                _ => {
+                    app.active_tab_mut().input_error =
+                        Some("Usage: config show".into());
+                }
+            }
+        }
+
         unknown => {
             let suggestion = input::closest_subcommand(unknown)
                 .map(|s| format!("  Did you mean: {}", s))

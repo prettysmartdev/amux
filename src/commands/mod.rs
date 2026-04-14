@@ -2,6 +2,7 @@ pub mod agent;
 pub mod auth;
 pub mod chat;
 pub mod claws;
+pub mod config;
 pub mod download;
 pub mod implement;
 pub mod init;
@@ -47,5 +48,6 @@ pub async fn run(command: Command, runtime: Arc<dyn crate::runtime::AgentRuntime
                 specs::run_amend(&work_item, non_interactive, allow_docker, runtime).await
             },
         },
+        Command::Config { action } => config::run(action, runtime).await,
     }
 }

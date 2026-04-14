@@ -193,6 +193,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
                 app.active_tab_mut(), key, uncommitted_files, message, cursor_pos,
             )
         }
+        Dialog::ConfigShow(state) => {
+            return handle_config_show(app.active_tab_mut(), key, state)
+        }
         Dialog::None => {}
     }
 
@@ -1338,7 +1341,7 @@ fn handle_worktree_pre_commit_message(
 
 // --- Autocomplete ---
 
-const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "specs", "claws", "status"];
+const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "specs", "claws", "status", "config"];
 
 /// Return suggestions for the current input string.
 pub fn autocomplete_suggestions(input: &str) -> Vec<String> {
@@ -1407,6 +1410,9 @@ fn flag_suggestions_for(cmd: &str, _typed: &str) -> Vec<String> {
             "status         (show all running agents and nanoclaw containers)".into(),
             "status --watch (refresh every 3 seconds)".into(),
         ],
+        "config" => vec![
+            "config show    (view all config fields in a table dialog)".into(),
+        ],
         _ => vec![],
     }
 }
@@ -1455,6 +1461,253 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
         KeyCode::F(n) => Some(format!("\x1b[{}~", n).into_bytes()),
         _ => None,
+    }
+}
+
+// ── Config dialog key handler ─────────────────────────────────────────────────
+
+/// Handle key events for the `Dialog::ConfigShow` modal.
+pub fn handle_config_show(
+    tab: &mut TabState,
+    key: KeyEvent,
+    mut state: crate::tui::state::ConfigDialogState,
+) -> Action {
+    use crate::commands::config::{
+        ALL_FIELDS, apply_to_global, apply_to_repo, validate_value, FieldScope,
+        find_field, global_display, repo_display,
+    };
+    use crate::config::{
+        load_global_config, load_repo_config, save_global_config, save_repo_config,
+        migrate_legacy_repo_config,
+    };
+
+    if state.edit_mode {
+        // ── Edit mode key handling ────────────────────────────────────────────
+        match key.code {
+            KeyCode::Esc => {
+                state.edit_mode = false;
+                state.edit_value = String::new();
+                state.edit_cursor = 0;
+                state.error_msg = None;
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+            KeyCode::Enter => {
+                // Validate and save the value.
+                let field_key = ALL_FIELDS[state.selected_row].key;
+                let field = match find_field(field_key) {
+                    Some(f) => f,
+                    None => {
+                        state.edit_mode = false;
+                        tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+                        return Action::None;
+                    }
+                };
+                let value = state.edit_value.trim().to_string();
+                // Validate.
+                if let Err(e) = validate_value(field, &value) {
+                    state.error_msg = Some(e.to_string());
+                    state.edit_mode = false;
+                    tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+                    return Action::None;
+                }
+                // Determine write scope (0=Global, 1=Repo).
+                let write_global = state.selected_col == 0;
+                if write_global {
+                    let mut global = load_global_config().unwrap_or_default();
+                    apply_to_global(field, &value, &mut global);
+                    if let Err(e) = save_global_config(&global) {
+                        state.error_msg = Some(e.to_string());
+                        state.edit_mode = false;
+                        tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+                        return Action::None;
+                    }
+                } else {
+                    if let Some(ref root) = state.git_root.clone() {
+                        let _ = migrate_legacy_repo_config(root);
+                        let mut repo = load_repo_config(root).unwrap_or_default();
+                        apply_to_repo(field, &value, &mut repo);
+                        if let Err(e) = save_repo_config(root, &repo) {
+                            state.error_msg = Some(e.to_string());
+                            state.edit_mode = false;
+                            tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+                            return Action::None;
+                        }
+                    }
+                }
+                // Reload configs.
+                state.global_config = load_global_config().unwrap_or_default();
+                if let Some(ref root) = state.git_root.clone() {
+                    state.repo_config = load_repo_config(root).unwrap_or_default();
+                }
+                state.edit_mode = false;
+                state.edit_value = String::new();
+                state.edit_cursor = 0;
+                state.error_msg = None;
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+            KeyCode::Backspace => {
+                // Delete char before cursor.
+                if state.edit_cursor > 0 {
+                    let cursor = state.edit_cursor;
+                    // Find the previous char boundary.
+                    let prev = state.edit_value[..cursor]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    state.edit_value.remove(prev);
+                    state.edit_cursor = prev;
+                }
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+            KeyCode::Left => {
+                if state.edit_cursor > 0 {
+                    let prev = state.edit_value[..state.edit_cursor]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    state.edit_cursor = prev;
+                }
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+            KeyCode::Right => {
+                if state.edit_cursor < state.edit_value.len() {
+                    let next = state.edit_value[state.edit_cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| state.edit_cursor + i)
+                        .unwrap_or(state.edit_value.len());
+                    state.edit_cursor = next;
+                }
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let cursor = state.edit_cursor;
+                state.edit_value.insert(cursor, c);
+                state.edit_cursor += c.len_utf8();
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+            _ => {
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+        }
+    } else {
+        // ── Normal (navigation) mode ──────────────────────────────────────────
+        let num_fields = ALL_FIELDS.len();
+        match key.code {
+            KeyCode::Esc => {
+                // Close dialog.
+                tab.dialog = crate::tui::state::Dialog::None;
+                return Action::None;
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Ctrl+Enter also closes.
+                tab.dialog = crate::tui::state::Dialog::None;
+                return Action::None;
+            }
+            KeyCode::Up => {
+                if state.selected_row > 0 {
+                    state.selected_row -= 1;
+                    // Constrain selected_col to the new row's scope.
+                    constrain_col(&mut state);
+                }
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+            KeyCode::Down => {
+                if state.selected_row + 1 < num_fields {
+                    state.selected_row += 1;
+                    constrain_col(&mut state);
+                }
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+            KeyCode::Left => {
+                // Move to Global column (col 0) if the field scope allows it.
+                let scope = ALL_FIELDS[state.selected_row].scope;
+                if scope == FieldScope::Both {
+                    state.selected_col = 0;
+                }
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+            KeyCode::Right => {
+                // Move to Repo column (col 1) if the field scope allows it.
+                let scope = ALL_FIELDS[state.selected_row].scope;
+                if scope == FieldScope::Both {
+                    state.selected_col = 1;
+                }
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+            KeyCode::Char('e') => {
+                // Enter edit mode for the selected cell if allowed.
+                let field = &ALL_FIELDS[state.selected_row];
+                if !field.settable {
+                    // Read-only field: show a transient error.
+                    state.error_msg = Some(format!(
+                        "'{}' is read-only and cannot be edited here.",
+                        field.key
+                    ));
+                    tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+                    return Action::None;
+                }
+                // Scope check: can't edit Global column for repo-only, or Repo col for global-only.
+                let write_global = state.selected_col == 0;
+                if write_global && field.scope == FieldScope::RepoOnly {
+                    state.error_msg = Some(format!("'{}' is repo-only; use the Repo column.", field.key));
+                    tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+                    return Action::None;
+                }
+                if !write_global && field.scope == FieldScope::GlobalOnly {
+                    state.error_msg = Some(format!("'{}' is global-only; use the Global column.", field.key));
+                    tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+                    return Action::None;
+                }
+                if !write_global && state.git_root.is_none() {
+                    state.error_msg = Some("Repo config unavailable (not in a git repo).".to_string());
+                    tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+                    return Action::None;
+                }
+                // Pre-fill with the current value.
+                let prefill = if write_global {
+                    let raw = global_display(field, &state.global_config);
+                    // Strip " (built-in)" suffix so the user edits a clean value.
+                    let stripped = raw.trim_end_matches(" (built-in)");
+                    // Empty placeholder: start blank so user types directly.
+                    if stripped == "(empty)" || stripped.is_empty() {
+                        String::new()
+                    } else {
+                        stripped.to_string()
+                    }
+                } else {
+                    let rv = repo_display(field, Some(&state.repo_config));
+                    if rv == "(not set)" || rv == "(empty)" || rv.ends_with("(read-only)") {
+                        String::new()
+                    } else {
+                        rv
+                    }
+                };
+                let prefill_len = prefill.len();
+                state.edit_mode = true;
+                state.edit_value = prefill;
+                state.edit_cursor = prefill_len;
+                state.error_msg = None;
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+            _ => {
+                tab.dialog = crate::tui::state::Dialog::ConfigShow(state);
+            }
+        }
+    }
+    Action::None
+}
+
+/// Constrain `selected_col` so it is valid for the current row's scope.
+fn constrain_col(state: &mut crate::tui::state::ConfigDialogState) {
+    use crate::commands::config::{ALL_FIELDS, FieldScope};
+    let scope = ALL_FIELDS[state.selected_row].scope;
+    match scope {
+        FieldScope::GlobalOnly => state.selected_col = 0,
+        FieldScope::RepoOnly => state.selected_col = 1,
+        FieldScope::Both => {} // keep current col
     }
 }
 

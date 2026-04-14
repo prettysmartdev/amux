@@ -1,6 +1,7 @@
 use crate::commands::claws::ClawsAuditCtx;
 use crate::commands::ready::{ReadyContext, ReadyOptions, ReadySummary};
 use crate::commands::status::TuiTabInfo;
+use crate::config::{GlobalConfig, RepoConfig};
 use crate::runtime::docker as docker;
 use crate::tui::pty::PtySession;
 use crate::workflow::{StepStatus, WorkflowState};
@@ -41,6 +42,29 @@ pub enum ExecutionPhase {
     Done { command: String },
     /// Command exited with a non-zero status.
     Error { command: String, exit_code: i32 },
+}
+
+/// State for the config show/edit modal dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigDialogState {
+    /// Index into `ALL_FIELDS` of the currently selected row.
+    pub selected_row: usize,
+    /// Which scope column is selected: 0 = Global, 1 = Repo.
+    pub selected_col: usize,
+    /// Whether the selected cell is in edit mode.
+    pub edit_mode: bool,
+    /// Text being edited in the current cell.
+    pub edit_value: String,
+    /// Byte cursor position within `edit_value`.
+    pub edit_cursor: usize,
+    /// Git root, if the dialog was opened inside a git repo.
+    pub git_root: Option<PathBuf>,
+    /// Snapshot of the global config (refreshed after each save).
+    pub global_config: GlobalConfig,
+    /// Snapshot of the repo config (refreshed after each save).
+    pub repo_config: RepoConfig,
+    /// Error from the last save attempt (cleared on next edit).
+    pub error_msg: Option<String>,
 }
 
 /// An overlay modal dialog, if any.
@@ -174,6 +198,8 @@ pub enum Dialog {
         message: String,
         cursor_pos: usize,
     },
+    /// Full-screen config view/edit dialog (triggered by `config show` in the TUI command input).
+    ConfigShow(ConfigDialogState),
 }
 
 /// Tracks which command is waiting for dialog answers (mount scope, auth).
