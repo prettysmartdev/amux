@@ -104,7 +104,8 @@
       "Bash(sed -n '5,27p' /workspace/src/config/mod.rs)",
       "WebFetch(domain:geminicli.com)",
       "Bash(RUSTFLAGS=\"-W unused-imports -W dead-code -W unused-variables -W unused-mut\" cargo build)",
-      "Bash(perl:*)"
+      "Bash(perl:*)",
+      "Bash(ls /workspace/Dockerfile*)"
     ]
   }
 }

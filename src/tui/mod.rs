@@ -3165,6 +3165,16 @@ async fn check_workflow_step_completion(app: &mut App) {
 
 /// Launch the next ready workflow step (called after user confirms advancing).
 async fn launch_next_workflow_step(app: &mut App) {
+    // Kill the previous container if it is still running (e.g. stuck / forced advance).
+    // When the container exited naturally, `container_info` is already None (cleared by
+    // `finish_command`), so this is a no-op in the normal completion path.
+    if let Some(name) = app.active_tab().container_info.as_ref().map(|i| i.container_name.clone()) {
+        let stop_runtime = app.runtime.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = stop_runtime.stop_container(&name);
+        });
+    }
+
     let (wf_state, git_root, work_item, agent_name, allow_docker, ssh_dir, mount_path) = {
         let tab = app.active_tab();
         let wf = match tab.workflow.clone() {
