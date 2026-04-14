@@ -125,9 +125,9 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         let is_active = i == app.active_tab_idx;
         // All tabs share the same 3-row height, flush to the top of the tab bar area.
         let tab_area = Rect { x, y: area.y, width: TAB_WIDTH, height: 3 };
-        let color = tab.tab_color();
+        let color = tab.tab_color(is_active);
         let project = tab.tab_project_name();
-        let subcmd = tab.tab_subcommand_label(TAB_WIDTH);
+        let subcmd = tab.tab_subcommand_label(TAB_WIDTH, is_active);
 
         let (border_style, title_style, content_style) = if is_active {
             (
@@ -814,8 +814,11 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
         draw_workflow_control_board(frame, area, current_step, error.as_deref(), container_minimized, is_last_step);
         return;
     }
-    if let Dialog::WorkflowYoloCountdown { current_step, started_at, duration } = &tab.dialog {
-        draw_workflow_yolo_countdown(frame, area, current_step, started_at, duration);
+    if let Dialog::WorkflowYoloCountdown { current_step } = &tab.dialog {
+        // Timing is authoritative from tab.yolo_countdown_started_at.
+        let fallback = std::time::Instant::now();
+        let started_at = tab.yolo_countdown_started_at.as_ref().unwrap_or(&fallback);
+        draw_workflow_yolo_countdown(frame, area, current_step, started_at, &crate::tui::state::YOLO_COUNTDOWN_DURATION);
         return;
     }
     if let Dialog::WorktreeCommitPrompt { branch, uncommitted_files, message, cursor_pos, .. } = &tab.dialog {

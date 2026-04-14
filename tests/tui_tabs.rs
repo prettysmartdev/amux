@@ -109,7 +109,7 @@ fn tabs_have_independent_input() {
 fn tab_color_idle_is_dark_gray() {
     use ratatui::style::Color;
     let tab = amux::tui::state::TabState::new(std::path::PathBuf::from("/tmp/proj"));
-    assert_eq!(tab.tab_color(), Color::DarkGray);
+    assert_eq!(tab.tab_color(true), Color::DarkGray);
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn tab_color_running_no_container_is_blue() {
     use ratatui::style::Color;
     let mut tab = amux::tui::state::TabState::new(std::path::PathBuf::from("/tmp/proj"));
     tab.phase = ExecutionPhase::Running { command: "ready".into() };
-    assert_eq!(tab.tab_color(), Color::Blue);
+    assert_eq!(tab.tab_color(true), Color::Blue);
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn tab_color_running_with_container_is_green() {
     let mut tab = amux::tui::state::TabState::new(std::path::PathBuf::from("/tmp/proj"));
     tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
     tab.container_window = ContainerWindowState::Maximized;
-    assert_eq!(tab.tab_color(), Color::Green);
+    assert_eq!(tab.tab_color(true), Color::Green);
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn tab_color_error_is_red() {
     use ratatui::style::Color;
     let mut tab = amux::tui::state::TabState::new(std::path::PathBuf::from("/tmp/proj"));
     tab.phase = ExecutionPhase::Error { command: "ready".into(), exit_code: 1 };
-    assert_eq!(tab.tab_color(), Color::Red);
+    assert_eq!(tab.tab_color(true), Color::Red);
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn tab_color_claws_running_is_purple() {
     let mut tab = amux::tui::state::TabState::new(std::path::PathBuf::from("/tmp/proj"));
     tab.phase = ExecutionPhase::Running { command: "claws ready".into() };
     tab.claws_phase = ClawsPhase::Setup;
-    assert_eq!(tab.tab_color(), Color::Magenta);
+    assert_eq!(tab.tab_color(true), Color::Magenta);
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn tab_color_claws_overrides_green() {
     tab.phase = ExecutionPhase::Running { command: "claws ready".into() };
     tab.claws_phase = ClawsPhase::Setup;
     tab.container_window = ContainerWindowState::Maximized;
-    assert_eq!(tab.tab_color(), Color::Magenta);
+    assert_eq!(tab.tab_color(true), Color::Magenta);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,14 +197,14 @@ fn tab_project_name_idle() {
 #[test]
 fn tab_subcommand_label_idle_is_empty() {
     let tab = amux::tui::state::TabState::new(std::path::PathBuf::from("/home/user/myproject"));
-    assert_eq!(tab.tab_subcommand_label(20), "");
+    assert_eq!(tab.tab_subcommand_label(20, true), "");
 }
 
 #[test]
 fn tab_subcommand_label_running_full_command() {
     let mut tab = amux::tui::state::TabState::new(std::path::PathBuf::from("/home/user/proj"));
     tab.phase = ExecutionPhase::Running { command: "claws ready".into() };
-    assert_eq!(tab.tab_subcommand_label(20), "claws ready");
+    assert_eq!(tab.tab_subcommand_label(20, true), "claws ready");
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn tab_subcommand_label_truncates_long_command() {
     let mut tab = amux::tui::state::TabState::new(std::path::PathBuf::from("/home/user/proj"));
     tab.phase = ExecutionPhase::Running { command: "claws ready --some-very-long-flag".into() };
     // tab_width=20, max_chars=16; command is 33 chars so it must be truncated
-    let label = tab.tab_subcommand_label(20);
+    let label = tab.tab_subcommand_label(20, true);
     assert!(label.ends_with('…'), "expected truncation ellipsis, got: {}", label);
     assert!(label.chars().count() <= 16);
 }
@@ -229,7 +229,7 @@ fn tab_color_stuck_container_is_yellow() {
     tab.container_window = ContainerWindowState::Maximized;
     // Simulate 61 seconds of silence.
     tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
-    assert_eq!(tab.tab_color(), Color::Yellow);
+    assert_eq!(tab.tab_color(true), Color::Yellow);
 }
 
 #[test]
@@ -239,11 +239,11 @@ fn tab_color_reverts_to_green_after_acknowledge() {
     tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
     tab.container_window = ContainerWindowState::Maximized;
     tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
-    assert_eq!(tab.tab_color(), Color::Yellow);
+    assert_eq!(tab.tab_color(true), Color::Yellow);
 
     tab.acknowledge_stuck();
     // Container is still running → should revert to green (not yellow).
-    assert_eq!(tab.tab_color(), Color::Green);
+    assert_eq!(tab.tab_color(true), Color::Green);
 }
 
 #[test]
@@ -253,7 +253,7 @@ fn tab_subcommand_label_shows_warning_when_stuck() {
     tab.container_window = ContainerWindowState::Maximized;
     tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
 
-    let label = tab.tab_subcommand_label(30);
+    let label = tab.tab_subcommand_label(30, true);
     assert!(
         label.contains('⚠'),
         "expected warning symbol in stuck label, got: {:?}",
@@ -269,11 +269,11 @@ fn tab_subcommand_label_clears_warning_after_acknowledge() {
     tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
 
     // Stuck warning is visible.
-    assert!(tab.tab_subcommand_label(30).contains('⚠'));
+    assert!(tab.tab_subcommand_label(30, true).contains('⚠'));
 
     // User acknowledges (switches to tab / provides input).
     tab.acknowledge_stuck();
-    assert!(!tab.tab_subcommand_label(30).contains('⚠'));
+    assert!(!tab.tab_subcommand_label(30, true).contains('⚠'));
 }
 
 #[test]
@@ -293,8 +293,8 @@ fn stuck_state_is_independent_per_tab() {
     app.tabs[1].container_window = ContainerWindowState::Maximized;
     app.tabs[1].last_output_time = Some(Instant::now());
 
-    assert_eq!(app.tabs[0].tab_color(), Color::Yellow, "tab 0 should be stuck (yellow)");
-    assert_eq!(app.tabs[1].tab_color(), Color::Green, "tab 1 should not be stuck (green)");
+    assert_eq!(app.tabs[0].tab_color(true), Color::Yellow, "tab 0 should be stuck (yellow)");
+    assert_eq!(app.tabs[1].tab_color(false), Color::Green, "tab 1 should not be stuck (green)");
 }
 
 #[test]
@@ -316,8 +316,8 @@ fn acknowledging_one_tab_does_not_affect_other() {
     app.tabs[1].acknowledge_stuck();
 
     // Tab 0 is still stuck; tab 1 is no longer stuck.
-    assert_eq!(app.tabs[0].tab_color(), Color::Yellow);
-    assert_eq!(app.tabs[1].tab_color(), Color::Green);
+    assert_eq!(app.tabs[0].tab_color(true), Color::Yellow);
+    assert_eq!(app.tabs[1].tab_color(false), Color::Green);
 }
 
 // ---------------------------------------------------------------------------

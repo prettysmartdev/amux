@@ -148,13 +148,11 @@ pub enum Dialog {
     },
     /// Yolo mode: countdown dialog shown when a workflow step is stuck.
     /// When the countdown expires the step is automatically advanced.
+    /// Timing is read from `TabState.yolo_countdown_started_at` (the single
+    /// authoritative source) rather than stored here.
     WorkflowYoloCountdown {
         /// Name of the currently running step.
         current_step: String,
-        /// When the countdown began.
-        started_at: Instant,
-        /// How long to wait before auto-advancing.
-        duration: Duration,
     },
     /// After `implement --worktree` completes: ask whether to merge, discard, or keep the branch.
     WorktreeMergePrompt {
@@ -542,6 +540,18 @@ pub struct TabState {
     /// Set to `true` by `tick_all()` when a yolo countdown dialog expires.
     /// The event loop reads this flag and dispatches the appropriate workflow-advance action.
     pub yolo_countdown_expired: bool,
+
+    /// Timestamp of the most recent user keypress or mouse interaction on this tab.
+    /// `None` until the first interaction. Used by `is_stuck(true)` to suppress stuck
+    /// detection while the user is actively engaged with the active tab.
+    pub last_user_activity_time: Option<Instant>,
+
+    /// Single authoritative timestamp for the yolo countdown timer.
+    /// Set by `tick_all()` when a tab (active or background) first becomes stuck in yolo
+    /// mode. Cleared when the countdown expires, when new output arrives, or when the
+    /// active tab is no longer stuck due to user activity.
+    /// Dialog rendering reads this value rather than any field inside the dialog variant.
+    pub yolo_countdown_started_at: Option<Instant>,
 }
 
 impl TabState {
@@ -616,6 +626,8 @@ impl TabState {
             yolo_disallowed_tools: Vec::new(),
             auto_workflow_disabled_for_step: false,
             yolo_countdown_expired: false,
+            last_user_activity_time: None,
+            yolo_countdown_started_at: None,
         }
     }
 
@@ -733,6 +745,7 @@ impl TabState {
         self.workflow_stuck_dialog_dismissed_at = None;
         self.auto_workflow_disabled_for_step = false;
         self.yolo_countdown_expired = false;
+        self.yolo_countdown_started_at = None;
         // Close the yolo countdown dialog defensively: the container has exited so there
         // is nothing left to count down for.  In normal yolo+workflow runs the worktree
         // merge prompt or WorkflowStepConfirm will overwrite this anyway, but if
@@ -906,13 +919,31 @@ impl TabState {
     /// Returns `true` if the running container has produced no output for
     /// longer than [`STUCK_TIMEOUT`]. Only meaningful when a container is
     /// active; always `false` otherwise.
-    pub fn is_stuck(&self) -> bool {
-        matches!(&self.phase, ExecutionPhase::Running { .. })
-            && self.container_window != ContainerWindowState::Hidden
-            && self
-                .last_output_time
-                .map(|t| t.elapsed() > STUCK_TIMEOUT)
-                .unwrap_or(false)
+    ///
+    /// When `is_active = true` (the tab is currently visible to the user),
+    /// also returns `false` if the user has interacted with the tab within
+    /// the last `STUCK_TIMEOUT` — suppressing stuck detection while the user
+    /// is actively reading output.
+    /// When `is_active = false`, only `last_output_time` is considered.
+    pub fn is_stuck(&self, is_active: bool) -> bool {
+        if !matches!(&self.phase, ExecutionPhase::Running { .. }) {
+            return false;
+        }
+        if self.container_window == ContainerWindowState::Hidden {
+            return false;
+        }
+        if !self.last_output_time.map(|t| t.elapsed() > STUCK_TIMEOUT).unwrap_or(false) {
+            return false;
+        }
+        // Active-tab suppression: if the user interacted recently, not considered stuck.
+        if is_active {
+            if let Some(activity) = self.last_user_activity_time {
+                if activity.elapsed() < STUCK_TIMEOUT {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Reset the stuck timer to now and clear the auto-open flag.
@@ -923,9 +954,25 @@ impl TabState {
     pub fn acknowledge_stuck(&mut self) {
         self.workflow_stuck_dialog_opened = false;
         self.workflow_stuck_dialog_dismissed_at = None;
-        if self.last_output_time.is_some() {
+        // Do not reset last_output_time while a yolo countdown is active.  Doing so
+        // would make is_stuck() return false on the very next tick, causing the "active
+        // and not stuck" branch in tick_all() to immediately close the dialog that was
+        // just opened by the tab-switching code — defeating the preserved-remaining-time
+        // feature.  When a countdown is running, is_stuck() is still suppressed via
+        // last_user_activity_time (if the user typed) or last_output_time (once real new
+        // output arrives), so this guard does not break any other stuck-clearing path.
+        if self.last_output_time.is_some() && self.yolo_countdown_started_at.is_none() {
             self.last_output_time = Some(Instant::now());
         }
+    }
+
+    /// Record that the user has interacted with this tab (keypress, mouse scroll, etc.).
+    /// Sets `last_user_activity_time` so that `is_stuck(true)` returns `false` for the
+    /// next `STUCK_TIMEOUT` window, suppressing stuck indicators while the user is active.
+    /// Distinct from `acknowledge_stuck()`: that method resets the output-based timer;
+    /// this one records the user's intent to suppress stuck detection.
+    pub fn record_user_activity(&mut self) {
+        self.last_user_activity_time = Some(Instant::now());
     }
 
     /// Record that the user dismissed the `WorkflowControlBoard` dialog with Esc.
@@ -953,9 +1000,30 @@ impl TabState {
         wf_clone.next_ready().is_empty()
     }
 
+    /// Returns the yolo countdown color for a background tab, alternating each second.
+    /// `None` when `yolo_countdown_started_at` is not set.
+    /// Even elapsed seconds → `Color::Yellow`; odd elapsed seconds → `Color::Magenta`.
+    pub fn background_yolo_color(&self) -> Option<Color> {
+        let started = self.yolo_countdown_started_at?;
+        let secs_elapsed = started.elapsed().as_secs();
+        if secs_elapsed % 2 == 0 {
+            Some(Color::Yellow)
+        } else {
+            Some(Color::Magenta)
+        }
+    }
+
     /// Color for the tab indicator based on current phase and container state.
-    pub fn tab_color(&self) -> Color {
-        if self.is_stuck() {
+    /// When `is_active = false` and a yolo countdown is running, returns the
+    /// alternating background yolo color instead of the normal color.
+    pub fn tab_color(&self, is_active: bool) -> Color {
+        // Background yolo countdown overrides normal color for background tabs.
+        if !is_active {
+            if let Some(color) = self.background_yolo_color() {
+                return color;
+            }
+        }
+        if self.is_stuck(is_active) {
             return Color::Yellow;
         }
         match &self.phase {
@@ -987,10 +1055,44 @@ impl TabState {
         }
     }
 
+    /// Returns the yolo countdown label for a background tab.
+    /// `None` when `yolo_countdown_started_at` is not set.
+    /// Alternates between "⚠️  yolo in {N}" (yellow phase) and "🤘 yolo in {N}" (magenta phase),
+    /// truncated to fit `tab_width` (total widget width including borders).
+    pub fn background_yolo_label(&self, tab_width: u16) -> Option<String> {
+        let started = self.yolo_countdown_started_at?;
+        let elapsed = started.elapsed();
+        let remaining = YOLO_COUNTDOWN_DURATION.saturating_sub(elapsed);
+        let secs_remaining = remaining.as_secs();
+        let secs_elapsed = elapsed.as_secs();
+        let label = if secs_elapsed % 2 == 0 {
+            format!("⚠️  yolo in {}", secs_remaining)
+        } else {
+            format!("🤘 yolo in {}", secs_remaining)
+        };
+        // Inner width: tab_width minus 2 borders minus 2 padding spaces.
+        let max_chars = tab_width.saturating_sub(4) as usize;
+        let truncated = if label.chars().count() > max_chars && max_chars > 1 {
+            let t: String = label.chars().take(max_chars - 1).collect();
+            format!("{}…", t)
+        } else {
+            label
+        };
+        Some(truncated)
+    }
+
     /// Full subcommand shown inside the tab box, truncated if wider than the tab.
     /// `tab_width` is the total width of the tab widget (including borders).
     /// Empty string when idle. Prepends "⚠️ " when the tab is stuck.
-    pub fn tab_subcommand_label(&self, tab_width: u16) -> String {
+    /// When `is_active = false` and a yolo countdown is running, returns the
+    /// countdown label instead of the normal subcommand label.
+    pub fn tab_subcommand_label(&self, tab_width: u16, is_active: bool) -> String {
+        // Background yolo countdown overrides normal label for background tabs.
+        if !is_active {
+            if let Some(label) = self.background_yolo_label(tab_width) {
+                return label;
+            }
+        }
         let cmd = match &self.phase {
             ExecutionPhase::Idle => return String::new(),
             ExecutionPhase::Running { command }
@@ -998,7 +1100,7 @@ impl TabState {
             | ExecutionPhase::Error { command, .. } => command.as_str(),
         };
         // Prepend warning prefix for stuck tabs.
-        let prefix = if self.is_stuck() { "⚠️ " } else { "" };
+        let prefix = if self.is_stuck(is_active) { "⚠️ " } else { "" };
         let prefix_chars = prefix.chars().count();
         // Inner width: tab_width minus 2 borders minus 2 padding spaces.
         let max_chars = tab_width.saturating_sub(4) as usize;
@@ -1015,7 +1117,7 @@ impl TabState {
     /// Combined display name for the tab: "projname" or "projname | cmd".
     pub fn tab_display_name(&self) -> String {
         let proj = self.tab_project_name();
-        let cmd = self.tab_subcommand_label(20);
+        let cmd = self.tab_subcommand_label(20, true);
         if cmd.is_empty() { proj } else { format!("{} | {}", proj, cmd) }
     }
 
@@ -1063,11 +1165,14 @@ impl TabState {
                         }
                         // Any output from the container resets the stuck timer.
                         self.last_output_time = Some(Instant::now());
-                        // Cancel the yolo countdown dialog: the agent is active again.
+                        // Cancel the yolo countdown and dialog: the agent is active again.
                         if matches!(self.dialog, Dialog::WorkflowYoloCountdown { .. }) {
                             self.dialog = Dialog::None;
                             self.workflow_stuck_dialog_opened = false;
                         }
+                        // Also clear the authoritative countdown timer so the background
+                        // tab bar returns to its normal color.
+                        self.yolo_countdown_started_at = None;
                     } else {
                         self.process_pty_data(&bytes);
                     }
@@ -1235,63 +1340,81 @@ impl App {
             tab.tick();
         }
 
-        // Auto-open stuck dialog on the active tab when it becomes stuck.
-        // Uses an index rather than the loop above to avoid a split-borrow conflict.
-        // Intentionally no `container_window != Maximized` guard here — unlike Ctrl+W,
-        // the auto-open must work even when the container is fullscreen.
+        // Process stuck/yolo state transitions for all tabs.
+        // Uses a captured index to avoid borrow-checker conflicts.
         let active = self.active_tab_idx;
-        if active < self.tabs.len() {
-            let tab = &mut self.tabs[active];
-            let backoff_elapsed = tab
-                .workflow_stuck_dialog_dismissed_at
-                .map(|t| t.elapsed() >= STUCK_DIALOG_BACKOFF)
-                .unwrap_or(true);
 
-            if tab.is_stuck() && tab.workflow_current_step.is_some() {
-                if tab.yolo_mode {
-                    // Yolo mode: open countdown dialog instead of control board.
-                    if tab.dialog == Dialog::None
-                        && !tab.workflow_stuck_dialog_opened
-                        && backoff_elapsed
-                    {
-                        let step = tab.workflow_current_step.clone().unwrap();
-                        tab.dialog = Dialog::WorkflowYoloCountdown {
-                            current_step: step,
-                            started_at: Instant::now(),
-                            duration: YOLO_COUNTDOWN_DURATION,
-                        };
-                        tab.workflow_stuck_dialog_opened = true;
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            let is_active = i == active;
+            let stuck = tab.is_stuck(is_active);
+
+            // Active-tab: if no longer stuck (user activity suppression), close any open
+            // yolo dialog and clear the countdown so the tab returns to its normal state.
+            if is_active && !stuck {
+                if matches!(tab.dialog, Dialog::WorkflowYoloCountdown { .. }) {
+                    tab.dialog = Dialog::None;
+                    tab.workflow_stuck_dialog_opened = false;
+                    tab.yolo_countdown_started_at = None;
+                }
+            }
+
+            if tab.yolo_mode && tab.workflow_current_step.is_some() {
+                if stuck {
+                    // Start the countdown timer if not already running.
+                    if tab.yolo_countdown_started_at.is_none() {
+                        tab.yolo_countdown_started_at = Some(Instant::now());
                     }
+
                     // Check if the countdown has expired → signal auto-advance.
-                    let countdown_expired = if let Dialog::WorkflowYoloCountdown {
-                        ref started_at,
-                        ref duration,
-                        ..
-                    } = tab.dialog
-                    {
-                        started_at.elapsed() >= *duration
-                    } else {
-                        false
-                    };
-                    if countdown_expired {
-                        tab.yolo_countdown_expired = true;
-                        tab.dialog = Dialog::None;
-                        tab.workflow_stuck_dialog_opened = false;
+                    if let Some(started) = tab.yolo_countdown_started_at {
+                        if started.elapsed() >= YOLO_COUNTDOWN_DURATION {
+                            tab.yolo_countdown_expired = true;
+                            tab.yolo_countdown_started_at = None;
+                            tab.dialog = Dialog::None;
+                            tab.workflow_stuck_dialog_opened = false;
+                            continue;
+                        }
+                    }
+
+                    // Active tab only: open the dialog if not already open.
+                    // Background tabs rely on tab-bar rendering for countdown feedback.
+                    if is_active {
+                        let backoff_elapsed = tab
+                            .workflow_stuck_dialog_dismissed_at
+                            .map(|t| t.elapsed() >= STUCK_DIALOG_BACKOFF)
+                            .unwrap_or(true);
+                        if tab.dialog == Dialog::None
+                            && !tab.workflow_stuck_dialog_opened
+                            && backoff_elapsed
+                        {
+                            let step = tab.workflow_current_step.clone().unwrap();
+                            tab.dialog = Dialog::WorkflowYoloCountdown {
+                                current_step: step,
+                            };
+                            tab.workflow_stuck_dialog_opened = true;
+                        }
                     }
                 } else {
-                    // Non-yolo mode: open WorkflowControlBoard unless auto-popup is disabled.
-                    if tab.dialog == Dialog::None
-                        && !tab.workflow_stuck_dialog_opened
-                        && backoff_elapsed
-                        && !tab.auto_workflow_disabled_for_step
-                    {
-                        let step = tab.workflow_current_step.clone().unwrap();
-                        tab.dialog = Dialog::WorkflowControlBoard {
-                            current_step: step,
-                            error: None,
-                        };
-                        tab.workflow_stuck_dialog_opened = true;
-                    }
+                    // No longer stuck: reset countdown so a fresh one begins if it stalls again.
+                    tab.yolo_countdown_started_at = None;
+                }
+            } else if !tab.yolo_mode && is_active && stuck && tab.workflow_current_step.is_some() {
+                // Non-yolo active tab: open the WorkflowControlBoard unless suppressed.
+                let backoff_elapsed = tab
+                    .workflow_stuck_dialog_dismissed_at
+                    .map(|t| t.elapsed() >= STUCK_DIALOG_BACKOFF)
+                    .unwrap_or(true);
+                if tab.dialog == Dialog::None
+                    && !tab.workflow_stuck_dialog_opened
+                    && backoff_elapsed
+                    && !tab.auto_workflow_disabled_for_step
+                {
+                    let step = tab.workflow_current_step.clone().unwrap();
+                    tab.dialog = Dialog::WorkflowControlBoard {
+                        current_step: step,
+                        error: None,
+                    };
+                    tab.workflow_stuck_dialog_opened = true;
                 }
             }
         }
@@ -1302,7 +1425,7 @@ impl App {
                 container_name: tab.container_info.as_ref()
                     .map(|ci| ci.container_name.clone())
                     .unwrap_or_default(),
-                is_stuck: tab.is_stuck(),
+                is_stuck: tab.is_stuck(i == active),
             })
             .collect();
         if let Ok(mut guard) = self.tui_tabs_shared.lock() {
@@ -1741,14 +1864,14 @@ mod tests {
     #[test]
     fn tab_color_idle_is_dark_gray() {
         let tab = TabState::new(std::path::PathBuf::from("/tmp/proj"));
-        assert_eq!(tab.tab_color(), Color::DarkGray);
+        assert_eq!(tab.tab_color(true), Color::DarkGray);
     }
 
     #[test]
     fn tab_color_running_no_container_is_blue() {
         let mut tab = TabState::new(std::path::PathBuf::from("/tmp/proj"));
         tab.phase = ExecutionPhase::Running { command: "chat".into() };
-        assert_eq!(tab.tab_color(), Color::Blue);
+        assert_eq!(tab.tab_color(true), Color::Blue);
     }
 
     #[test]
@@ -1756,21 +1879,21 @@ mod tests {
         let mut tab = TabState::new(std::path::PathBuf::from("/tmp/proj"));
         tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
         tab.container_window = ContainerWindowState::Maximized;
-        assert_eq!(tab.tab_color(), Color::Green);
+        assert_eq!(tab.tab_color(true), Color::Green);
     }
 
     #[test]
     fn tab_color_error_is_red() {
         let mut tab = TabState::new(std::path::PathBuf::from("/tmp/proj"));
         tab.phase = ExecutionPhase::Error { command: "ready".into(), exit_code: 1 };
-        assert_eq!(tab.tab_color(), Color::Red);
+        assert_eq!(tab.tab_color(true), Color::Red);
     }
 
     #[test]
     fn tab_color_claws_command_no_container_is_magenta() {
         let mut tab = TabState::new(std::path::PathBuf::from("/tmp/proj"));
         tab.phase = ExecutionPhase::Running { command: "claws ready".into() };
-        assert_eq!(tab.tab_color(), Color::Magenta);
+        assert_eq!(tab.tab_color(true), Color::Magenta);
     }
 
     #[test]
@@ -1778,7 +1901,7 @@ mod tests {
         let mut tab = TabState::new(std::path::PathBuf::from("/tmp/proj"));
         tab.phase = ExecutionPhase::Running { command: "claws ready (attached)".into() };
         tab.container_window = ContainerWindowState::Maximized;
-        assert_eq!(tab.tab_color(), Color::Magenta);
+        assert_eq!(tab.tab_color(true), Color::Magenta);
     }
 
     #[test]
@@ -1786,7 +1909,7 @@ mod tests {
         let mut tab = TabState::new(std::path::PathBuf::from("/tmp/proj"));
         tab.phase = ExecutionPhase::Running { command: "claws ready".into() };
         tab.claws_phase = ClawsPhase::Setup;
-        assert_eq!(tab.tab_color(), Color::Magenta);
+        assert_eq!(tab.tab_color(true), Color::Magenta);
     }
 
     #[test]
@@ -1858,7 +1981,7 @@ mod tests {
     #[test]
     fn is_stuck_false_when_idle() {
         let tab = new_tab();
-        assert!(!tab.is_stuck());
+        assert!(!tab.is_stuck(false));
     }
 
     #[test]
@@ -1866,7 +1989,7 @@ mod tests {
         let mut tab = new_tab();
         tab.phase = ExecutionPhase::Running { command: "init".into() };
         // No container → never stuck.
-        assert!(!tab.is_stuck());
+        assert!(!tab.is_stuck(false));
     }
 
     #[test]
@@ -1875,7 +1998,7 @@ mod tests {
         tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
         tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
         // last_output_time was just set → not yet stuck.
-        assert!(!tab.is_stuck());
+        assert!(!tab.is_stuck(false));
     }
 
     #[test]
@@ -1885,7 +2008,7 @@ mod tests {
         tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
         // Wind the clock back past the timeout.
         tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
-        assert!(tab.is_stuck());
+        assert!(tab.is_stuck(false));
     }
 
     #[test]
@@ -1895,7 +2018,7 @@ mod tests {
         tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
         // 9 seconds elapsed — just under the 10s threshold.
         tab.last_output_time = Some(Instant::now() - Duration::from_secs(9));
-        assert!(!tab.is_stuck());
+        assert!(!tab.is_stuck(false));
     }
 
     #[test]
@@ -1904,7 +2027,7 @@ mod tests {
         tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
         tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
         tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
-        assert_eq!(tab.tab_color(), Color::Yellow);
+        assert_eq!(tab.tab_color(true), Color::Yellow);
     }
 
     #[test]
@@ -1913,12 +2036,12 @@ mod tests {
         tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
         tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
         tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
-        assert_eq!(tab.tab_color(), Color::Yellow);
+        assert_eq!(tab.tab_color(true), Color::Yellow);
 
         tab.acknowledge_stuck();
         // After acknowledging, last_output_time is reset to now → no longer stuck.
-        assert_ne!(tab.tab_color(), Color::Yellow);
-        assert_eq!(tab.tab_color(), Color::Green); // running + container = green
+        assert_ne!(tab.tab_color(true), Color::Yellow);
+        assert_eq!(tab.tab_color(true), Color::Green); // running + container = green
     }
 
     #[test]
@@ -1928,7 +2051,7 @@ mod tests {
         tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
         tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
 
-        let label = tab.tab_subcommand_label(30);
+        let label = tab.tab_subcommand_label(30, true);
         assert!(
             label.contains("⚠️"),
             "expected warning emoji in stuck label, got: {:?}",
@@ -1941,7 +2064,7 @@ mod tests {
     fn tab_subcommand_label_no_warning_prefix_when_not_stuck() {
         let mut tab = new_tab();
         tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
-        let label = tab.tab_subcommand_label(30);
+        let label = tab.tab_subcommand_label(30, true);
         assert!(!label.contains('⚠'), "expected no warning in non-stuck label, got: {:?}", label);
         assert_eq!(label, "implement 0001");
     }
@@ -1954,11 +2077,11 @@ mod tests {
         tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
 
         // Stuck → warning present.
-        assert!(tab.tab_subcommand_label(30).contains('⚠'));
+        assert!(tab.tab_subcommand_label(30, true).contains('⚠'));
 
         // After acknowledgment → warning gone.
         tab.acknowledge_stuck();
-        assert!(!tab.tab_subcommand_label(30).contains('⚠'));
+        assert!(!tab.tab_subcommand_label(30, true).contains('⚠'));
     }
 
     #[test]
@@ -1996,10 +2119,10 @@ mod tests {
         tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
         tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
         tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(5)));
-        assert!(tab.is_stuck());
+        assert!(tab.is_stuck(false));
 
         tab.finish_command(0);
-        assert!(!tab.is_stuck());
+        assert!(!tab.is_stuck(false));
     }
 
     // --- Workflow auto-advance (0031) tests ---
@@ -2260,11 +2383,11 @@ mod tests {
     #[test]
     fn tick_all_yolo_sets_expired_flag_after_countdown() {
         let mut app = setup_yolo_stuck_workflow_app();
-        // Place an already-expired countdown dialog.
+        // Place an already-expired countdown (set the authoritative timer back in time).
+        app.active_tab_mut().yolo_countdown_started_at =
+            Some(Instant::now() - YOLO_COUNTDOWN_DURATION);
         app.active_tab_mut().dialog = Dialog::WorkflowYoloCountdown {
             current_step: "step-one".to_string(),
-            started_at: Instant::now() - YOLO_COUNTDOWN_DURATION,
-            duration: YOLO_COUNTDOWN_DURATION,
         };
         app.active_tab_mut().workflow_stuck_dialog_opened = true;
         app.tick_all();
@@ -2285,10 +2408,9 @@ mod tests {
         let mut tab = new_tab();
         tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
         tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
+        tab.yolo_countdown_started_at = Some(Instant::now());
         tab.dialog = Dialog::WorkflowYoloCountdown {
             current_step: "step-one".to_string(),
-            started_at: Instant::now(),
-            duration: YOLO_COUNTDOWN_DURATION,
         };
         tab.finish_command(0);
         assert_eq!(
@@ -2306,10 +2428,9 @@ mod tests {
         let mut tab = new_tab();
         tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
         tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
+        tab.yolo_countdown_started_at = Some(Instant::now());
         tab.dialog = Dialog::WorkflowYoloCountdown {
             current_step: "step-one".to_string(),
-            started_at: Instant::now(),
-            duration: YOLO_COUNTDOWN_DURATION,
         };
         tab.workflow_stuck_dialog_opened = true;
 
@@ -2367,6 +2488,241 @@ mod tests {
         assert!(
             matches!(app.active_tab().dialog, Dialog::WorkflowYoloCountdown { .. }),
             "yolo countdown must open even when auto_workflow_disabled_for_step is set"
+        );
+    }
+
+    // ─── User activity suppression (0048) unit tests ──────────────────────────
+
+    #[test]
+    fn is_stuck_active_suppressed_when_user_recently_active() {
+        let mut tab = new_tab();
+        tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
+        // Output clock is past the stuck threshold.
+        tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
+        // Record very recent user activity.
+        tab.last_user_activity_time = Some(Instant::now());
+        // Active-tab check must return false despite stale output.
+        assert!(
+            !tab.is_stuck(true),
+            "is_stuck(true) must return false when user just interacted, even if output is stale"
+        );
+    }
+
+    #[test]
+    fn is_stuck_background_ignores_user_activity() {
+        let mut tab = new_tab();
+        tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
+        tab.last_output_time = Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
+        // Very recent user activity — should be ignored for background tabs.
+        tab.last_user_activity_time = Some(Instant::now());
+        assert!(
+            tab.is_stuck(false),
+            "is_stuck(false) must return true based only on last_output_time, ignoring user activity"
+        );
+    }
+
+    #[test]
+    fn record_user_activity_sets_last_user_activity_time() {
+        let mut tab = new_tab();
+        assert!(tab.last_user_activity_time.is_none());
+        tab.record_user_activity();
+        let activity = tab.last_user_activity_time.expect("last_user_activity_time must be Some after record_user_activity");
+        assert!(
+            activity.elapsed() < Duration::from_secs(1),
+            "last_user_activity_time must be recent"
+        );
+    }
+
+    #[test]
+    fn record_user_activity_does_not_affect_last_output_time() {
+        let mut tab = new_tab();
+        tab.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        tab.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
+        let output_before = tab.last_output_time.expect("start_container sets last_output_time");
+        tab.record_user_activity();
+        assert_eq!(
+            tab.last_output_time.unwrap(),
+            output_before,
+            "record_user_activity must not change last_output_time"
+        );
+    }
+
+    // ─── Background yolo color and label (0048) unit tests ────────────────────
+
+    #[test]
+    fn background_yolo_color_none_when_countdown_not_started() {
+        let tab = new_tab();
+        assert!(
+            tab.background_yolo_color().is_none(),
+            "background_yolo_color must return None when yolo_countdown_started_at is not set"
+        );
+    }
+
+    #[test]
+    fn background_yolo_color_yellow_for_even_elapsed_seconds() {
+        let mut tab = new_tab();
+        // 2 elapsed seconds → even → Color::Yellow
+        tab.yolo_countdown_started_at = Some(Instant::now() - Duration::from_secs(2));
+        assert_eq!(
+            tab.background_yolo_color(),
+            Some(Color::Yellow),
+            "background_yolo_color must return Yellow for even elapsed seconds"
+        );
+    }
+
+    #[test]
+    fn background_yolo_color_magenta_for_odd_elapsed_seconds() {
+        let mut tab = new_tab();
+        // 3 elapsed seconds → odd → Color::Magenta
+        tab.yolo_countdown_started_at = Some(Instant::now() - Duration::from_secs(3));
+        assert_eq!(
+            tab.background_yolo_color(),
+            Some(Color::Magenta),
+            "background_yolo_color must return Magenta for odd elapsed seconds"
+        );
+    }
+
+    #[test]
+    fn background_yolo_label_none_when_countdown_not_started() {
+        let tab = new_tab();
+        assert!(
+            tab.background_yolo_label(30).is_none(),
+            "background_yolo_label must return None when yolo_countdown_started_at is not set"
+        );
+    }
+
+    #[test]
+    fn background_yolo_label_even_seconds_shows_warning_emoji_and_countdown() {
+        let mut tab = new_tab();
+        // 2 elapsed seconds → even phase → warning emoji; 58 seconds remaining.
+        tab.yolo_countdown_started_at = Some(Instant::now() - Duration::from_secs(2));
+        let label = tab.background_yolo_label(50).unwrap();
+        assert!(label.contains('⚠'), "expected ⚠ emoji for even seconds, got: {:?}", label);
+        assert!(label.contains("yolo in"), "expected 'yolo in' text, got: {:?}", label);
+        // Allow 1s of timing slack: 57 or 58 seconds remaining.
+        assert!(
+            label.contains("58") || label.contains("57"),
+            "expected ~58 s remaining in label, got: {:?}",
+            label
+        );
+    }
+
+    #[test]
+    fn background_yolo_label_odd_seconds_shows_rock_emoji_and_countdown() {
+        let mut tab = new_tab();
+        // 3 elapsed seconds → odd phase → rock emoji; 57 seconds remaining.
+        tab.yolo_countdown_started_at = Some(Instant::now() - Duration::from_secs(3));
+        let label = tab.background_yolo_label(50).unwrap();
+        assert!(label.contains('🤘'), "expected 🤘 emoji for odd seconds, got: {:?}", label);
+        assert!(label.contains("yolo in"), "expected 'yolo in' text, got: {:?}", label);
+        // Allow 1s of timing slack: 56 or 57 seconds remaining.
+        assert!(
+            label.contains("57") || label.contains("56"),
+            "expected ~57 s remaining in label, got: {:?}",
+            label
+        );
+    }
+
+    #[test]
+    fn background_yolo_label_countdown_value_decreases_with_elapsed_time() {
+        let mut tab = new_tab();
+        // 10 elapsed seconds → 50 seconds remaining.
+        tab.yolo_countdown_started_at = Some(Instant::now() - Duration::from_secs(10));
+        let label = tab.background_yolo_label(50).unwrap();
+        // Allow 1s of timing slack: 49 or 50 seconds remaining.
+        assert!(
+            label.contains("50") || label.contains("49"),
+            "expected ~50 s remaining after 10 s elapsed, got: {:?}",
+            label
+        );
+    }
+
+    // ─── tick_all background yolo countdown (0048) unit tests ─────────────────
+
+    fn setup_background_yolo_tab_app() -> App {
+        let mut app = new_app();
+        app.tabs.push(TabState::new(std::path::PathBuf::new()));
+        let tab1 = &mut app.tabs[1];
+        tab1.phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        tab1.start_container("amux-test".into(), "Claude Code".into(), 80, 24);
+        tab1.workflow_current_step = Some("step-one".to_string());
+        tab1.yolo_mode = true;
+        tab1.last_output_time =
+            Some(Instant::now() - (STUCK_TIMEOUT + Duration::from_secs(1)));
+        // active_tab_idx stays 0 → tab 1 is a background tab.
+        app
+    }
+
+    #[test]
+    fn tick_all_yolo_sets_countdown_started_at_for_background_tab() {
+        let mut app = setup_background_yolo_tab_app();
+        assert!(app.tabs[1].yolo_countdown_started_at.is_none());
+        app.tick_all();
+        assert!(
+            app.tabs[1].yolo_countdown_started_at.is_some(),
+            "tick_all must set yolo_countdown_started_at for a background stuck yolo tab"
+        );
+    }
+
+    #[test]
+    fn tick_all_yolo_does_not_reset_countdown_started_at_on_subsequent_ticks() {
+        let mut app = setup_background_yolo_tab_app();
+        app.tick_all();
+        let first_start = app.tabs[1].yolo_countdown_started_at.unwrap();
+        app.tick_all();
+        let second_start = app.tabs[1].yolo_countdown_started_at.unwrap();
+        assert_eq!(
+            first_start, second_start,
+            "yolo_countdown_started_at must not be reset on subsequent ticks while still stuck"
+        );
+    }
+
+    #[test]
+    fn tick_all_yolo_does_not_open_dialog_for_background_tab() {
+        let mut app = setup_background_yolo_tab_app();
+        app.tick_all();
+        assert_eq!(
+            app.tabs[1].dialog,
+            Dialog::None,
+            "tick_all must not open a dialog for a background yolo tab; the tab bar handles feedback"
+        );
+    }
+
+    #[test]
+    fn tick_all_yolo_sets_expired_and_clears_timer_for_background_tab() {
+        let mut app = setup_background_yolo_tab_app();
+        // Pre-set an already-expired countdown on the background tab.
+        app.tabs[1].yolo_countdown_started_at =
+            Some(Instant::now() - YOLO_COUNTDOWN_DURATION);
+        app.tick_all();
+        assert!(
+            app.tabs[1].yolo_countdown_expired,
+            "yolo_countdown_expired must be set when the countdown elapses for a background tab"
+        );
+        assert!(
+            app.tabs[1].yolo_countdown_started_at.is_none(),
+            "yolo_countdown_started_at must be cleared after countdown expires"
+        );
+        assert_eq!(
+            app.tabs[1].dialog,
+            Dialog::None,
+            "no dialog must be opened for the expired background tab"
+        );
+    }
+
+    #[test]
+    fn tick_all_clears_countdown_when_background_tab_no_longer_stuck() {
+        let mut app = setup_background_yolo_tab_app();
+        app.tick_all();
+        assert!(app.tabs[1].yolo_countdown_started_at.is_some());
+        // Simulate new output arriving — tab is no longer stuck.
+        app.tabs[1].last_output_time = Some(Instant::now());
+        app.tick_all();
+        assert!(
+            app.tabs[1].yolo_countdown_started_at.is_none(),
+            "yolo_countdown_started_at must be cleared when the tab is no longer stuck"
         );
     }
 }

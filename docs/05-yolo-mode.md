@@ -80,7 +80,11 @@ When `--yolo` is used **without** `--workflow`, `--worktree` is **not** implied.
 
 ### 4. Auto-advances stuck workflow steps
 
-Instead of opening the manual [workflow control board](04-workflows.md#workflow-control-board), amux opens the **yolo countdown dialog** when a workflow step goes silent for 10 seconds:
+Instead of opening the manual [workflow control board](04-workflows.md#workflow-control-board), amux begins a **yolo countdown** when a workflow step goes silent for 10 seconds. How the countdown is presented depends on whether the tab is active or in the background.
+
+**Active tab — yolo countdown dialog:**
+
+When the stuck tab is currently active, the countdown dialog opens:
 
 ```
 ╭─────── Yolo: Auto-Advance ──────────────╮
@@ -93,13 +97,59 @@ Instead of opening the manual [workflow control board](04-workflows.md#workflow-
 ╰──────────────────────────────────────────╯
 ```
 
+**Active-tab suppression:** If you are actively pressing keys or scrolling on the tab, the stuck timer is held back and the dialog will not open. Both the container and the user must be idle for 10 seconds before the countdown starts.
+
+**Background tab — tab bar countdown:**
+
+When the stuck tab is in the background, no dialog opens. Instead, the tab bar shows a live countdown directly: the tab alternates between yellow and purple every second, with the label cycling between `⚠️ yolo in N` and `🤘 yolo in N` (where `N` is the remaining seconds):
+
+```
+┌─ Tab 1: myproject ─────────┬─ Tab 2 ⚠️  yolo in 38 ─────┐
+│  chat                        │                              │
+└──────────────────────────────┴──────────────────────────────┘
+```
+
+This lets you monitor all tabs' countdown state without leaving your current work.
+
+**Switching to a background countdown tab:**
+
+If you switch to a tab that has a countdown in progress, the yolo dialog opens immediately, showing the time remaining — the countdown is not restarted from 60 seconds. You can then let it expire, press **Esc** to dismiss, or navigate away.
+
+**Switching away from an active yolo dialog:**
+
+Press **Ctrl+A** or **Ctrl+D** while the yolo dialog is open to navigate to the previous or next tab. The dialog closes and the countdown continues in the background (shown in the tab bar). You are not forced to resolve the dialog before switching away.
+
 The countdown runs for **60 seconds**. When it expires:
 - If this is not the last step — amux advances to the next step in a new container
 - If this is the last step — the workflow transitions to complete
 
 **Cancellation:**
-- Any PTY output during the countdown immediately dismisses the dialog — the agent is no longer stuck
-- Press **Esc** to dismiss manually; the same 10-second backoff applies before the dialog re-opens
+- Any PTY output during the countdown immediately dismisses the countdown — the agent is no longer stuck
+- Press **Esc** to dismiss the active-tab dialog manually; the same 10-second backoff applies before the dialog re-opens (the countdown timer continues running during the backoff, so auto-advance will typically fire before the dialog reopens)
+
+---
+
+## Background yolo countdown
+
+When you are working across multiple tabs and a background tab's yolo workflow step goes silent, amux does not interrupt you with a dialog. Instead, the tab bar shows a live countdown for each affected tab:
+
+- The tab alternates between **yellow** and **purple** every second
+- The label cycles between `⚠️  yolo in N` and `🤘 yolo in N` (where `N` is the seconds remaining)
+- Multiple background tabs each have independent countdowns; they alternate colors at their own pace
+
+```
+┌─ Tab 1: myproject ─────────┬─ Tab 2 🤘 yolo in 23 ──────┐
+│  chat                        │                              │
+└──────────────────────────────┴──────────────────────────────┘
+```
+
+**Switching to a countdown tab:** The yolo dialog opens immediately with the remaining time — the timer is not restarted from 60 seconds.
+
+**Switching away from the dialog:** Press **Ctrl+A** or **Ctrl+D** to navigate to another tab while the yolo dialog is open. The dialog closes and the countdown continues in the background. You are not forced to act before switching away.
+
+**When the countdown expires in the background:** The workflow auto-advances without requiring you to switch to the tab. The tab returns to its normal color and label as soon as it moves to the next step.
+
+**When output resumes mid-countdown:** If the container produces new output before the countdown expires, the countdown resets and the tab returns to its normal color. If the container goes silent again, a fresh 60-second countdown begins.
 
 ---
 

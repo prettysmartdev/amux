@@ -243,6 +243,7 @@ The tab bar shows each tab's project name, current or last command, and an arrow
 | Purple / Magenta | Running a claws (nanoclaw) session |
 | Red | Exited with error |
 | Yellow | Container silent for >10 seconds (stuck warning) |
+| Alternating Yellow / Purple | Background yolo countdown in progress (see [Yolo Mode](05-yolo-mode.md#background-yolo-countdown)) |
 
 ### Stuck detection
 
@@ -252,7 +253,9 @@ If a running container produces no output for more than 10 seconds, the tab turn
 - Press any key while the tab is active
 - Scroll with the mouse wheel
 
-For workflow tabs, amux goes further: the [workflow control board](04-workflows.md#workflow-control-board) opens automatically so you can act without having to notice the yellow indicator. See [Workflows](04-workflows.md) for details.
+**Active-tab suppression:** On the currently active tab, any keypress or mouse scroll also resets the stuck timer directly. If you are actively reading or scrolling through output, the tab will not turn yellow or show any stuck indicator — the timer only starts when both the container and the user have been idle for 10 seconds. Background tabs are not affected by this; they use output time alone to determine stuck state.
+
+For workflow tabs, amux goes further: the [workflow control board](04-workflows.md#workflow-control-board) opens automatically so you can act without having to notice the yellow indicator. In yolo mode, background tabs show a live countdown directly in the tab bar instead of a dialog. See [Workflows](04-workflows.md) and [Yolo Mode](05-yolo-mode.md) for details.
 
 ---
 
@@ -263,6 +266,7 @@ For workflow tabs, amux goes further: the [workflow control board](04-workflows.
 | **Ctrl+T** | Anywhere | Open new tab |
 | **Ctrl+A** | Anywhere | Switch to previous tab |
 | **Ctrl+D** | Anywhere | Switch to next tab |
+| **Ctrl+A / Ctrl+D** | Yolo countdown dialog | Close dialog and continue countdown in background |
 | **Ctrl+C** | Command box, multiple tabs | Close current tab |
 | **Ctrl+W** | Workflow running, container minimized | Open workflow control board |
 | **Enter** | Command box | Execute command |

@@ -118,6 +118,7 @@ where
                 Event::Mouse(mouse) => {
                     // Any mouse interaction counts as "checking on" the tab.
                     app.active_tab_mut().acknowledge_stuck();
+                    app.active_tab_mut().record_user_activity();
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
                             let tab = app.active_tab_mut();
@@ -373,19 +374,55 @@ async fn handle_action(app: &mut App, action: Action) {
         Action::SwitchTabLeft => {
             let len = app.tabs.len();
             if len > 0 {
+                // When leaving a tab with an open yolo dialog, close the dialog so the
+                // countdown continues in background mode (tab bar shows it instead).
+                if matches!(app.active_tab().dialog, Dialog::WorkflowYoloCountdown { .. }) {
+                    app.active_tab_mut().dialog = Dialog::None;
+                    app.active_tab_mut().workflow_stuck_dialog_opened = false;
+                }
                 app.active_tab_idx = (app.active_tab_idx + len - 1) % len;
             }
             // Switching to a tab counts as "checking on it" — clear any stuck warning.
             app.active_tab_mut().acknowledge_stuck();
+            // If the newly active tab has a yolo countdown in progress, open the dialog
+            // so the user can see the timer with its remaining time preserved.
+            if app.active_tab().yolo_countdown_started_at.is_some()
+                && app.active_tab().dialog == Dialog::None
+            {
+                if let Some(step) = app.active_tab().workflow_current_step.clone() {
+                    app.active_tab_mut().dialog = Dialog::WorkflowYoloCountdown {
+                        current_step: step,
+                    };
+                    app.active_tab_mut().workflow_stuck_dialog_opened = true;
+                }
+            }
         }
 
         Action::SwitchTabRight => {
             let len = app.tabs.len();
             if len > 0 {
+                // When leaving a tab with an open yolo dialog, close the dialog so the
+                // countdown continues in background mode (tab bar shows it instead).
+                if matches!(app.active_tab().dialog, Dialog::WorkflowYoloCountdown { .. }) {
+                    app.active_tab_mut().dialog = Dialog::None;
+                    app.active_tab_mut().workflow_stuck_dialog_opened = false;
+                }
                 app.active_tab_idx = (app.active_tab_idx + 1) % len;
             }
             // Switching to a tab counts as "checking on it" — clear any stuck warning.
             app.active_tab_mut().acknowledge_stuck();
+            // If the newly active tab has a yolo countdown in progress, open the dialog
+            // so the user can see the timer with its remaining time preserved.
+            if app.active_tab().yolo_countdown_started_at.is_some()
+                && app.active_tab().dialog == Dialog::None
+            {
+                if let Some(step) = app.active_tab().workflow_current_step.clone() {
+                    app.active_tab_mut().dialog = Dialog::WorkflowYoloCountdown {
+                        current_step: step,
+                    };
+                    app.active_tab_mut().workflow_stuck_dialog_opened = true;
+                }
+            }
         }
 
         Action::CloseCurrentTab => {

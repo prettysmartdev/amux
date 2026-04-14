@@ -191,8 +191,13 @@ The auto-open fires only when:
 - The stuck tab is the currently active tab (background tabs are deferred until you switch to them)
 - No other dialog is already open
 - Auto-open has not been disabled for this step via the **d** key
+- The user has also been idle for 10 seconds on the active tab (see below)
+
+**Active-tab suppression:** If you are actively pressing keys or scrolling on the currently active tab, the stuck timer is held back even if the container is silent. The control board will not open while you are engaged with the output. The timer starts only once both the container and the user have been idle for 10 seconds. Background tabs are always checked using output time alone.
 
 After you dismiss with **Esc**, the stuck timer resets. If the container stays silent for another 10 seconds, the dialog re-opens. The auto-open works even when the container window is maximized — the dialog appears over the full-screen terminal view.
+
+In **yolo mode**, the behavior differs for background tabs: instead of deferring the control board until you switch, a live countdown runs directly in the tab bar. See [Yolo Mode — Background yolo countdown](05-yolo-mode.md#background-yolo-countdown).
 
 ---
 
@@ -270,9 +275,12 @@ Steps that share the same `Depends-on` set form a **parallel group**. amux execu
 | Container window maximized (manual Ctrl+W) | Ctrl+W suppressed; hint guides you to minimize first |
 | Container window maximized (auto-open) | Dialog opens over the maximized terminal; input routes to dialog |
 | Another dialog already open | Both Ctrl+W and auto-open suppressed until open dialog is dismissed |
-| Step silent on a background tab | Auto-open deferred; control board appears when you switch to that tab |
+| Step silent on a background tab (non-yolo) | Auto-open deferred; control board appears when you switch to that tab |
+| Step silent on a background tab (yolo) | Live countdown shown in tab bar; dialog opens when you switch to the tab; workflow auto-advances when countdown expires |
 | Esc dismissed; container still silent | Timer resets; dialog re-opens after another 10 s |
 | Output resumes before 10 s threshold | Stuck state clears; auto-open does not trigger |
+| User actively scrolling on active tab | Stuck timer suppressed; control board does not open while user is engaged |
+| User becomes idle after scrolling | Timer starts from idle moment; control board opens after another 10 s of silence |
 
 ### Limitations (v0.3)
 

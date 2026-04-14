@@ -107,9 +107,11 @@ pub enum Action {
 
 /// Dispatch a key press to the correct handler based on application state.
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
-    // Any key press on the active tab counts as interaction — clear stuck warning.
+    // Any key press on the active tab counts as interaction — clear stuck warning and
+    // record user activity to suppress the stuck indicator while the user is engaged.
     // (Tab-switch keys also call acknowledge_stuck on the newly active tab in mod.rs.)
     app.active_tab_mut().acknowledge_stuck();
+    app.active_tab_mut().record_user_activity();
 
     // Modal dialogs intercept all input.
     let dialog = app.active_tab().dialog.clone();
@@ -1066,6 +1068,16 @@ fn handle_workflow_control_board(tab: &mut TabState, key: KeyEvent) -> Action {
 }
 
 fn handle_workflow_yolo_countdown(tab: &mut TabState, key: KeyEvent) -> Action {
+    // Ctrl+A / Ctrl+D: switch tabs while keeping the yolo countdown running in the
+    // background.  The tab-switching handler in mod.rs closes the dialog on the old
+    // tab and opens it on the new tab (if it also has a countdown), preserving time.
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('a') => return Action::SwitchTabLeft,
+            KeyCode::Char('d') => return Action::SwitchTabRight,
+            _ => {}
+        }
+    }
     match key.code {
         KeyCode::Esc => {
             // Dismiss with backoff so the countdown won't immediately re-open.
