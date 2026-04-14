@@ -42,6 +42,25 @@ After the agent launches, you can interact with it directly — add follow-up in
 
 ## Flags common to `chat` and `implement`
 
+### `--agent <name>`
+
+Override the configured agent for this session. Available agents: `claude`, `codex`, `opencode`, `maki`, `gemini`.
+
+```sh
+amux chat --agent codex               # launch a Codex session for this project
+amux implement 0050 --agent gemini    # implement with Gemini instead of the configured agent
+```
+
+This overrides the `agent` field in your repo config for this run only — no config file is modified. amux uses the agent-specific image (`amux-{project}-{agent}:latest`) for the session.
+
+If the agent image does not yet exist, amux offers to download the template and build both the project base image (if needed) and the agent image before launching.
+
+Passing an unknown agent name exits immediately with a list of valid options:
+
+```
+error: unknown agent "foo"; available agents: claude, codex, opencode, maki, gemini
+```
+
 ### `--non-interactive`
 
 Run the agent in print/batch mode — no interactivity required. The agent executes, produces output, and exits.
@@ -267,13 +286,40 @@ Verifies your environment is ready for agent sessions.
 
 | Flag | Description |
 |------|-------------|
-| `--refresh` | Run the Dockerfile agent audit and rebuild the image |
-| `--build` | Force-rebuild the dev image from the current `Dockerfile.dev` |
+| `--refresh` | Run the Dockerfile agent audit, update `Dockerfile.dev`, and rebuild both images |
+| `--build` | Force-rebuild the project base image and all agent images in `.amux/` |
 | `--no-cache` | Pass `--no-cache` to all `docker build` invocations |
 | `--non-interactive` | Run the audit agent in print mode |
 | `--allow-docker` | Give the audit container access to the host Docker socket |
 
-Use `--refresh` after your project's toolchain changes to update `Dockerfile.dev` and rebuild the image.
+Use `--refresh` after your project's toolchain changes to update `Dockerfile.dev` (the project base) and rebuild both images. The agent dockerfile is not touched by the audit.
+
+### Migration from single-file layout
+
+If you have an existing `Dockerfile.dev` that bundles agent tooling (the layout used before amux 0.6), `amux ready` detects this and offers a guided migration:
+
+```
+Detected legacy single-file Dockerfile.dev layout.
+Would you like to migrate to the modular layout? (agent tools move to .amux/Dockerfile.{agent})
+
+Migrating will:
+  1. Recreate Dockerfile.dev with a minimal debian:bookworm-slim base
+  2. Write .amux/Dockerfile.{agent} using the agent template
+  3. Build both images
+  4. Run the audit agent to restore project dependencies in Dockerfile.dev
+
+[y/N]:
+```
+
+If you accept, amux handles the entire migration automatically. Commit the resulting `Dockerfile.dev` and `.amux/Dockerfile.{agent}` to source control.
+
+If you decline, your existing image continues to work for the current session with a deprecation warning printed each time.
+
+When `amux chat` or `amux implement` encounters the legacy layout (before you run `amux ready` to migrate), it exits with a short message:
+
+```
+Run `amux ready` to migrate to the modular Dockerfile layout, or pass `--no-migrate` to use the existing image.
+```
 
 `amux ready` also checks whether work item paths are configured. If neither `aspec/work-items/` exists nor `work_items.dir` is set, the summary shows a `⚠ not configured` warning (not a failure) for the `work items config` row, and prints a tip to run `amux config set work_items.dir <path>`.
 
@@ -283,6 +329,7 @@ Use `--refresh` after your project's toolchain changes to update `Dockerfile.dev
 
 | Flag | `chat` | `implement` | Description |
 |------|--------|-------------|-------------|
+| `--agent=<name>` | ✓ | ✓ | Override the agent for this session |
 | `--non-interactive` | ✓ | ✓ | Print/batch mode |
 | `--plan` | ✓ | ✓ | Read-only analysis mode |
 | `--allow-docker` | ✓ | ✓ | Mount host Docker socket |

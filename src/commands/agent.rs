@@ -17,6 +17,7 @@ use dirs;
 /// `non_interactive`: when true, launch agent in print/non-interactive mode.
 /// `allow_docker`: when true, mount the host Docker daemon socket into the container.
 /// `mount_ssh`: when true, mount the host `~/.ssh` directory read-only into the container.
+/// `agent_override`: when `Some`, use this agent name instead of the config value.
 pub async fn run_agent_with_sink(
     entrypoint: Vec<String>,
     status_message: &str,
@@ -28,11 +29,18 @@ pub async fn run_agent_with_sink(
     allow_docker: bool,
     mount_ssh: bool,
     container_name_override: Option<String>,
+    agent_override: Option<String>,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let config = load_repo_config(&git_root)?;
-    let agent = config.agent.as_deref().unwrap_or("claude").to_string();
+    let config_agent = config.agent.as_deref().unwrap_or("claude").to_string();
+    let agent = agent_override.as_deref().unwrap_or(&config_agent).to_string();
+
+    // Validate agent name if overridden
+    if let Some(ref name) = agent_override {
+        crate::cli::validate_agent_name(name)?;
+    }
 
     out.println(status_message);
 
@@ -74,15 +82,60 @@ pub async fn run_agent_with_sink(
         None
     };
 
-    let image_tag = docker::project_image_tag(&git_root);
+    // Determine which image to use:
+    // - New layout: .amux/Dockerfile.{agent} exists → use agent_image_tag()
+    // - Legacy layout: no agent dockerfile → fall back to project_image_tag() with warning
+    let agent_dockerfile = git_root.join(".amux").join(format!("Dockerfile.{}", agent));
+    let (image_tag, dockerfile_for_user) = if agent_dockerfile.exists() {
+        // New layout: ensure agent image exists, build if needed
+        let agent_tag = docker::agent_image_tag(&git_root, &agent);
+        if !runtime.image_exists(&agent_tag) {
+            // Agent dockerfile exists but image doesn't — build it (first-run case)
+            let project_tag = docker::project_image_tag(&git_root);
+            if !runtime.image_exists(&project_tag) {
+                anyhow::bail!(
+                    "Agent image {} not found and project base image {} is not built. \
+                     Run `amux ready` first to build both images.",
+                    agent_tag, project_tag
+                );
+            }
+            out.println(format!("Agent image {} not found. Building from {}...", agent_tag, agent_dockerfile.display()));
+            let git_root_str = git_root.to_str().unwrap().to_string();
+            let out_clone = out.clone();
+            runtime.build_image_streaming(
+                &agent_tag,
+                &agent_dockerfile,
+                std::path::Path::new(&git_root_str),
+                false,
+                &mut |line| { out_clone.println(line); },
+            ).context("Failed to build agent image")?;
+            out.println(format!("Agent image {} built successfully.", agent_tag));
+        }
+        (agent_tag, agent_dockerfile.clone())
+    } else {
+        // Legacy layout: use project image with deprecation warning
+        let project_tag = docker::project_image_tag(&git_root);
+        if !runtime.image_exists(&project_tag) {
+            anyhow::bail!(
+                "No agent image and no project base image found. \
+                 Run `amux ready` to build the images.",
+            );
+        }
+        out.println(format!(
+            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
+             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
+            agent
+        ));
+        (project_tag, git_root.join("Dockerfile.dev"))
+    };
+
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    // Detect the last USER directive in Dockerfile.dev and update settings mounts
-    // to target the correct home directory inside the container.
+    // Detect the last USER directive in the agent dockerfile (or project dockerfile for legacy)
+    // and update settings mounts to target the correct home directory inside the container.
     let modified_settings: Option<crate::runtime::HostSettings> = host_settings.and_then(|settings| {
         let mut new_settings = settings.clone_view();
-        let dockerfile = git_root.join("Dockerfile.dev");
-        if let Some(msg) = crate::runtime::apply_dockerfile_user(&mut new_settings, &dockerfile) {
+        if let Some(msg) = crate::runtime::apply_dockerfile_user(&mut new_settings, &dockerfile_for_user) {
             out.println(msg);
             Some(new_settings)
         } else {
@@ -461,6 +514,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             None,
             &runtime,
         )

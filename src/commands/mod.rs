@@ -36,9 +36,10 @@ pub async fn run(command: Command, runtime: Arc<dyn crate::runtime::AgentRuntime
             mount_ssh,
             yolo,
             auto,
-        } => implement::run(&work_item, non_interactive, plan, allow_docker, workflow.as_deref(), worktree, mount_ssh, yolo, auto, runtime).await,
-        Command::Chat { non_interactive, plan, allow_docker, mount_ssh, yolo, auto } => {
-            chat::run(non_interactive, plan, allow_docker, mount_ssh, yolo, auto, runtime).await
+            agent,
+        } => implement::run(&work_item, non_interactive, plan, allow_docker, workflow.as_deref(), worktree, mount_ssh, yolo, auto, agent, runtime).await,
+        Command::Chat { non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent } => {
+            chat::run(non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, runtime).await
         }
         Command::Claws { action } => claws::run(action, runtime).await,
         Command::Status { watch } => status::run(watch, runtime.clone()).await,

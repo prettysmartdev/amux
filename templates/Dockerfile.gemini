@@ -1,9 +1,6 @@
-FROM debian:bookworm-slim
+FROM {{AMUX_BASE_IMAGE}}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    ca-certificates \
-    curl \
     gnupg \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
@@ -12,4 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Gemini CLI via npm
 RUN npm install -g @google/gemini-cli
 
+# Create non-root user for agent operations
+RUN useradd -m -s /bin/bash amux \
+    && mkdir -p /workspace \
+    && chown amux:amux /workspace
+
+USER amux
 WORKDIR /workspace

@@ -184,6 +184,7 @@ pub async fn run_new_with_sink(
         false,
         false,
         None,
+        None,
         runtime,
     )
     .await?;
@@ -239,6 +240,7 @@ pub async fn run_amend(
         allow_docker,
         false,
         None,
+        None,
         &*runtime,
     )
     .await
@@ -282,6 +284,7 @@ pub async fn run_with_sink_amend(
         host_settings,
         allow_docker,
         false,
+        None,
         None,
         runtime,
     )

@@ -96,6 +96,12 @@ pub enum Command {
         /// implies --worktree but does NOT auto-advance stuck steps.
         #[arg(long)]
         auto: bool,
+
+        /// Agent to use (overrides .amux/config.json). If the agent image does not exist,
+        /// amux will offer to download and build it.
+        /// Available agents: claude, codex, opencode, maki, gemini.
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
     },
 
     /// Start a freeform chat session with the configured agent in a container.
@@ -125,6 +131,12 @@ pub enum Command {
         /// --dangerously-skip-permissions. Applies yoloDisallowedTools config.
         #[arg(long)]
         auto: bool,
+
+        /// Agent to use (overrides .amux/config.json). If the agent image does not exist,
+        /// amux will offer to download and build it.
+        /// Available agents: claude, codex, opencode, maki, gemini.
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
     },
 
     /// Manage work item specs (create, interview, amend).
@@ -242,6 +254,23 @@ impl Agent {
             Agent::Maki => "Maki",
             Agent::Gemini => "Gemini",
         }
+    }
+}
+
+/// The canonical list of agent names accepted by `--agent`.
+pub const KNOWN_AGENT_NAMES: &[&str] = &["claude", "codex", "opencode", "maki", "gemini"];
+
+/// Validate an agent name from `--agent`. Returns `Ok(name)` for known names,
+/// or an error with the list of available agents for unknown names.
+pub fn validate_agent_name(name: &str) -> anyhow::Result<String> {
+    if KNOWN_AGENT_NAMES.contains(&name) {
+        Ok(name.to_string())
+    } else {
+        anyhow::bail!(
+            "unknown agent \"{}\"; available agents: {}",
+            name,
+            KNOWN_AGENT_NAMES.join(", ")
+        )
     }
 }
 
@@ -1049,5 +1078,54 @@ mod tests {
         // Smoke-test that the Config variant is wired into the top-level help.
         let cli = parse(&["amux"]);
         assert!(cli.command.is_none()); // no subcommand given
+    }
+
+    // ─── --agent flag on chat / validate_agent_name (work item 0049) ─────────
+
+    #[test]
+    fn chat_agent_claude_is_some() {
+        let cli = parse(&["amux", "chat", "--agent", "claude"]);
+        match cli.command.unwrap() {
+            Command::Chat { agent, .. } => {
+                assert_eq!(agent, Some("claude".to_string()));
+            }
+            _ => panic!("expected chat"),
+        }
+    }
+
+    #[test]
+    fn chat_without_agent_is_none() {
+        let cli = parse(&["amux", "chat"]);
+        match cli.command.unwrap() {
+            Command::Chat { agent, .. } => {
+                assert!(agent.is_none(), "chat without --agent should produce None");
+            }
+            _ => panic!("expected chat"),
+        }
+    }
+
+    #[test]
+    fn validate_agent_name_unknown_returns_error() {
+        let result = validate_agent_name("unknown");
+        assert!(result.is_err(), "unknown agent name should return Err");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("unknown"),
+            "error should mention the unknown agent name; got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("available agents:"),
+            "error should list available agents; got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn validate_agent_name_known_agents_are_accepted() {
+        for &name in KNOWN_AGENT_NAMES {
+            let result = validate_agent_name(name);
+            assert!(result.is_ok(), "{} should be accepted by validate_agent_name", name);
+        }
     }
 }

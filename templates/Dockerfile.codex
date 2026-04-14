@@ -1,10 +1,4 @@
-FROM debian:bookworm-slim
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    ca-certificates \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+FROM {{AMUX_BASE_IMAGE}}
 
 # Install Codex CLI from official GitHub releases
 RUN ARCH="$(dpkg --print-architecture)" && \
@@ -19,4 +13,10 @@ RUN ARCH="$(dpkg --print-architecture)" && \
     mv "/usr/local/bin/codex-${CODEX_ARCH}" /usr/local/bin/codex && \
     chmod +x /usr/local/bin/codex
 
+# Create non-root user for agent operations
+RUN useradd -m -s /bin/bash amux \
+    && mkdir -p /workspace \
+    && chown amux:amux /workspace
+
+USER amux
 WORKDIR /workspace

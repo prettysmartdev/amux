@@ -232,18 +232,18 @@ async fn init_skips_aspec_download_when_folder_exists() {
 }
 
 // ---------------------------------------------------------------------------
-// write_dockerfile integration with download fallback
+// write_project_dockerfile integration with download fallback
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn write_dockerfile_falls_back_to_embedded_on_failure() {
-    // Even without network, write_dockerfile should succeed via embedded fallback.
+async fn write_project_dockerfile_creates_with_embedded_template() {
+    // write_project_dockerfile uses the embedded project template (no network needed).
     let tmp = TempDir::new().unwrap();
     let (tx, _rx) = unbounded_channel();
     let out = OutputSink::Channel(tx);
 
-    let result = init::write_dockerfile(tmp.path(), &Agent::Claude, &out).await;
-    assert!(result.is_ok(), "write_dockerfile failed: {:?}", result.err());
+    let result = init::write_project_dockerfile(tmp.path(), &out).await;
+    assert!(result.is_ok(), "write_project_dockerfile failed: {:?}", result.err());
     assert!(result.unwrap(), "Should return true when creating new file");
 
     let content = std::fs::read_to_string(tmp.path().join("Dockerfile.dev")).unwrap();
@@ -254,14 +254,14 @@ async fn write_dockerfile_falls_back_to_embedded_on_failure() {
 }
 
 #[tokio::test]
-async fn write_dockerfile_preserves_existing_file() {
+async fn write_project_dockerfile_preserves_existing_file() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("Dockerfile.dev"), "CUSTOM").unwrap();
 
     let (tx, _rx) = unbounded_channel();
     let out = OutputSink::Channel(tx);
 
-    let result = init::write_dockerfile(tmp.path(), &Agent::Claude, &out).await;
+    let result = init::write_project_dockerfile(tmp.path(), &out).await;
     assert!(result.is_ok());
     assert!(!result.unwrap(), "Should return false when file exists");
 

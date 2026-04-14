@@ -26,6 +26,7 @@ pub async fn run(
     mount_ssh: bool,
     yolo: bool,
     auto: bool,
+    agent_override: Option<String>,
     runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
 ) -> Result<()> {
     let work_item = parse_work_item(work_item_str)?;
@@ -100,10 +101,11 @@ pub async fn run(
         (confirm_mount_scope_stdin(&git_root)?, None)
     };
 
-    let credentials = resolve_auth(&git_root, agent_name(&git_root)?)?;
     let config = load_repo_config(&git_root)?;
-    let agent = config.agent.as_deref().unwrap_or("claude");
-    let host_settings = crate::passthrough::passthrough_for_agent(agent).prepare_host_settings();
+    let config_agent = config.agent.as_deref().unwrap_or("claude").to_string();
+    let agent = agent_override.as_deref().unwrap_or(&config_agent).to_string();
+    let credentials = resolve_auth(&git_root, &agent)?;
+    let host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
 
     // Suppress the dangerous-mode permission dialog when running with --yolo.
     if yolo {
@@ -138,7 +140,7 @@ pub async fn run(
             &git_root,
             mount_path.clone(),
             env_vars,
-            agent,
+            &agent,
             host_settings,
             non_interactive,
             plan,
@@ -156,19 +158,19 @@ pub async fn run(
     }
 
     let mut entrypoint = if non_interactive {
-        agent_entrypoint_non_interactive(agent, work_item, plan)
+        agent_entrypoint_non_interactive(&agent, work_item, plan)
     } else {
-        agent_entrypoint(agent, work_item, plan)
+        agent_entrypoint(&agent, work_item, plan)
     };
 
     let disallowed_tools = if yolo || auto { effective_yolo_disallowed_tools(&git_root) } else { vec![] };
-    append_autonomous_flags(&mut entrypoint, agent, yolo, auto, &disallowed_tools);
+    append_autonomous_flags(&mut entrypoint, &agent, yolo, auto, &disallowed_tools);
 
     let work_item_path = find_work_item(&git_root, work_item)?;
     let status = format!(
         "Implementing work item {:04} with agent '{}': {}",
         work_item,
-        agent,
+        &agent,
         work_item_path.display()
     );
 
@@ -183,6 +185,7 @@ pub async fn run(
         allow_docker,
         mount_ssh,
         None,
+        agent_override.clone(),
         &*runtime,
     )
     .await;
@@ -206,6 +209,7 @@ pub async fn run(
 /// `mount_ssh`: when true, mount the host `~/.ssh` directory read-only into the container.
 /// `yolo`: when true, append `--dangerously-skip-permissions` and disallowed-tools config.
 /// `auto`: when true, append `--permission-mode auto` and disallowed-tools config.
+/// `agent_override`: when `Some`, use this agent instead of the config value.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_sink(
     work_item: u32,
@@ -220,11 +224,13 @@ pub async fn run_with_sink(
     mount_ssh: bool,
     yolo: bool,
     auto: bool,
+    agent_override: Option<String>,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let config = load_repo_config(&git_root)?;
-    let agent = config.agent.as_deref().unwrap_or("claude").to_string();
+    let config_agent = config.agent.as_deref().unwrap_or("claude").to_string();
+    let agent = agent_override.as_deref().unwrap_or(&config_agent).to_string();
     let work_item_path = find_work_item(&git_root, work_item)?;
 
     let mut entrypoint = if non_interactive {
@@ -259,20 +265,12 @@ pub async fn run_with_sink(
         allow_docker,
         mount_ssh,
         None,
+        agent_override,
         runtime,
     )
     .await
 }
 
-fn agent_name(git_root: &PathBuf) -> Result<&'static str> {
-    let config = load_repo_config(git_root)?;
-    Ok(match config.agent.as_deref().unwrap_or("claude") {
-        "codex" => "codex",
-        "opencode" => "opencode",
-        "maki" => "maki",
-        _ => "claude",
-    })
-}
 
 /// Finds the work item file for the given number, e.g. `aspec/work-items/0001-*.md`.
 pub fn find_work_item(git_root: &PathBuf, work_item: u32) -> Result<PathBuf> {
@@ -598,6 +596,7 @@ async fn run_workflow(
             allow_docker,
             mount_ssh,
             Some(container_name),
+            None,
             runtime,
         )
         .await;

@@ -915,6 +915,16 @@ pub fn project_image_tag(git_root: &Path) -> String {
     format!("amux-{}:latest", project_name)
 }
 
+/// Returns the image tag for an agent-specific image layered on top of the project base.
+/// Pattern: amux-{projectname}-{agentname}:latest
+pub fn agent_image_tag(git_root: &Path, agent: &str) -> String {
+    let project_name = git_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+    format!("amux-{}-{}:latest", project_name, agent)
+}
+
 /// Generate a unique container name for amux-managed containers.
 pub fn generate_container_name() -> String {
     use std::time::SystemTime;
@@ -970,8 +980,8 @@ pub fn is_daemon_running() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_docker_socket, docker_socket_path, format_build_cmd, format_build_cmd_no_cache,
-        generate_container_name, parse_cpu_percent, parse_memory_mb,
+        agent_image_tag, check_docker_socket, docker_socket_path, format_build_cmd,
+        format_build_cmd_no_cache, generate_container_name, parse_cpu_percent, parse_memory_mb,
         project_image_tag, DockerRuntime,
     };
     #[allow(unused_imports)]
@@ -1337,6 +1347,24 @@ mod tests {
     fn project_image_tag_handles_root_path() {
         let tag = project_image_tag(Path::new("/"));
         assert_eq!(tag, "amux-project:latest");
+    }
+
+    #[test]
+    fn agent_image_tag_claude() {
+        let tag = agent_image_tag(Path::new("/home/user/myproject"), "claude");
+        assert_eq!(tag, "amux-myproject-claude:latest");
+    }
+
+    #[test]
+    fn agent_image_tag_codex() {
+        let tag = agent_image_tag(Path::new("/home/user/myproject"), "codex");
+        assert_eq!(tag, "amux-myproject-codex:latest");
+    }
+
+    #[test]
+    fn agent_image_tag_handles_root_path() {
+        let tag = agent_image_tag(Path::new("/"), "claude");
+        assert_eq!(tag, "amux-project-claude:latest");
     }
 
     #[test]

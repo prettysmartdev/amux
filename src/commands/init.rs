@@ -141,8 +141,8 @@ pub async fn run_with_sink(
             StepStatus::Skipped("use --aspec to download".into());
     }
 
-    // 3. Write Dockerfile.dev from template if missing (never overwrites existing).
-    let dockerfile_was_new = write_dockerfile(&git_root, &agent, out).await?;
+    // 3. Write Dockerfile.dev (project base template) and .amux/Dockerfile.{agent} if missing.
+    let dockerfile_was_new = write_project_dockerfile(&git_root, out).await?;
     if dockerfile_was_new {
         out.println(format!(
             "Dockerfile.dev written to: {}",
@@ -156,11 +156,13 @@ pub async fn run_with_sink(
         ));
         summary.dockerfile = StepStatus::Ok("already exists".into());
     }
+    // Write .amux/Dockerfile.{agent} if missing (never overwrites existing).
+    write_agent_dockerfile(&git_root, &agent, out).await?;
 
-    // 4. Optionally run the agent audit container, then build the image.
+    // 4. Optionally run the agent audit container, then build both images.
     //    Build any time a new Dockerfile was created OR the audit ran.
     if run_audit {
-        // Need Docker daemon running to build and run the container.
+        // Need Docker daemon running to build and run the containers.
         out.print("Checking Docker daemon... ");
         if !docker::is_daemon_running() {
             out.println("FAILED");
@@ -171,7 +173,10 @@ pub async fn run_with_sink(
             out.println("OK");
 
             let image_tag = docker::project_image_tag(&git_root);
+            let agent_image_tag = docker::agent_image_tag(&git_root, agent.as_str());
             let dockerfile_str = git_root.join("Dockerfile.dev").to_str().unwrap().to_string();
+            let agent_df_path = git_root.join(".amux").join(format!("Dockerfile.{}", agent.as_str()));
+            let agent_df_str = agent_df_path.to_str().unwrap().to_string();
             let git_root_str = git_root.to_str().unwrap().to_string();
             let mount_path = git_root.to_str().unwrap().to_string();
 
@@ -181,7 +186,7 @@ pub async fn run_with_sink(
             let env_vars = credentials.env_vars;
             let host_settings = crate::passthrough::passthrough_for_agent(agent.as_str()).prepare_host_settings();
 
-            // Build the image before running audit.
+            // Build the project base image first.
             out.println(format!("Building image {}...", image_tag));
             let build_cmd = docker::format_build_cmd(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str);
             out.println(format!("$ {}", build_cmd));
@@ -208,12 +213,39 @@ pub async fn run_with_sink(
                 }
             }
 
-            // Run the audit container interactively.
+            // Build the agent image on top of the project base.
+            out.println(format!("Building agent image {}...", agent_image_tag));
+            let agent_build_cmd = docker::format_build_cmd(runtime.cli_binary(), &agent_image_tag, &agent_df_str, &git_root_str);
+            out.println(format!("$ {}", agent_build_cmd));
+            let out_clone_a = out.clone();
+            match runtime.build_image_streaming(
+                &agent_image_tag,
+                std::path::Path::new(&agent_df_str),
+                std::path::Path::new(&git_root_str),
+                false,
+                &mut |line| {
+                    out_clone_a.println(line);
+                },
+            ) {
+                Ok(_) => {
+                    out.println(format!("Agent image {} built successfully.", agent_image_tag));
+                }
+                Err(e) => {
+                    out.println(format!("Warning: failed to build agent image: {}", e));
+                    summary.audit = StepStatus::Failed("agent image build failed before audit".into());
+                    summary.image_build = StepStatus::Failed("agent build failed".into());
+                    print_init_summary(out, &summary, agent.as_str());
+                    print_whats_next(out);
+                    return Ok(());
+                }
+            }
+
+            // Run the audit container in the agent image (which has the agent tools installed).
             print_interactive_notice(out, agent.as_str());
             let entrypoint = audit_entrypoint(agent.as_str());
             let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
             match runtime.run_container(
-                &image_tag,
+                &agent_image_tag,
                 &mount_path,
                 &entrypoint_refs,
                 &env_vars,
@@ -231,8 +263,7 @@ pub async fn run_with_sink(
                 }
             }
 
-            // Rebuild the image after audit (whether audit succeeded or not, since
-            // the audit may have partially modified Dockerfile.dev).
+            // Rebuild project base image after audit (audit may have modified Dockerfile.dev).
             out.println(format!("Rebuilding image {} after audit...", image_tag));
             let out_clone2 = out.clone();
             match runtime.build_image_streaming(
@@ -246,16 +277,40 @@ pub async fn run_with_sink(
             ) {
                 Ok(_) => {
                     out.println(format!("Image {} rebuilt successfully.", image_tag));
-                    summary.image_build = StepStatus::Ok("built".into());
                 }
                 Err(e) => {
                     out.println(format!("Warning: failed to rebuild image: {}", e));
                     summary.image_build = StepStatus::Failed("rebuild failed".into());
+                    print_init_summary(out, &summary, agent.as_str());
+                    print_whats_next(out);
+                    return Ok(());
+                }
+            }
+
+            // Rebuild agent image on top of the updated base.
+            out.println(format!("Rebuilding agent image {} after audit...", agent_image_tag));
+            let out_clone3 = out.clone();
+            match runtime.build_image_streaming(
+                &agent_image_tag,
+                std::path::Path::new(&agent_df_str),
+                std::path::Path::new(&git_root_str),
+                false,
+                &mut |line| {
+                    out_clone3.println(line);
+                },
+            ) {
+                Ok(_) => {
+                    out.println(format!("Agent image {} rebuilt successfully.", agent_image_tag));
+                    summary.image_build = StepStatus::Ok("built".into());
+                }
+                Err(e) => {
+                    out.println(format!("Warning: failed to rebuild agent image: {}", e));
+                    summary.image_build = StepStatus::Failed("agent rebuild failed".into());
                 }
             }
         }
     } else if dockerfile_was_new {
-        // New Dockerfile.dev was created but user declined audit — build the image.
+        // New Dockerfile.dev was created but user declined audit — build both images.
         out.print("Checking Docker daemon... ");
         if !docker::is_daemon_running() {
             out.println("not running (skipping image build)");
@@ -264,15 +319,20 @@ pub async fn run_with_sink(
         } else {
             out.println("OK");
             let image_tag = docker::project_image_tag(&git_root);
+            let agent_image_tag = docker::agent_image_tag(&git_root, agent.as_str());
             let dockerfile_str =
                 git_root.join("Dockerfile.dev").to_str().unwrap().to_string();
+            let agent_df_path = git_root.join(".amux").join(format!("Dockerfile.{}", agent.as_str()));
+            let agent_df_str = agent_df_path.to_str().unwrap().to_string();
             let git_root_str = git_root.to_str().unwrap().to_string();
+
+            // Build project base image.
             out.println(format!("Building image {}...", image_tag));
             let build_cmd =
                 docker::format_build_cmd(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str);
             out.println(format!("$ {}", build_cmd));
             let out_clone = out.clone();
-            match runtime.build_image_streaming(
+            let base_ok = match runtime.build_image_streaming(
                 &image_tag,
                 std::path::Path::new(&dockerfile_str),
                 std::path::Path::new(&git_root_str),
@@ -283,14 +343,44 @@ pub async fn run_with_sink(
             ) {
                 Ok(_) => {
                     out.println(format!("Image {} built successfully.", image_tag));
-                    summary.audit = StepStatus::Skipped("declined".into());
-                    summary.image_build = StepStatus::Ok("built".into());
+                    true
                 }
                 Err(e) => {
                     out.println(format!("Warning: failed to build image: {}", e));
-                    summary.audit = StepStatus::Skipped("declined".into());
-                    summary.image_build = StepStatus::Failed("build failed".into());
+                    false
                 }
+            };
+
+            if base_ok {
+                // Build agent image on top of the project base.
+                out.println(format!("Building agent image {}...", agent_image_tag));
+                let agent_build_cmd =
+                    docker::format_build_cmd(runtime.cli_binary(), &agent_image_tag, &agent_df_str, &git_root_str);
+                out.println(format!("$ {}", agent_build_cmd));
+                let out_clone_a = out.clone();
+                match runtime.build_image_streaming(
+                    &agent_image_tag,
+                    std::path::Path::new(&agent_df_str),
+                    std::path::Path::new(&git_root_str),
+                    false,
+                    &mut |line| {
+                        out_clone_a.println(line);
+                    },
+                ) {
+                    Ok(_) => {
+                        out.println(format!("Agent image {} built successfully.", agent_image_tag));
+                        summary.audit = StepStatus::Skipped("declined".into());
+                        summary.image_build = StepStatus::Ok("built".into());
+                    }
+                    Err(e) => {
+                        out.println(format!("Warning: failed to build agent image: {}", e));
+                        summary.audit = StepStatus::Skipped("declined".into());
+                        summary.image_build = StepStatus::Failed("agent build failed".into());
+                    }
+                }
+            } else {
+                summary.audit = StepStatus::Skipped("declined".into());
+                summary.image_build = StepStatus::Failed("build failed".into());
             }
         }
     } else {
@@ -486,27 +576,55 @@ pub fn find_git_root() -> Option<std::path::PathBuf> {
     find_git_root_from(&std::env::current_dir().ok()?)
 }
 
-/// Write Dockerfile.dev to the git root using a template downloaded from GitHub.
-/// Falls back to the embedded template if the download fails.
+/// Write Dockerfile.dev to the git root using the project base template.
 /// Returns `true` if a new file was created, `false` if an existing file was preserved.
 /// Public so other commands (e.g. ready) can initialize a missing Dockerfile.dev.
-pub async fn write_dockerfile(
+pub async fn write_project_dockerfile(
     git_root: &Path,
-    agent: &Agent,
     out: &OutputSink,
 ) -> Result<bool> {
     let path = git_root.join("Dockerfile.dev");
     if path.exists() {
         return Ok(false);
     }
-    let content = download_or_fallback_dockerfile(agent, out).await;
-    std::fs::write(&path, content)
+    let content = project_dockerfile_embedded();
+    std::fs::write(&path, &content)
         .with_context(|| format!("Failed to write {}", path.display()))?;
+    out.println(format!("Project Dockerfile.dev written to: {}", path.display()));
     Ok(true)
 }
 
-/// Try to download the Dockerfile template from GitHub; fall back to embedded template.
-async fn download_or_fallback_dockerfile(agent: &Agent, out: &OutputSink) -> String {
+/// Write the agent-specific Dockerfile to `.amux/Dockerfile.{agent}`.
+/// Downloads the template from GitHub; falls back to the embedded template.
+/// Substitutes the project base image tag into the FROM directive.
+/// Returns `true` if a new file was created, `false` if an existing file was preserved.
+pub async fn write_agent_dockerfile(
+    git_root: &Path,
+    agent: &Agent,
+    out: &OutputSink,
+) -> Result<bool> {
+    let amux_dir = git_root.join(".amux");
+    std::fs::create_dir_all(&amux_dir)
+        .with_context(|| format!("Failed to create directory {}", amux_dir.display()))?;
+
+    let agent_name = agent.as_str();
+    let path = amux_dir.join(format!("Dockerfile.{}", agent_name));
+    if path.exists() {
+        return Ok(false);
+    }
+
+    let base_tag = crate::runtime::docker::project_image_tag(git_root);
+    let template = download_or_fallback_agent_dockerfile(agent, out).await;
+    let content = template.replace("{{AMUX_BASE_IMAGE}}", &base_tag);
+
+    std::fs::write(&path, &content)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    out.println(format!("Agent Dockerfile written to: {}", path.display()));
+    Ok(true)
+}
+
+/// Try to download the agent Dockerfile template from GitHub; fall back to embedded template.
+async fn download_or_fallback_agent_dockerfile(agent: &Agent, out: &OutputSink) -> String {
     match download::download_dockerfile_template(agent, out).await {
         Ok(content) => content,
         Err(e) => {
@@ -519,7 +637,13 @@ async fn download_or_fallback_dockerfile(agent: &Agent, out: &OutputSink) -> Str
     }
 }
 
-/// Embedded Dockerfile templates compiled into the binary (used as fallback).
+/// Embedded project base Dockerfile template compiled into the binary.
+pub fn project_dockerfile_embedded() -> String {
+    include_str!("../../templates/Dockerfile.project").to_string()
+}
+
+/// Embedded agent Dockerfile templates compiled into the binary (used as fallback).
+/// Templates use `{{AMUX_BASE_IMAGE}}` as a placeholder for the project base image tag.
 pub fn dockerfile_for_agent_embedded(agent: &Agent) -> String {
     match agent {
         Agent::Claude => include_str!("../../templates/Dockerfile.claude").to_string(),
@@ -580,43 +704,25 @@ mod tests {
         assert!(rx.try_recv().is_ok());
     }
 
-    #[tokio::test]
-    async fn write_dockerfile_creates_when_missing() {
-        let tmp = TempDir::new().unwrap();
-        let (tx, _rx) = unbounded_channel();
-        let out = OutputSink::Channel(tx);
-        let result = write_dockerfile(tmp.path(), &Agent::Claude, &out).await.unwrap();
-        assert!(result, "should return true when creating a new file");
-        assert!(tmp.path().join("Dockerfile.dev").exists());
-        let content = std::fs::read_to_string(tmp.path().join("Dockerfile.dev")).unwrap();
-        assert!(content.contains("debian:bookworm-slim"));
-    }
-
-    #[tokio::test]
-    async fn write_dockerfile_does_not_overwrite_existing() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("Dockerfile.dev");
-        std::fs::write(&path, "CUSTOM CONTENT").unwrap();
-
-        let (tx, _rx) = unbounded_channel();
-        let out = OutputSink::Channel(tx);
-        let result = write_dockerfile(tmp.path(), &Agent::Claude, &out).await.unwrap();
-        assert!(!result, "should return false when file already exists");
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "CUSTOM CONTENT", "existing file must not be overwritten");
-    }
-
     #[test]
-    fn dockerfile_for_agent_embedded_uses_debian_slim_base() {
+    fn dockerfile_for_agent_embedded_uses_base_image_placeholder() {
         for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki, Agent::Gemini] {
             let content = dockerfile_for_agent_embedded(agent);
             assert!(
-                content.contains("debian:bookworm-slim"),
-                "{:?} template should use debian:bookworm-slim base image",
+                content.contains("{{AMUX_BASE_IMAGE}}"),
+                "{:?} template should use {{AMUX_BASE_IMAGE}} placeholder instead of a hardcoded base",
                 agent
             );
         }
+    }
+
+    #[test]
+    fn project_dockerfile_embedded_uses_debian_slim_base() {
+        let content = project_dockerfile_embedded();
+        assert!(
+            content.contains("debian:bookworm-slim"),
+            "project template should use debian:bookworm-slim base image"
+        );
     }
 
     #[test]
@@ -660,8 +766,8 @@ mod tests {
     fn dockerfile_for_agent_embedded_gemini_contains_expected_strings() {
         let content = dockerfile_for_agent_embedded(&Agent::Gemini);
         assert!(
-            content.contains("debian:bookworm-slim"),
-            "Dockerfile.gemini must use debian:bookworm-slim base image"
+            content.contains("{{AMUX_BASE_IMAGE}}"),
+            "Dockerfile.gemini must use {{AMUX_BASE_IMAGE}} placeholder"
         );
         assert!(
             content.contains("nodesource"),
@@ -878,6 +984,165 @@ mod tests {
             !output.contains("configure a work items directory"),
             "the offer prompt should not appear when already configured; got: {}",
             output
+        );
+    }
+
+    // ─── write_project_dockerfile unit tests (work item 0049) ───────────────
+
+    #[tokio::test]
+    async fn write_project_dockerfile_creates_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let (tx, _rx) = unbounded_channel();
+        let out = OutputSink::Channel(tx);
+        let result = write_project_dockerfile(tmp.path(), &out).await.unwrap();
+        assert!(result, "should return true when creating a new file");
+        let path = tmp.path().join("Dockerfile.dev");
+        assert!(path.exists(), "Dockerfile.dev should be created");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("debian:bookworm-slim"),
+            "project Dockerfile should use debian:bookworm-slim base"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_project_dockerfile_does_not_overwrite_existing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Dockerfile.dev");
+        std::fs::write(&path, "CUSTOM CONTENT").unwrap();
+
+        let (tx, _rx) = unbounded_channel();
+        let out = OutputSink::Channel(tx);
+        let result = write_project_dockerfile(tmp.path(), &out).await.unwrap();
+        assert!(!result, "should return false when file already exists");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "CUSTOM CONTENT", "existing Dockerfile.dev must not be overwritten");
+    }
+
+    // ─── write_agent_dockerfile unit tests (work item 0049) ─────────────────
+
+    #[tokio::test]
+    async fn write_agent_dockerfile_creates_amux_dir_if_missing() {
+        let tmp = TempDir::new().unwrap();
+        let amux_dir = tmp.path().join(".amux");
+        assert!(!amux_dir.exists(), ".amux dir should not exist yet");
+
+        let (tx, _rx) = unbounded_channel();
+        let out = OutputSink::Channel(tx);
+        write_agent_dockerfile(tmp.path(), &Agent::Claude, &out).await.unwrap();
+
+        assert!(amux_dir.exists(), ".amux dir should have been created");
+        assert!(
+            amux_dir.join("Dockerfile.claude").exists(),
+            ".amux/Dockerfile.claude should exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_agent_dockerfile_creates_file_in_correct_location() {
+        let tmp = TempDir::new().unwrap();
+        // Use a predictable project directory name so we can assert the FROM line
+        // when the embedded template (not a downloaded template) is in use.
+        let project_dir = tmp.path().join("testproject");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let (tx, _rx) = unbounded_channel();
+        let out = OutputSink::Channel(tx);
+        let result = write_agent_dockerfile(&project_dir, &Agent::Claude, &out).await.unwrap();
+
+        assert!(result, "should return true when creating a new file");
+        let agent_df = project_dir.join(".amux").join("Dockerfile.claude");
+        assert!(agent_df.exists(), ".amux/Dockerfile.claude should be created at the correct path");
+    }
+
+    /// The embedded claude template has `{{AMUX_BASE_IMAGE}}` and substitution produces
+    /// `FROM amux-testproject:latest` when the project directory is named `testproject`.
+    /// This tests the substitution logic directly, independent of network downloads.
+    #[test]
+    fn agent_dockerfile_embedded_base_image_substitution_for_testproject() {
+        use std::path::Path;
+        let base_tag =
+            crate::runtime::docker::project_image_tag(Path::new("/repos/testproject"));
+        assert_eq!(base_tag, "amux-testproject:latest");
+
+        let template = dockerfile_for_agent_embedded(&Agent::Claude);
+        assert!(
+            template.contains("{{AMUX_BASE_IMAGE}}"),
+            "embedded claude template must contain {{AMUX_BASE_IMAGE}} placeholder"
+        );
+        let content = template.replace("{{AMUX_BASE_IMAGE}}", &base_tag);
+        assert!(
+            content.contains("FROM amux-testproject:latest"),
+            "substituted embedded template must have FROM amux-testproject:latest; got:\n{}",
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn write_agent_dockerfile_does_not_overwrite_existing() {
+        let tmp = TempDir::new().unwrap();
+        let amux_dir = tmp.path().join(".amux");
+        std::fs::create_dir_all(&amux_dir).unwrap();
+        let existing = amux_dir.join("Dockerfile.claude");
+        std::fs::write(&existing, "EXISTING CONTENT").unwrap();
+
+        let (tx, _rx) = unbounded_channel();
+        let out = OutputSink::Channel(tx);
+        let result = write_agent_dockerfile(tmp.path(), &Agent::Claude, &out).await.unwrap();
+
+        assert!(!result, "should return false when file already exists");
+        let content = std::fs::read_to_string(&existing).unwrap();
+        assert_eq!(
+            content, "EXISTING CONTENT",
+            "existing agent Dockerfile must not be overwritten"
+        );
+    }
+
+    /// Verifies the `{{AMUX_BASE_IMAGE}}` substitution logic that `write_agent_dockerfile`
+    /// applies to the template.  Uses the embedded template directly so the assertion
+    /// is not affected by what the GitHub remote may return.
+    #[test]
+    fn agent_dockerfile_embedded_substitution_replaces_placeholder() {
+        use std::path::Path;
+        let base_tag =
+            crate::runtime::docker::project_image_tag(Path::new("/work/myapp"));
+        assert_eq!(base_tag, "amux-myapp:latest");
+
+        for agent in &[
+            Agent::Claude,
+            Agent::Codex,
+            Agent::Opencode,
+            Agent::Maki,
+            Agent::Gemini,
+        ] {
+            let template = dockerfile_for_agent_embedded(agent);
+            let content = template.replace("{{AMUX_BASE_IMAGE}}", &base_tag);
+
+            assert!(
+                !content.contains("{{AMUX_BASE_IMAGE}}"),
+                "{:?}: {{AMUX_BASE_IMAGE}} placeholder should be gone after substitution",
+                agent
+            );
+            assert!(
+                content.contains("FROM amux-myapp:latest"),
+                "{:?}: substituted content should have FROM amux-myapp:latest; got:\n{}",
+                agent,
+                content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn write_agent_dockerfile_codex_uses_agent_name_in_path() {
+        let tmp = TempDir::new().unwrap();
+        let (tx, _rx) = unbounded_channel();
+        let out = OutputSink::Channel(tx);
+        write_agent_dockerfile(tmp.path(), &Agent::Codex, &out).await.unwrap();
+
+        let expected = tmp.path().join(".amux").join("Dockerfile.codex");
+        assert!(
+            expected.exists(),
+            ".amux/Dockerfile.codex should be created for codex agent"
         );
     }
 }

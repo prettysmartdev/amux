@@ -559,3 +559,53 @@ fn config_round_trip_set_get_show() {
         "show should display 7777"
     );
 }
+
+// ── --agent flag integration tests (work item 0049) ──────────────────────────
+
+#[test]
+fn chat_help_shows_agent_flag() {
+    let output = amux()
+        .args(["chat", "--help"])
+        .output()
+        .expect("failed to run amux");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--agent"),
+        "chat --help should mention --agent flag; got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn chat_unknown_agent_exits_nonzero_with_error() {
+    let output = amux()
+        .args(["chat", "--agent", "unknown"])
+        .output()
+        .expect("failed to run amux");
+    assert!(
+        !output.status.success(),
+        "chat --agent unknown should exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown") || stderr.contains("available agents"),
+        "stderr should describe the unknown agent error; got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn implement_help_shows_agent_flag() {
+    let output = amux()
+        .args(["implement", "--help"])
+        .output()
+        .expect("failed to run amux");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--agent"),
+        "implement --help should mention --agent flag; got: {}",
+        stdout
+    );
+}

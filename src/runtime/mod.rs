@@ -363,7 +363,7 @@ pub fn container_home_for_user(username: &str) -> String {
     }
 }
 
-/// Detects the last USER directive in `Dockerfile.dev` and, if it names a non-root user,
+/// Detects the last USER directive in `dockerfile_path` and, if it names a non-root user,
 /// updates `container_home` in `settings` and returns a message to display to the user.
 ///
 /// Also remaps any `agent_config_dir` container path that starts with `/root/` to the
@@ -387,9 +387,13 @@ pub fn apply_dockerfile_user(settings: &mut HostSettings, dockerfile_path: &Path
         };
         settings.agent_config_dir = Some((host_path, new_container_path));
     }
+    let dockerfile_name = dockerfile_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Dockerfile");
     Some(format!(
-        "Dockerfile.dev sets USER to '{}'; mounting agent settings at {}",
-        user, home
+        "{} sets USER to '{}'; mounting agent settings at {}",
+        dockerfile_name, user, home
     ))
 }
 
@@ -1097,5 +1101,27 @@ mod tests {
         let msg = apply_dockerfile_user(&mut settings, Path::new("/nonexistent/Dockerfile.dev"));
         assert!(msg.is_none());
         assert_eq!(settings.container_home, "/root");
+    }
+
+    #[test]
+    fn apply_dockerfile_user_message_includes_actual_filename() {
+        // When called with .amux/Dockerfile.claude, the message must name that file,
+        // not the hardcoded "Dockerfile.dev".
+        let tmp = TempDir::new().unwrap();
+        let amux_dir = tmp.path().join(".amux");
+        std::fs::create_dir_all(&amux_dir).unwrap();
+        let dockerfile = amux_dir.join("Dockerfile.claude");
+        std::fs::write(&dockerfile, "FROM debian\nUSER amux\n").unwrap();
+        let mut settings = HostSettings::from_paths(
+            PathBuf::from("/tmp/cfg.json"),
+            PathBuf::from("/tmp/dot-claude"),
+        );
+        let msg = apply_dockerfile_user(&mut settings, &dockerfile).unwrap();
+        assert!(
+            msg.contains("Dockerfile.claude"),
+            "message should name the actual dockerfile; got: {}",
+            msg
+        );
+        assert!(!msg.contains("Dockerfile.dev"), "message must not hardcode Dockerfile.dev");
     }
 }

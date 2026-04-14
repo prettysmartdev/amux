@@ -1,7 +1,10 @@
 use crate::cli::Agent;
 use crate::commands::auth::resolve_auth;
 use crate::commands::implement::confirm_mount_scope_stdin;
-use crate::commands::init::{ask_yes_no_stdin, dockerfile_for_agent_embedded, find_git_root, find_git_root_from, write_dockerfile};
+use crate::commands::init::{
+    ask_yes_no_stdin, find_git_root, find_git_root_from,
+    project_dockerfile_embedded, write_agent_dockerfile, write_project_dockerfile,
+};
 use crate::commands::output::OutputSink;
 use crate::config::{load_repo_config, migrate_legacy_repo_config};
 use crate::runtime::docker as docker;
@@ -88,12 +91,16 @@ pub fn select_random_greeting() -> &'static str {
 /// Context produced by the pre-audit phase, needed by the audit and post-audit phases.
 #[derive(Clone)]
 pub struct ReadyContext {
-    pub image_tag: String,
-    pub dockerfile_str: String,
+    pub image_tag: String,           // project base image tag
+    pub dockerfile_str: String,      // path to Dockerfile.dev
     pub git_root_str: String,
     pub mount_path: String,
     pub agent_name: String,
     pub env_vars: Vec<(String, String)>,
+    /// Agent image tag (`amux-{project}-{agent}:latest`). `None` when in legacy mode.
+    pub agent_image_tag: Option<String>,
+    /// Path to `.amux/Dockerfile.{agent}`. `None` when in legacy mode.
+    pub agent_dockerfile_str: Option<String>,
 }
 
 /// Options controlling ready command behavior. Shared between command and TUI modes.
@@ -112,6 +119,9 @@ pub struct ReadyOptions {
     pub allow_docker: bool,
     /// When true, auto-create Dockerfile.dev if missing (used by TUI to skip prompting).
     pub auto_create_dockerfile: bool,
+    /// When true, skip the agent dockerfile/image steps and use only the project image.
+    /// Set when user declines migration from the legacy single-file layout.
+    pub legacy_mode: bool,
 }
 
 /// Tracks the status of each step for the summary table.
@@ -207,17 +217,11 @@ pub fn print_interactive_notice(out: &OutputSink, agent_name: &str) {
     out.println(String::new());
 }
 
-/// Check whether the given Dockerfile content exactly matches one of the default templates.
-/// Returns true if it matches any embedded template for the configured agent.
-pub fn dockerfile_matches_template(content: &str, agent_name: &str) -> bool {
-    let agent = match agent_name {
-        "codex" => Agent::Codex,
-        "opencode" => Agent::Opencode,
-        "maki" => Agent::Maki,
-        "gemini" => Agent::Gemini,
-        _ => Agent::Claude,
-    };
-    let template = dockerfile_for_agent_embedded(&agent);
+/// Check whether the given Dockerfile.dev content matches the default project base template.
+/// Returns true when the content is still unmodified from the generated project template,
+/// which signals that running the audit agent would be useful.
+pub fn dockerfile_matches_template(content: &str) -> bool {
+    let template = project_dockerfile_embedded();
     content.trim() == template.trim()
 }
 
@@ -288,7 +292,7 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
 
     // Determine whether to auto-create Dockerfile.dev or prompt the user.
     let dockerfile_path = git_root.join("Dockerfile.dev");
-    let effective_refresh;
+    let mut effective_refresh;
     let auto_create_dockerfile;
 
     if !dockerfile_path.exists() {
@@ -314,12 +318,12 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
             effective_refresh = refresh;
         }
     } else if !refresh {
-        // Dockerfile.dev exists, --refresh not set: check if content matches template.
+        // Dockerfile.dev exists, --refresh not set: check if content matches project template.
         // If it matches, offer to run the audit.
         let content = std::fs::read_to_string(&dockerfile_path).unwrap_or_default();
-        if dockerfile_matches_template(&content, agent_name) {
+        if dockerfile_matches_template(&content) {
             println!(
-                "\nYour Dockerfile.dev matches the default template — the agent audit can"
+                "\nYour Dockerfile.dev matches the default project template — the agent audit can"
             );
             println!("scan your project and customize it for your specific toolchain.");
             if ask_yes_no_stdin("Run the agent audit container now?") {
@@ -337,6 +341,49 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
         auto_create_dockerfile = true;
     }
 
+    // Detect legacy layout: Dockerfile.dev exists but .amux/Dockerfile.{agent} does not.
+    // When detected, offer migration to the modular layout.
+    let agent_dockerfile_path = git_root
+        .join(".amux")
+        .join(format!("Dockerfile.{}", agent_name));
+    let is_known_agent = crate::cli::KNOWN_AGENT_NAMES.contains(&agent_name);
+    let legacy_mode = if dockerfile_path.exists() && is_known_agent && !agent_dockerfile_path.exists() {
+        println!();
+        println!("Detected legacy single-file Dockerfile.dev layout.");
+        println!("Would you like to migrate to the modular layout? (agent tools move to .amux/Dockerfile.{})", agent_name);
+        println!();
+        println!("Migrating will:");
+        println!("  1. Back up Dockerfile.dev to Dockerfile.dev.bak");
+        println!("  2. Recreate Dockerfile.dev with a minimal debian:bookworm-slim base");
+        println!("  3. Write .amux/Dockerfile.{} using the agent template", agent_name);
+        println!("  4. Build both images");
+        println!("  5. Run the audit agent to restore project dependencies in Dockerfile.dev");
+        println!();
+        if ask_yes_no_stdin("Migrate to modular Dockerfile layout?") {
+            // Back up the existing Dockerfile.dev before overwriting so the user's
+            // content is not lost if the audit agent fails to restore project deps.
+            let backup_path = dockerfile_path.with_extension("dev.bak");
+            std::fs::copy(&dockerfile_path, &backup_path)
+                .context("Failed to back up Dockerfile.dev")?;
+            println!("Backed up existing Dockerfile.dev to {}.", backup_path.display());
+
+            // Overwrite Dockerfile.dev with the minimal project base template.
+            let content = project_dockerfile_embedded();
+            std::fs::write(&dockerfile_path, &content)
+                .context("Failed to overwrite Dockerfile.dev with project template")?;
+            println!("Dockerfile.dev recreated with project base template.");
+            // Force refresh so the audit runs and restores project deps
+            effective_refresh = true;
+            false // not legacy mode — proceed with new layout
+        } else {
+            println!("Keeping existing layout. Use the project image for this session.");
+            println!("DEPRECATION WARNING: Run `amux ready` to migrate to the modular layout.");
+            true // legacy mode
+        }
+    } else {
+        false // new layout or Dockerfile.dev missing (handled above)
+    };
+
     let opts = ReadyOptions {
         refresh: effective_refresh,
         build: effective_build,
@@ -344,6 +391,7 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
         non_interactive,
         allow_docker,
         auto_create_dockerfile,
+        legacy_mode,
     };
 
     let mut summary = ReadySummary::default();
@@ -375,9 +423,11 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
         };
         let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
+        // Use agent image (has agent installed) when available; fall back to project base for legacy.
+        let audit_image = ctx.agent_image_tag.as_deref().unwrap_or(&ctx.image_tag);
         if opts.non_interactive {
             let (_cmd, audit_output) = runtime.run_container_captured(
-                &ctx.image_tag,
+                audit_image,
                 &ctx.mount_path,
                 &entrypoint_refs,
                 &ctx.env_vars,
@@ -392,7 +442,7 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
             }
         } else {
             runtime.run_container(
-                &ctx.image_tag,
+                audit_image,
                 &ctx.mount_path,
                 &entrypoint_refs,
                 &ctx.env_vars,
@@ -528,19 +578,18 @@ pub async fn run_pre_audit(
     out.print("Checking Dockerfile.dev... ");
     let dockerfile_was_missing;
     {
-        let agent = agent_from_str(&agent_name);
         if !dockerfile.exists() {
             if opts.auto_create_dockerfile {
-                // TUI mode or user already accepted: create from template.
-                if write_dockerfile(&git_root, &agent, out).await? {
+                // TUI mode or user already accepted: create from project template.
+                if write_project_dockerfile(&git_root, out).await? {
                     out.println(format!(
-                        "MISSING — downloaded and created at {}",
+                        "MISSING — created at {}",
                         dockerfile.display()
                     ));
                     summary.dockerfile = StepStatus::Ok("created".into());
                     dockerfile_was_missing = true;
                 } else {
-                    // write_dockerfile returned false (file appeared between checks).
+                    // write_project_dockerfile returned false (file appeared between checks).
                     out.println(format!("OK ({})", dockerfile.display()));
                     summary.dockerfile = StepStatus::Ok("exists".into());
                     dockerfile_was_missing = false;
@@ -558,8 +607,7 @@ pub async fn run_pre_audit(
         }
     }
 
-    // 6. Check if project image exists; build if missing, forced by --build, or
-    //    if Dockerfile.dev was just created from template.
+    // 6. Check if project base image exists; build if missing or forced.
     let dockerfile_str = dockerfile.to_str().unwrap().to_string();
     let git_root_str = git_root.to_str().unwrap().to_string();
     let mount_path_str = mount_path.to_str().unwrap().to_string();
@@ -589,13 +637,69 @@ pub async fn run_pre_audit(
             opts.no_cache,
             &mut |line| { out_clone.println(line); },
         )
-        .context("Failed to build image")?;
+        .context("Failed to build project base image")?;
         out.println(format!("Image {} built successfully.", image_tag));
         summary.dev_image = StepStatus::Ok("built".into());
     } else {
         out.println(format!("Image {} found.", image_tag));
         summary.dev_image = StepStatus::Ok("exists".into());
     }
+
+    // 7. Handle agent dockerfile and image (new modular layout only).
+    //    Skipped when in legacy mode or when agent name is not recognized.
+    let is_known_agent = crate::cli::KNOWN_AGENT_NAMES.contains(&agent_name.as_str());
+    let (agent_image_tag_opt, agent_dockerfile_str_opt) = if !opts.legacy_mode && is_known_agent {
+        let agent_enum = agent_from_str(&agent_name)
+            .expect("is_known_agent guard ensures agent_name is in KNOWN_AGENT_NAMES");
+        let agent_df_path = git_root
+            .join(".amux")
+            .join(format!("Dockerfile.{}", agent_name));
+
+        // Write agent dockerfile if missing.
+        if !agent_df_path.exists() {
+            out.println(format!("Writing agent Dockerfile to {}...", agent_df_path.display()));
+            write_agent_dockerfile(&git_root, &agent_enum, out).await?;
+        } else {
+            out.println(format!("Agent Dockerfile found: {}", agent_df_path.display()));
+        }
+
+        let agent_tag = docker::agent_image_tag(&git_root, &agent_name);
+        let agent_df_str = agent_df_path.to_str().unwrap().to_string();
+
+        // Build agent image if missing or forced by --build.
+        let agent_needs_build = !runtime.image_exists(&agent_tag);
+        if agent_needs_build {
+            out.println(format!("Agent image {} not found. Building...", agent_tag));
+            let build_cmd_display = if opts.no_cache {
+                docker::format_build_cmd_no_cache(runtime.cli_binary(), &agent_tag, &agent_df_str, &git_root_str)
+            } else {
+                docker::format_build_cmd(runtime.cli_binary(), &agent_tag, &agent_df_str, &git_root_str)
+            };
+            out.println(format!("$ {}", build_cmd_display));
+            let out_clone = out.clone();
+            runtime.build_image_streaming(
+                &agent_tag,
+                std::path::Path::new(&agent_df_str),
+                std::path::Path::new(&git_root_str),
+                opts.no_cache,
+                &mut |line| { out_clone.println(line); },
+            )
+            .context("Failed to build agent image")?;
+            out.println(format!("Agent image {} built successfully.", agent_tag));
+        } else {
+            out.println(format!("Agent image {} found.", agent_tag));
+        }
+
+        (Some(agent_tag), Some(agent_df_str))
+    } else {
+        if opts.legacy_mode {
+            out.println(format!(
+                "Note: using legacy single-image layout (project image). \
+                 Run `amux ready` to migrate to the modular layout."
+            ));
+        }
+        (None, None)
+    };
 
     Ok(ReadyContext {
         image_tag,
@@ -604,10 +708,87 @@ pub async fn run_pre_audit(
         mount_path: mount_path_str,
         agent_name,
         env_vars,
+        agent_image_tag: agent_image_tag_opt,
+        agent_dockerfile_str: agent_dockerfile_str_opt,
     })
 }
 
-/// Phase 3 — Post-audit: Rebuild the Docker image after the agent has updated Dockerfile.dev.
+/// Rebuild the project base image, then rebuild every agent image whose
+/// `.amux/Dockerfile.{agent}` exists in the project.
+///
+/// Called by both `run_post_audit` (after the audit agent modifies `Dockerfile.dev`)
+/// and `run_force_build` (explicit `--build`).  Rebuilding all agent images is
+/// required because each one layers `FROM amux-{project}:latest`, so a base rebuild
+/// invalidates every agent layer.
+async fn rebuild_images(
+    out: &OutputSink,
+    ctx: &ReadyContext,
+    opts: &ReadyOptions,
+    runtime: &dyn crate::runtime::AgentRuntime,
+) -> Result<()> {
+    let git_root = std::path::Path::new(&ctx.git_root_str);
+
+    // 1. Rebuild project base image.
+    let build_cmd_display = if opts.no_cache {
+        docker::format_build_cmd_no_cache(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
+    } else {
+        docker::format_build_cmd(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
+    };
+    out.println(format!("$ {}", build_cmd_display));
+    let out_clone = out.clone();
+    runtime.build_image_streaming(
+        &ctx.image_tag,
+        std::path::Path::new(&ctx.dockerfile_str),
+        git_root,
+        opts.no_cache,
+        &mut |line| { out_clone.println(line); },
+    )
+    .context("Failed to rebuild project base image")?;
+    out.println(format!("Image {} rebuilt.", ctx.image_tag));
+
+    // 2. Rebuild all agent images found in `.amux/Dockerfile.*`.
+    //    Sorted for deterministic output.
+    let amux_dir = git_root.join(".amux");
+    if amux_dir.is_dir() {
+        let mut entries: Vec<_> = std::fs::read_dir(&amux_dir)
+            .context("Failed to read .amux directory")?
+            .filter_map(|e| e.ok())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if let Some(agent_name) = name.strip_prefix("Dockerfile.") {
+                if agent_name.is_empty() {
+                    continue;
+                }
+                let agent_tag = docker::agent_image_tag(git_root, agent_name);
+                let agent_df_str = entry.path().to_str().unwrap().to_string();
+                out.println(format!("Rebuilding agent image {}...", agent_tag));
+                let agent_build_cmd = if opts.no_cache {
+                    docker::format_build_cmd_no_cache(runtime.cli_binary(), &agent_tag, &agent_df_str, &ctx.git_root_str)
+                } else {
+                    docker::format_build_cmd(runtime.cli_binary(), &agent_tag, &agent_df_str, &ctx.git_root_str)
+                };
+                out.println(format!("$ {}", agent_build_cmd));
+                let out_clone2 = out.clone();
+                runtime.build_image_streaming(
+                    &agent_tag,
+                    std::path::Path::new(&agent_df_str),
+                    git_root,
+                    opts.no_cache,
+                    &mut |line| { out_clone2.println(line); },
+                )
+                .with_context(|| format!("Failed to rebuild agent image {}", agent_tag))?;
+                out.println(format!("Agent image {} rebuilt.", agent_tag));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Phase 3 — Post-audit: Rebuild the project base image after the agent has updated Dockerfile.dev,
+/// then rebuild all agent images on top of the updated base.
 pub async fn run_post_audit(
     out: &OutputSink,
     ctx: &ReadyContext,
@@ -619,27 +800,12 @@ pub async fn run_post_audit(
         "Rebuilding image {} with updated Dockerfile.dev...",
         ctx.image_tag
     ));
-    let build_cmd_display = if opts.no_cache {
-        docker::format_build_cmd_no_cache(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
-    } else {
-        docker::format_build_cmd(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
-    };
-    out.println(format!("$ {}", build_cmd_display));
-    let out_clone = out.clone();
-    runtime.build_image_streaming(
-        &ctx.image_tag,
-        std::path::Path::new(&ctx.dockerfile_str),
-        std::path::Path::new(&ctx.git_root_str),
-        opts.no_cache,
-        &mut |line| { out_clone.println(line); },
-    )
-    .context("Failed to rebuild image")?;
-
+    rebuild_images(out, ctx, opts, runtime).await?;
     summary.image_rebuild = StepStatus::Ok("rebuilt".into());
     Ok(())
 }
 
-/// Force-rebuild the Docker image (used when --build is passed without --refresh).
+/// Force-rebuild the project base image and all agent images (used when --build is passed without --refresh).
 async fn run_force_build(
     out: &OutputSink,
     ctx: &ReadyContext,
@@ -651,22 +817,7 @@ async fn run_force_build(
         "Rebuilding image {} (--build)...",
         ctx.image_tag
     ));
-    let build_cmd_display = if opts.no_cache {
-        docker::format_build_cmd_no_cache(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
-    } else {
-        docker::format_build_cmd(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
-    };
-    out.println(format!("$ {}", build_cmd_display));
-    let out_clone = out.clone();
-    runtime.build_image_streaming(
-        &ctx.image_tag,
-        std::path::Path::new(&ctx.dockerfile_str),
-        std::path::Path::new(&ctx.git_root_str),
-        opts.no_cache,
-        &mut |line| { out_clone.println(line); },
-    )
-    .context("Failed to rebuild image")?;
-
+    rebuild_images(out, ctx, opts, runtime).await?;
     summary.image_rebuild = StepStatus::Ok("rebuilt".into());
     Ok(())
 }
@@ -706,8 +857,10 @@ pub async fn run_with_sink(
         };
         let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
+        // Use agent image (has agent installed) when available; fall back to project base for legacy.
+        let audit_image = ctx.agent_image_tag.as_deref().unwrap_or(&ctx.image_tag);
         let (_run_cmd, audit_output) = runtime.run_container_captured(
-            &ctx.image_tag,
+            audit_image,
             &ctx.mount_path,
             &entrypoint_refs,
             &ctx.env_vars,
@@ -792,13 +945,14 @@ pub fn audit_entrypoint_non_interactive(agent: &str) -> Vec<String> {
     }
 }
 
-fn agent_from_str(name: &str) -> Agent {
+fn agent_from_str(name: &str) -> Option<Agent> {
     match name {
-        "codex" => Agent::Codex,
-        "opencode" => Agent::Opencode,
-        "maki" => Agent::Maki,
-        "gemini" => Agent::Gemini,
-        _ => Agent::Claude,
+        "claude" => Some(Agent::Claude),
+        "codex" => Some(Agent::Codex),
+        "opencode" => Some(Agent::Opencode),
+        "maki" => Some(Agent::Maki),
+        "gemini" => Some(Agent::Gemini),
+        _ => None,
     }
 }
 
@@ -913,17 +1067,19 @@ mod tests {
     }
 
     #[test]
-    fn agent_from_str_defaults_to_claude() {
-        assert!(matches!(agent_from_str("claude"), Agent::Claude));
-        assert!(matches!(agent_from_str("codex"), Agent::Codex));
-        assert!(matches!(agent_from_str("opencode"), Agent::Opencode));
-        assert!(matches!(agent_from_str("maki"), Agent::Maki));
-        assert!(matches!(agent_from_str("unknown"), Agent::Claude));
+    fn agent_from_str_known_agents_return_some() {
+        assert!(matches!(agent_from_str("claude"), Some(Agent::Claude)));
+        assert!(matches!(agent_from_str("codex"), Some(Agent::Codex)));
+        assert!(matches!(agent_from_str("opencode"), Some(Agent::Opencode)));
+        assert!(matches!(agent_from_str("maki"), Some(Agent::Maki)));
+        assert!(matches!(agent_from_str("gemini"), Some(Agent::Gemini)));
     }
 
     #[test]
-    fn agent_from_str_gemini() {
-        assert!(matches!(agent_from_str("gemini"), Agent::Gemini));
+    fn agent_from_str_unknown_returns_none() {
+        assert!(agent_from_str("unknown").is_none());
+        assert!(agent_from_str("").is_none());
+        assert!(agent_from_str("CLAUDE").is_none());
     }
 
     #[test]
@@ -942,38 +1098,31 @@ mod tests {
     }
 
     #[test]
-    fn dockerfile_matches_template_gemini_returns_true_for_gemini() {
+    fn dockerfile_matches_template_project_template_returns_true() {
+        let content = project_dockerfile_embedded();
+        assert!(
+            dockerfile_matches_template(&content),
+            "project Dockerfile template must match itself"
+        );
+    }
+
+    #[test]
+    fn dockerfile_matches_template_gemini_agent_returns_false() {
+        use crate::commands::init::dockerfile_for_agent_embedded;
         let content = dockerfile_for_agent_embedded(&Agent::Gemini);
         assert!(
-            dockerfile_matches_template(&content, "gemini"),
-            "gemini Dockerfile content must match the 'gemini' template"
+            !dockerfile_matches_template(&content),
+            "gemini agent Dockerfile must not match the project template"
         );
     }
 
     #[test]
-    fn dockerfile_matches_template_gemini_returns_false_for_claude() {
-        let content = dockerfile_for_agent_embedded(&Agent::Gemini);
-        assert!(
-            !dockerfile_matches_template(&content, "claude"),
-            "gemini Dockerfile content must not match the 'claude' template"
-        );
-    }
-
-    #[test]
-    fn dockerfile_matches_template_maki_returns_true_for_maki() {
+    fn dockerfile_matches_template_maki_agent_returns_false() {
+        use crate::commands::init::dockerfile_for_agent_embedded;
         let content = dockerfile_for_agent_embedded(&Agent::Maki);
         assert!(
-            dockerfile_matches_template(&content, "maki"),
-            "maki Dockerfile content must match the 'maki' template"
-        );
-    }
-
-    #[test]
-    fn dockerfile_matches_template_maki_returns_false_for_claude() {
-        let content = dockerfile_for_agent_embedded(&Agent::Maki);
-        assert!(
-            !dockerfile_matches_template(&content, "claude"),
-            "maki Dockerfile content must not match the 'claude' template"
+            !dockerfile_matches_template(&content),
+            "maki agent Dockerfile must not match the project template"
         );
     }
 
@@ -1098,41 +1247,30 @@ mod tests {
     }
 
     #[test]
-    fn dockerfile_matches_template_claude() {
+    fn dockerfile_matches_template_claude_agent_returns_false() {
         use crate::commands::init::dockerfile_for_agent_embedded;
         let content = dockerfile_for_agent_embedded(&Agent::Claude);
         assert!(
-            dockerfile_matches_template(&content, "claude"),
-            "Claude template should match itself"
+            !dockerfile_matches_template(&content),
+            "Claude agent template should not match the project template"
         );
     }
 
     #[test]
-    fn dockerfile_matches_template_codex() {
+    fn dockerfile_matches_template_codex_agent_returns_false() {
         use crate::commands::init::dockerfile_for_agent_embedded;
         let content = dockerfile_for_agent_embedded(&Agent::Codex);
         assert!(
-            dockerfile_matches_template(&content, "codex"),
-            "Codex template should match itself"
+            !dockerfile_matches_template(&content),
+            "Codex agent template should not match the project template"
         );
     }
 
     #[test]
     fn dockerfile_matches_template_false_for_custom() {
         assert!(
-            !dockerfile_matches_template("FROM ubuntu:22.04\nRUN apt-get update", "claude"),
-            "Custom Dockerfile should not match template"
-        );
-    }
-
-    #[test]
-    fn dockerfile_matches_template_false_for_wrong_agent() {
-        use crate::commands::init::dockerfile_for_agent_embedded;
-        let claude_content = dockerfile_for_agent_embedded(&Agent::Claude);
-        // Claude template should NOT match codex agent check.
-        assert!(
-            !dockerfile_matches_template(&claude_content, "codex"),
-            "Claude template should not match codex agent"
+            !dockerfile_matches_template("FROM ubuntu:22.04\nRUN apt-get update"),
+            "Custom Dockerfile should not match project template"
         );
     }
 
@@ -1373,6 +1511,52 @@ mod tests {
             matches!(summary.work_items_config, StepStatus::Ok(_)),
             "expected Ok for work_items_config when work_items.dir is configured; got {:?}",
             summary.work_items_config
+        );
+    }
+
+    // ─── audit image selection (work item 0049) ──────────────────────────────
+
+    /// When an agent image tag is present in ReadyContext, the audit container must
+    /// use it rather than the project base image.  This test validates the
+    /// `ctx.agent_image_tag.as_deref().unwrap_or(&ctx.image_tag)` selection logic
+    /// used in both `run()` and `run_with_sink()`.
+    #[test]
+    fn audit_image_prefers_agent_image_over_project_base() {
+        let base_tag = "amux-myproject:latest".to_string();
+        let agent_tag = "amux-myproject-claude:latest".to_string();
+
+        // New layout: agent_image_tag is Some — must prefer agent image.
+        let ctx_new = ReadyContext {
+            image_tag: base_tag.clone(),
+            dockerfile_str: String::new(),
+            git_root_str: String::new(),
+            mount_path: String::new(),
+            agent_name: "claude".to_string(),
+            env_vars: vec![],
+            agent_image_tag: Some(agent_tag.clone()),
+            agent_dockerfile_str: Some(".amux/Dockerfile.claude".to_string()),
+        };
+        let audit_image = ctx_new.agent_image_tag.as_deref().unwrap_or(&ctx_new.image_tag);
+        assert_eq!(
+            audit_image, agent_tag,
+            "new layout: audit must use agent image, not project base"
+        );
+
+        // Legacy layout: agent_image_tag is None — must fall back to project base.
+        let ctx_legacy = ReadyContext {
+            image_tag: base_tag.clone(),
+            dockerfile_str: String::new(),
+            git_root_str: String::new(),
+            mount_path: String::new(),
+            agent_name: "claude".to_string(),
+            env_vars: vec![],
+            agent_image_tag: None,
+            agent_dockerfile_str: None,
+        };
+        let audit_image_legacy = ctx_legacy.agent_image_tag.as_deref().unwrap_or(&ctx_legacy.image_tag);
+        assert_eq!(
+            audit_image_legacy, base_tag,
+            "legacy layout: audit must fall back to project base image"
         );
     }
 }

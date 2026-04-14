@@ -1,12 +1,12 @@
-FROM debian:bookworm-slim
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    ca-certificates \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+FROM {{AMUX_BASE_IMAGE}}
 
 # Install maki via official installer.
-RUN curl -fsSL https://maki.sh/install.sh | sh 
+RUN curl -fsSL https://maki.sh/install.sh | sh
 
+# Create non-root user for agent operations
+RUN useradd -m -s /bin/bash amux \
+    && mkdir -p /workspace \
+    && chown amux:amux /workspace
+
+USER amux
 WORKDIR /workspace

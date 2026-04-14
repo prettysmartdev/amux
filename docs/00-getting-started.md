@@ -16,17 +16,19 @@ When a code agent runs on your machine directly, it has access to your home dire
 
 amux solves this by running agents inside containers. The container only sees your project directory (mounted read-only by default). Your credentials are injected as environment variables, not mounted as files. Your SSH keys are never exposed unless you explicitly opt in. The container is thrown away when the session ends.
 
-### What is `Dockerfile.dev`?
+### Container image setup
 
-`Dockerfile.dev` is the blueprint for the container your agents run inside. It defines:
+amux uses a two-layer image system that separates your project's build environment from the AI agent tooling.
 
-- The base OS and language runtimes (Node, Python, Rust, Go, etc.)
-- Build tools, test runners, and linters specific to your project
-- Any services the agent needs to run tests (e.g. databases)
+**`Dockerfile.dev`** (at the Git root) is the _project base image_. It defines the OS, language runtimes, build tools, and test dependencies specific to your project — nothing agent-specific. It produces the image `amux-{project}:latest`.
 
-amux ships a generic template, but the template won't know your project's specific toolchain. The **agent audit** (run via `amux ready --refresh` or during `amux init`) launches an agent to inspect your codebase and update `Dockerfile.dev` with the exact tools your project needs. You should re-run the audit any time your toolchain changes significantly.
+**`.amux/Dockerfile.{agent}`** (in the `.amux/` directory) is the _agent image_. It extends the project base (`FROM amux-{project}:latest`) and installs the AI agent tooling for whichever agent you are using (Claude Code, Codex, OpenCode, Maki, or Gemini). It produces `amux-{project}-{agent}:latest` — the image that actually runs your agent sessions.
 
-You own `Dockerfile.dev` — check it into source control, review it, and edit it like any other project file.
+amux ships templates for both files. The **agent audit** (run via `amux ready --refresh` or during `amux init`) launches an agent to inspect your codebase and updates `Dockerfile.dev` with the exact tools your project needs. Agent dockerfiles are generated from templates maintained by amux and rarely need manual edits.
+
+Keeping these two files separate means you can update project tooling without touching the agent setup, and switch between or update agents without rebuilding your entire project environment.
+
+Both files should be committed to source control — teammates get the same image setup when they clone the repo.
 
 ### What is `aspec`?
 
@@ -110,10 +112,12 @@ amux init
 This does several things:
 
 1. Writes `.amux/config.json` (per-repo config) with the chosen agent
-2. Downloads `Dockerfile.dev` from the agent template
-3. Offers to run the **agent audit** — launches a container that inspects your project and updates `Dockerfile.dev` with the tools your codebase actually needs. It's strongly advised that you accept; it's the main reason `Dockerfile.dev` exists.
-4. Builds the dev container image from the (now-customised) `Dockerfile.dev`
-5. Prints a summary table showing the result of each step
+2. Writes `Dockerfile.dev` (project base template) at the Git root
+3. Writes `.amux/Dockerfile.{agent}` (agent template) in the `.amux/` directory
+4. Offers to run the **agent audit** — launches a container that inspects your project and updates `Dockerfile.dev` with the tools your codebase actually needs. It's strongly advised that you accept; it's the main reason `Dockerfile.dev` exists.
+5. Builds the project base image (`amux-{project}:latest`) from `Dockerfile.dev`
+6. Builds the agent image (`amux-{project}-{agent}:latest`) from `.amux/Dockerfile.{agent}`
+7. Prints a summary table showing the result of each step
 
 The init summary looks like this:
 
@@ -124,8 +128,10 @@ The init summary looks like this:
 │            Config │ ✓ saved                       │
 │      aspec folder │ – use --aspec to download     │
 │    Dockerfile.dev │ ✓ created                     │
+│  Agent dockerfile │ ✓ created                     │
 │       Agent audit │ ✓ completed                   │
-│      Docker image │ ✓ built                       │
+│      Base image   │ ✓ built                       │
+│      Agent image  │ ✓ built                       │
 │       Work items  │ ✓ configured                  │
 └───────────────────┴──────────────────────────────┘
 ```
@@ -151,9 +157,9 @@ amux ready
 This checks:
 
 1. That your container runtime (Docker or Apple Containers) is available and running
-2. That `Dockerfile.dev` exists and is configured
+2. That `Dockerfile.dev` and `.amux/Dockerfile.{agent}` exist and are configured
 3. That your agent (e.g. Claude Code) is installed and authenticated — it sends a test greeting and shows the response
-4. That the dev container image has been built
+4. That both the project base image and the agent image have been built
 
 If everything is green, you're ready to run agents.
 
@@ -165,7 +171,7 @@ If your project's toolchain has changed (you added a new language, test framewor
 amux ready --refresh
 ```
 
-This launches the audit agent, updates `Dockerfile.dev`, and rebuilds the image. You should commit the updated `Dockerfile.dev` to source control.
+This launches the audit agent, updates `Dockerfile.dev` (the project base), and rebuilds both images. The agent dockerfile is not modified — it is managed by amux templates and contains only agent tooling. You should commit the updated `Dockerfile.dev` to source control.
 
 ---
 

@@ -265,13 +265,18 @@ fn ready_greetings_all_valid() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ready_dockerfile_matches_template_for_claude() {
-    use amux::commands::init::dockerfile_for_agent_embedded;
+fn ready_dockerfile_matches_template_for_project() {
+    use amux::commands::init::{dockerfile_for_agent_embedded, project_dockerfile_embedded};
     use amux::commands::ready::dockerfile_matches_template;
     use amux::cli::Agent;
-    let content = dockerfile_for_agent_embedded(&Agent::Claude);
-    assert!(dockerfile_matches_template(&content, "claude"));
-    assert!(!dockerfile_matches_template("FROM scratch", "claude"));
+    // Project template matches itself.
+    let project_content = project_dockerfile_embedded();
+    assert!(dockerfile_matches_template(&project_content));
+    // Agent templates do not match the project template.
+    let claude_content = dockerfile_for_agent_embedded(&Agent::Claude);
+    assert!(!dockerfile_matches_template(&claude_content));
+    // Arbitrary content does not match.
+    assert!(!dockerfile_matches_template("FROM scratch"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2540,6 +2545,7 @@ async fn run_agent_with_sink_mount_ssh_emits_warning() {
         false,
         true, // mount_ssh = true
         None,
+        None, // agent_override
         &runtime,
     )
     .await;
@@ -2580,6 +2586,7 @@ async fn run_agent_with_sink_no_mount_ssh_no_warning() {
         false,
         false, // mount_ssh = false
         None,
+        None, // agent_override
         &runtime,
     )
     .await;
@@ -2621,6 +2628,7 @@ async fn run_agent_with_sink_mount_ssh_display_cmd_includes_ssh_path() {
         false,
         true, // mount_ssh = true
         None,
+        None, // agent_override
         &runtime,
     )
     .await;
@@ -2667,6 +2675,7 @@ async fn run_agent_with_sink_no_mount_ssh_display_cmd_excludes_ssh_path() {
         false,
         false, // mount_ssh = false
         None,
+        None, // agent_override
         &runtime,
     )
     .await;
@@ -2714,6 +2723,7 @@ async fn run_agent_with_sink_mount_ssh_missing_ssh_dir_errors() {
         false,
         true, // mount_ssh = true, but ~/.ssh does not exist
         None,
+        None, // agent_override
         &runtime,
     )
     .await;
@@ -2800,6 +2810,7 @@ async fn e2e_implement_mount_ssh_displays_warning_and_docker_mount() {
         true,  // mount_ssh
         false, // yolo
         false, // auto
+        None,  // agent_override
         &runtime,
     )
     .await;
@@ -2854,6 +2865,7 @@ async fn e2e_chat_mount_ssh_displays_warning_and_docker_mount() {
         true,  // mount_ssh
         false, // yolo
         false, // auto
+        None,  // agent_override
         &runtime,
     )
     .await;

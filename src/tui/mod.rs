@@ -861,7 +861,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
             // If --refresh is set, ignore --build (refresh always rebuilds after audit).
             let effective_build = if refresh { false } else { build };
             app.active_tab_mut().pending_command = PendingCommand::Ready { refresh, build: effective_build, no_cache, non_interactive, allow_docker };
-            app.active_tab_mut().ready_opts = ReadyOptions { refresh, build: effective_build, no_cache, non_interactive, allow_docker, auto_create_dockerfile: true };
+            app.active_tab_mut().ready_opts = ReadyOptions { refresh, build: effective_build, no_cache, non_interactive, allow_docker, auto_create_dockerfile: true, legacy_mode: false };
             show_pre_command_dialogs(app).await;
         }
 
@@ -1061,7 +1061,7 @@ async fn show_pre_command_dialogs(app: &mut App) {
 async fn launch_pending_command(app: &mut App) {
     match app.active_tab().pending_command.clone() {
         PendingCommand::Ready { refresh, build, no_cache, non_interactive, allow_docker } => {
-            app.active_tab_mut().ready_opts = ReadyOptions { refresh, build, no_cache, non_interactive, allow_docker, auto_create_dockerfile: true };
+            app.active_tab_mut().ready_opts = ReadyOptions { refresh, build, no_cache, non_interactive, allow_docker, auto_create_dockerfile: true, legacy_mode: false };
             launch_ready(app).await;
         }
         PendingCommand::Implement { work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto } => {

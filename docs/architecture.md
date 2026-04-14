@@ -42,8 +42,13 @@ src/
     download.rs            GitHub downloads: Dockerfile templates (raw files)
                            and aspec folder (tarball extraction)
     init.rs                `amux init` — run() + run_with_sink()
-                           Downloads aspec/ folder and Dockerfile templates
-                           from GitHub, falls back to embedded templates
+                           write_project_dockerfile(): writes Dockerfile.dev (project base template)
+                           write_agent_dockerfile(): writes .amux/Dockerfile.{agent} (agent template;
+                             substitutes {{AMUX_BASE_IMAGE}} with the project base tag)
+                           project_dockerfile_embedded(): returns the project base template bytes
+                           dockerfile_for_agent_embedded(): returns agent template bytes
+                           download_or_fallback_dockerfile(): downloads template from GitHub,
+                             falls back to embedded; aspec/ folder download
     new.rs                 `amux new` — run() + run_with_sink()
                            WorkItemKind, slugify, apply_template,
                            find_template, next_work_item_number
@@ -61,8 +66,8 @@ src/
                            resolve_runtime() factory (reads GlobalConfig);
                            HostSettings (sanitized config mount, shared by all runtimes);
                            ContainerStats; free utilities: generate_container_name,
-                           project_image_tag, parse_cpu_percent, parse_memory_mb,
-                           format_build_cmd, format_run_cmd
+                           project_image_tag, agent_image_tag, parse_cpu_percent,
+                           parse_memory_mb, format_build_cmd, format_run_cmd
     docker.rs              DockerRuntime — implements AgentRuntime via the
                            `docker` CLI; replaces src/docker/mod.rs
     apple.rs               AppleContainersRuntime — implements AgentRuntime via
@@ -83,10 +88,18 @@ src/
                            cell_in_selection(); scrollback depth probe + indicator
     pty.rs                 PtySession; PtyEvent; spawn_text_command helper
 templates/
-  Dockerfile.claude        Bundled fallback via include_str! (debian:bookworm-slim base)
-  Dockerfile.codex         Bundled fallback (debian:bookworm-slim base)
-  Dockerfile.opencode      Bundled fallback (debian:bookworm-slim base)
-                           Primary source: downloaded from github.com/prettysmartdev/aspec-cli
+  Dockerfile.project       Project base template: FROM debian:bookworm-slim;
+                           installs git, curl, make, ca-certificates; no USER directive.
+                           Written to GITROOT/Dockerfile.dev on init.
+  Dockerfile.claude        Agent template: FROM {{AMUX_BASE_IMAGE}}; installs Claude Code;
+                           creates non-root amux user. Written to .amux/Dockerfile.claude.
+                           Bundled fallback via include_str!; primary source downloaded
+                           from github.com/prettysmartdev/aspec-cli
+  Dockerfile.codex         Agent template (same pattern as claude)
+  Dockerfile.opencode      Agent template (same pattern as claude)
+  Dockerfile.maki          Agent template (same pattern as claude)
+  Dockerfile.gemini        Agent template (same pattern as claude)
+  Dockerfile.nanoclaw      Nanoclaw persistent-agent template (see docs/06-nanoclaw.md)
 tests/
   cli_integration.rs       Binary-level integration tests
   command_tui_parity.rs    Verifies command/TUI mode share the same logic
@@ -182,7 +195,8 @@ The following free functions in `src/runtime/mod.rs` are not runtime-specific
 and are used by all implementations:
 
 - `generate_container_name()` — produces `amux-{hash}` names
-- `project_image_tag()` — produces `amux-{project}:latest`
+- `project_image_tag()` — produces `amux-{project}:latest` (the project base image)
+- `agent_image_tag()` — produces `amux-{project}-{agent}:latest` (the agent-specific image used for `chat` and `implement`)
 - `parse_cpu_percent()` / `parse_memory_mb()` — stat output parsers (each
   runtime may use its own format variant)
 - `format_build_cmd()` / `format_run_cmd()` — display-only command string builders
