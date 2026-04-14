@@ -17,7 +17,11 @@ This file is created by `amux init` and should be committed to source control. I
   "agent": "claude",
   "terminal_scrollback_lines": 10000,
   "yoloDisallowedTools": ["Bash", "computer"],
-  "envPassthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+  "envPassthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+  "workItems": {
+    "dir": "docs/work-items",
+    "template": "docs/work-items/0000-template.md"
+  }
 }
 ```
 
@@ -27,6 +31,8 @@ This file is created by `amux init` and should be committed to source control. I
 | `terminal_scrollback_lines` | integer | `10000` | Number of scrollback lines in the container terminal emulator. Overrides the global value |
 | `yoloDisallowedTools` | string array | `[]` | Tools the agent cannot use when `--yolo` is active. Overrides the global list entirely |
 | `envPassthrough` | string array | `[]` | Host environment variable names to inject into agent containers at launch. Overrides the global list entirely. See [`envPassthrough`](#envpassthrough) |
+| `workItems.dir` | string | (not set) | Path to the work items directory, relative to repo root. See [Work item paths](#work-item-paths) |
+| `workItems.template` | string | (not set) | Path to the work item template file, relative to repo root. See [Work item paths](#work-item-paths) |
 
 ---
 
@@ -67,6 +73,7 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 | `yoloDisallowedTools` | Per-repo → Global → Empty list (no restriction) |
 | `envPassthrough` | Per-repo → Global → Empty list (no passthrough) |
 | `runtime` | Global only |
+| `workItems.dir` / `workItems.template` | Per-repo only |
 
 For `yoloDisallowedTools` and `envPassthrough`, if a per-repo list is set it **replaces** the global list entirely — lists are not merged. To inherit the global list for a repo, omit the field from the repo config.
 
@@ -92,6 +99,8 @@ yolo_disallowed_tools       (empty)             (not set)         (empty)       
 env_passthrough             HOME, PATH          (not set)         HOME, PATH         —
 agent                       N/A                 codex             codex              yes
 auto_agent_auth_accepted    N/A                 true (read-only)  true               —
+work_items.dir              N/A                 docs/work-items   docs/work-items    —
+work_items.template         N/A                 (not set)         (not set)          —
 ```
 
 Column meanings:
@@ -147,6 +156,12 @@ amux config set yolo_disallowed_tools "Bash,computer"
 
 # Clear disallowed tools for this repo (empty string sets an empty list)
 amux config set yolo_disallowed_tools ""
+
+# Set work items directory for this repo
+amux config set work_items.dir docs/work-items
+
+# Set work item template for this repo
+amux config set work_items.template docs/work-items/0000-template.md
 ```
 
 After writing, `config set` prints a confirmation showing the new effective value:
@@ -162,6 +177,8 @@ Effective: codex
 error: 'runtime' is a global-only field. Use --global to set it.
 
 error: 'agent' is a repo-only field. Cannot be set with --global.
+
+error: 'work_items.dir' is a repo-only field. Cannot be set with --global.
 ```
 
 **Override warnings**: if the value you're setting will be silently shadowed, `config set` warns you:
@@ -183,6 +200,95 @@ error: 'auto_agent_auth_accepted' is managed by the agent auth flow and cannot b
 **Platform note**: setting `runtime = apple-containers` on Linux or Windows emits a warning that this value is unsupported on the current platform and will fall back to `docker` at runtime, but the value is still written.
 
 **Missing config files**: `config show` and `config get` never error on missing files — absent files are treated as all-unset. `config set` creates the file and its parent directory (`aspec/.amux/` or `$HOME/.amux/`) as needed.
+
+---
+
+## Work item paths
+
+By default, amux looks for work items in `aspec/work-items/` and uses `aspec/work-items/0000-template.md` as the template. If your repo doesn't use the `aspec/` directory structure, you can configure custom paths via `work_items.dir` and `work_items.template`.
+
+### Configuring a custom work items directory
+
+```sh
+amux config set work_items.dir docs/work-items
+```
+
+Once set, `specs new` and `implement` look for work items in that directory instead of `aspec/work-items/`. The path may be relative to the repo root (recommended) or absolute.
+
+### Configuring a custom template
+
+```sh
+amux config set work_items.template docs/work-items/0000-template.md
+```
+
+When set, `specs new` uses this file as the template for new work items. If the path is set but the file doesn't exist, amux warns and falls back to auto-discovery.
+
+### Template auto-discovery
+
+If no template is configured (and no legacy `aspec/work-items/0000-template.md` exists), `specs new` scans the work items directory for any file whose name ends in `template.md`. If it finds a candidate, it prompts:
+
+```
+Found potential template: docs/work-items/my-template.md. Use it? [Y/n]
+```
+
+If you confirm, the path is saved to repo config automatically so you won't be prompted again. If multiple `*template.md` files exist, amux uses the lexicographically first one and notes how many were found so you can pick manually if needed.
+
+If no template is found and you decline, the new work item is created with a minimal stub:
+
+```markdown
+# Feature: My New Feature
+```
+
+### Path resolution order
+
+| Step | Directory | Template |
+|------|-----------|----------|
+| 1 | `work_items.dir` in repo config | `work_items.template` in repo config |
+| 2 | `aspec/work-items/` (legacy fallback, if it exists) | `aspec/work-items/0000-template.md` (legacy fallback, if it exists) |
+| 3 | Error: run `amux config set work_items.dir <path>` | Auto-discovery (`*template.md` in work items dir), then minimal stub |
+
+### Graceful degradation
+
+If neither `work_items.dir` is configured nor `aspec/work-items/` exists, `specs new` and `implement` fail with a helpful message:
+
+```
+`specs new` requires a work items directory.
+Run `amux config set work_items.dir <path>` to configure one,
+or run `amux init --aspec` to set up the aspec folder.
+```
+
+`amux ready` shows a warning (not a failure) in this state:
+
+```
+│  work items config │ ⚠ not configured                │
+```
+
+and prints a tip: `run 'amux config set work_items.dir <path>' to configure a work items directory.`
+
+### Security
+
+Paths are validated to stay within the git root. Paths that would escape the repo (e.g. `../../outside`) are rejected:
+
+```
+error: path escapes the repository root
+```
+
+### Setting up during `amux init`
+
+When running `amux init` without `--aspec` in a repo that has no `aspec/` folder, amux offers to configure a work items directory interactively:
+
+```
+Would you like to configure a work items directory? [y/N]
+Work items directory path (relative to repo root): docs/work-items
+Work item template path (leave blank to skip): docs/work-items/my-template.md
+Work items directory configured: docs/work-items
+```
+
+If `work_items.dir` is already configured, the prompt is skipped silently. The result is shown in the init summary table:
+
+```
+│    Work items │ ✓ configured                 │
+```
 
 ---
 

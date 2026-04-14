@@ -3,7 +3,7 @@ use crate::commands::auth::resolve_auth;
 use crate::commands::download;
 use crate::commands::output::OutputSink;
 use crate::commands::ready::{audit_entrypoint, print_interactive_notice, StepStatus};
-use crate::config::{save_repo_config, RepoConfig};
+use crate::config::{load_repo_config, save_repo_config};
 use crate::runtime::docker as docker;
 use crate::runtime::AgentRuntime;
 use anyhow::{Context, Result};
@@ -18,6 +18,7 @@ pub struct InitSummary {
     pub dockerfile: StepStatus,
     pub audit: StepStatus,
     pub image_build: StepStatus,
+    pub work_items_setup: StepStatus,
 }
 
 impl Default for InitSummary {
@@ -28,6 +29,7 @@ impl Default for InitSummary {
             dockerfile: StepStatus::Pending,
             audit: StepStatus::Pending,
             image_build: StepStatus::Pending,
+            work_items_setup: StepStatus::Pending,
         }
     }
 }
@@ -95,14 +97,9 @@ pub async fn run_with_sink(
     out.println(format!("Initializing amux in: {}", git_root.display()));
     out.println(format!("Agent: {}", agent.as_str()));
 
-    // 1. Save repo config.
-    let config = RepoConfig {
-        agent: Some(agent.as_str().to_string()),
-        auto_agent_auth_accepted: None,
-        terminal_scrollback_lines: None,
-        yolo_disallowed_tools: None,
-        env_passthrough: None,
-    };
+    // 1. Save repo config — preserve all existing fields; only update `agent`.
+    let mut config = load_repo_config(&git_root).unwrap_or_default();
+    config.agent = Some(agent.as_str().to_string());
     save_repo_config(&git_root, &config)?;
     out.println(format!(
         "Config written to: {}",
@@ -302,6 +299,84 @@ pub async fn run_with_sink(
         summary.image_build = StepStatus::Skipped("no changes".into());
     }
 
+    // 5. Offer work items directory setup when applicable.
+    //    Only in command mode (stdout), when --aspec was NOT passed,
+    //    aspec/ doesn't exist, and work_items.dir is not already set.
+    {
+        let aspec_dir = git_root.join("aspec");
+        let current_config = crate::config::load_repo_config(&git_root).unwrap_or_default();
+        let work_items_already_set = current_config
+            .work_items
+            .as_ref()
+            .and_then(|w| w.dir.as_deref())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+
+        if out.supports_color() && !aspec && !aspec_dir.exists() && !work_items_already_set {
+            let do_setup =
+                out.ask_yes_no("Would you like to configure a work items directory?");
+            if do_setup {
+                out.print("Work items directory path (relative to repo root): ");
+                let dir_input = out.read_line().trim().to_string();
+
+                if dir_input.is_empty() {
+                    summary.work_items_setup = StepStatus::Skipped("no path provided".into());
+                } else {
+                    match crate::commands::config::validate_path_within_git_root(
+                        &dir_input,
+                        &git_root,
+                    ) {
+                        Err(e) => {
+                            out.println(format!(
+                                "Invalid path: {}. Skipping work items setup.",
+                                e
+                            ));
+                            summary.work_items_setup = StepStatus::Failed("invalid path".into());
+                        }
+                        Ok(()) => {
+                            // Optionally read a template path.
+                            out.print("Work item template path (leave blank to skip): ");
+                            let tmpl_input = out.read_line().trim().to_string();
+
+                            let mut updated =
+                                crate::config::load_repo_config(&git_root).unwrap_or_default();
+                            let wi = updated
+                                .work_items
+                                .get_or_insert_with(crate::config::WorkItemsConfig::default);
+                            wi.dir = Some(dir_input.clone());
+                            if !tmpl_input.is_empty() {
+                                match crate::commands::config::validate_path_within_git_root(
+                                    &tmpl_input,
+                                    &git_root,
+                                ) {
+                                    Ok(()) => {
+                                        wi.template = Some(tmpl_input);
+                                    }
+                                    Err(e) => {
+                                        out.println(format!(
+                                            "Invalid template path: {}. Skipping template.",
+                                            e
+                                        ));
+                                    }
+                                }
+                            }
+                            crate::config::save_repo_config(&git_root, &updated)?;
+                            out.println(format!(
+                                "Work items directory configured: {}",
+                                dir_input
+                            ));
+                            summary.work_items_setup = StepStatus::Ok("configured".into());
+                        }
+                    }
+                }
+            } else {
+                summary.work_items_setup = StepStatus::Skipped("declined".into());
+            }
+        } else {
+            summary.work_items_setup = StepStatus::Skipped("not needed".into());
+        }
+    }
+
     print_init_summary(out, &summary, agent.as_str());
     print_whats_next(out);
 
@@ -319,6 +394,7 @@ fn print_init_summary(out: &OutputSink, summary: &InitSummary, agent_name: &str)
     print_init_row(out, "Dockerfile.dev", &summary.dockerfile);
     print_init_row(out, "Agent audit", &summary.audit);
     print_init_row(out, "Docker image", &summary.image_build);
+    print_init_row(out, "Work items", &summary.work_items_setup);
     out.println("└───────────────────┴──────────────────────────────┘");
 }
 
@@ -328,6 +404,7 @@ fn print_init_row(out: &OutputSink, label: &str, status: &StepStatus) {
         StepStatus::Ok(msg) => ("✓", msg.clone()),
         StepStatus::Skipped(msg) => ("–", msg.clone()),
         StepStatus::Failed(msg) => ("✗", msg.clone()),
+        StepStatus::Warn(msg) => ("⚠", msg.clone()),
     };
     out.println(format!(
         "│ {:>17} │ {} {:<27} │",
@@ -612,6 +689,7 @@ mod tests {
         assert_eq!(summary.dockerfile, StepStatus::Pending);
         assert_eq!(summary.audit, StepStatus::Pending);
         assert_eq!(summary.image_build, StepStatus::Pending);
+        assert_eq!(summary.work_items_setup, StepStatus::Pending);
     }
 
     #[test]
@@ -624,6 +702,7 @@ mod tests {
             dockerfile: StepStatus::Ok("created".into()),
             audit: StepStatus::Skipped("declined".into()),
             image_build: StepStatus::Ok("built".into()),
+            work_items_setup: StepStatus::Skipped("not needed".into()),
         };
         print_init_summary(&sink, &summary, "claude");
 
@@ -682,5 +761,123 @@ mod tests {
         let opts: (bool, bool) = (false, false);
         assert!(!opts.0, "aspec default is false");
         assert!(!opts.1, "run_audit default is false");
+    }
+
+    // ─── work items setup tests ───────────────────────────────────────────────
+
+    /// Helper: create a bare temp git repo with a Dockerfile.dev so init can run
+    /// through to step 5 without hitting Docker or network.
+    fn setup_temp_repo() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join("Dockerfile.dev"), "FROM ubuntu:22.04\n").unwrap();
+        tmp
+    }
+
+    #[tokio::test]
+    async fn run_with_sink_preserves_work_items_config_on_reinit() {
+        let tmp = setup_temp_repo();
+        let root = tmp.path();
+
+        // Pre-configure work_items.dir before the re-init.
+        let pre_config = crate::config::RepoConfig {
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("my-items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        crate::config::save_repo_config(root, &pre_config).unwrap();
+
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+        let runtime = std::sync::Arc::new(crate::runtime::docker::DockerRuntime::new());
+
+        // Re-run init — Channel sink → work items offer is skipped (supports_color = false).
+        let _ = run_with_sink(Agent::Claude, false, false, false, &sink, root, runtime).await;
+
+        let loaded = crate::config::load_repo_config(root).unwrap();
+        assert_eq!(
+            loaded.work_items.as_ref().and_then(|w| w.dir.as_deref()),
+            Some("my-items"),
+            "work_items.dir must survive an amux init re-run"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_sink_work_items_offer_saves_dir_to_config() {
+        let tmp = setup_temp_repo();
+        let root = tmp.path();
+
+        // MockInput: "y" → accept offer, "my/items" → dir path, "" → no template.
+        let (tx, mut rx) = unbounded_channel();
+        let sink = OutputSink::mock_input(tx, vec!["y", "my/items", ""]);
+        let runtime = std::sync::Arc::new(crate::runtime::docker::DockerRuntime::new());
+
+        let _ = run_with_sink(Agent::Claude, false, false, false, &sink, root, runtime).await;
+
+        let loaded = crate::config::load_repo_config(root).unwrap();
+        assert_eq!(
+            loaded.work_items.as_ref().and_then(|w| w.dir.as_deref()),
+            Some("my/items"),
+            "work_items.dir should be persisted after accepting the init offer"
+        );
+        assert!(
+            loaded.work_items.as_ref().and_then(|w| w.template.as_deref()).is_none(),
+            "template should be None when left blank"
+        );
+
+        let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let output = messages.join("\n");
+        assert!(
+            output.contains("Work items directory configured"),
+            "expected confirmation message; got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_sink_work_items_offer_skips_when_already_configured() {
+        let tmp = setup_temp_repo();
+        let root = tmp.path();
+
+        // Pre-configure work_items.dir — the offer should be silently skipped.
+        let pre_config = crate::config::RepoConfig {
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("existing/items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        crate::config::save_repo_config(root, &pre_config).unwrap();
+
+        // MockInput with supports_color = true, but NO inputs queued —
+        // if the offer fires it would panic popping an empty queue.
+        let (tx, mut rx) = unbounded_channel();
+        let sink = OutputSink::mock_input(tx, vec![] as Vec<String>);
+        let runtime = std::sync::Arc::new(crate::runtime::docker::DockerRuntime::new());
+
+        let result =
+            run_with_sink(Agent::Claude, false, false, false, &sink, root, runtime).await;
+
+        // No panic and result should be ok.
+        assert!(result.is_ok(), "init should succeed: {:?}", result.err());
+
+        // work_items.dir must remain unchanged.
+        let loaded = crate::config::load_repo_config(root).unwrap();
+        assert_eq!(
+            loaded.work_items.as_ref().and_then(|w| w.dir.as_deref()),
+            Some("existing/items"),
+            "work_items.dir should not change when already configured"
+        );
+
+        let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let output = messages.join("\n");
+        assert!(
+            !output.contains("configure a work items directory"),
+            "the offer prompt should not appear when already configured; got: {}",
+            output
+        );
     }
 }

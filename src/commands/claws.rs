@@ -222,6 +222,7 @@ fn print_claws_row(out: &OutputSink, label: &str, status: &StepStatus) {
         StepStatus::Ok(msg) => ("✓", msg.clone()),
         StepStatus::Skipped(msg) => ("–", msg.clone()),
         StepStatus::Failed(msg) => ("✗", msg.clone()),
+        StepStatus::Warn(msg) => ("⚠", msg.clone()),
     };
     out.println(format!("│ {:>17} │ {} {:<27} │", label, symbol, text));
 }

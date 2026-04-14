@@ -277,7 +277,16 @@ fn agent_name(git_root: &PathBuf) -> Result<&'static str> {
 /// Finds the work item file for the given number, e.g. `aspec/work-items/0001-*.md`.
 pub fn find_work_item(git_root: &PathBuf, work_item: u32) -> Result<PathBuf> {
     let pattern = format!("{:04}-", work_item);
-    let dir = git_root.join("aspec/work-items");
+    let repo_config = load_repo_config(git_root).unwrap_or_default();
+    let (dir_opt, _) = crate::commands::new::resolve_work_item_paths(git_root, &repo_config);
+
+    let dir = dir_opt.ok_or_else(|| {
+        anyhow::anyhow!(
+            "`implement` requires a work items directory. \
+             Run `amux config set work_items.dir <path>` to configure one, \
+             or run `amux init --aspec` to set up the aspec folder."
+        )
+    })?;
 
     if !dir.exists() {
         bail!("Work items directory not found: {}", dir.display());

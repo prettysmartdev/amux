@@ -369,6 +369,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec!["AMUX_TEST_PT_INJECT_PRESENT".to_string()]),
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -409,6 +410,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec![absent_var.to_string()]),
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -441,6 +443,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec![var_name.to_string()]),
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         // SAFETY: test-only env mutation; unique var name avoids races with other tests.

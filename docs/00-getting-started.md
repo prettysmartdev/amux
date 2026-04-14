@@ -47,9 +47,15 @@ The spec folder typically contains:
 
 ### Work items
 
-A work item is a Markdown file in `aspec/work-items/` that describes a specific piece of work: a feature, bug fix, enhancement, or task. Work items follow a numbered naming convention (`0001-add-auth.md`, `0002-fix-crash.md`) and contain everything the agent needs to implement, test, and document the change.
+A work item is a Markdown file that describes a specific piece of work: a feature, bug fix, enhancement, or task. Work items follow a numbered naming convention (`0001-add-auth.md`, `0002-fix-crash.md`) and contain everything the agent needs to implement, test, and document the change.
 
-When you run `amux implement 0001`, amux finds the matching file, constructs a prompt from its contents, and launches the agent inside a container to do the work.
+By default, amux looks for work items in `aspec/work-items/`. If your repo uses a different folder structure, you can configure the path:
+
+```sh
+amux config set work_items.dir docs/work-items
+```
+
+When you run `amux implement 0001`, amux finds the matching file in the configured directory, constructs a prompt from its contents, and launches the agent inside a container to do the work.
 
 ---
 
@@ -120,8 +126,11 @@ The init summary looks like this:
 │    Dockerfile.dev │ ✓ created                     │
 │       Agent audit │ ✓ completed                   │
 │      Docker image │ ✓ built                       │
+│       Work items  │ ✓ configured                  │
 └───────────────────┴──────────────────────────────┘
 ```
+
+The **Work items** row appears when `--aspec` is not passed and no `aspec/` folder exists. `init` offers to set a custom work items directory interactively during setup. If you decline or already have `aspec/`, the row shows `– not needed`.
 
 To also download the `aspec/` folder with spec templates and work item scaffolding:
 
@@ -210,6 +219,12 @@ specs new --interview   # creates the skeleton, then opens an agent to help fill
 ```
 
 Four work item types are available: Feature, Bug, Task, and Enhancement.
+
+Work items are created in the configured work items directory (defaulting to `aspec/work-items/`). If you haven't run `amux init --aspec` and haven't configured `work_items.dir`, amux will prompt you to auto-discover a template or create the file with a minimal stub. You can configure a custom directory at any time:
+
+```sh
+amux config set work_items.dir docs/work-items
+```
 
 With `--interview`, after you provide a brief summary, the agent asks clarifying questions and writes out the full spec (user stories, implementation plan, edge cases, test plan) before any implementation starts.
 

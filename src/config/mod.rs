@@ -2,6 +2,17 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Work-items configuration nested within `RepoConfig`.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkItemsConfig {
+    /// Path to the work items directory (relative to repo root, or absolute).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// Path to the work item template file (relative to repo root, or absolute).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
 /// Per-repository configuration stored at `GITROOT/.amux/config.json`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RepoConfig {
@@ -24,6 +35,41 @@ pub struct RepoConfig {
     /// Repo config overrides global config when both are set.
     #[serde(rename = "envPassthrough", skip_serializing_if = "Option::is_none")]
     pub env_passthrough: Option<Vec<String>>,
+    /// Configurable work items directory and template paths.
+    #[serde(rename = "workItems", skip_serializing_if = "Option::is_none")]
+    pub work_items: Option<WorkItemsConfig>,
+}
+
+impl RepoConfig {
+    /// Resolve the configured work items directory relative to `git_root`.
+    /// Returns `None` if `work_items.dir` is not set or is empty.
+    pub fn work_items_dir(&self, git_root: &Path) -> Option<PathBuf> {
+        let dir = self.work_items.as_ref()?.dir.as_deref()?;
+        if dir.is_empty() {
+            return None;
+        }
+        let p = std::path::Path::new(dir);
+        if p.is_absolute() {
+            Some(p.to_path_buf())
+        } else {
+            Some(git_root.join(p))
+        }
+    }
+
+    /// Resolve the configured work item template path relative to `git_root`.
+    /// Returns `None` if `work_items.template` is not set or is empty.
+    pub fn work_items_template(&self, git_root: &Path) -> Option<PathBuf> {
+        let tmpl = self.work_items.as_ref()?.template.as_deref()?;
+        if tmpl.is_empty() {
+            return None;
+        }
+        let p = std::path::Path::new(tmpl);
+        if p.is_absolute() {
+            Some(p.to_path_buf())
+        } else {
+            Some(git_root.join(p))
+        }
+    }
 }
 
 /// Global configuration stored at `$HOME/.amux/config.json`.
@@ -247,6 +293,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
             env_passthrough: None,
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -281,6 +328,7 @@ mod tests {
             terminal_scrollback_lines: Some(2_000),
             yolo_disallowed_tools: None,
             env_passthrough: None,
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -299,6 +347,7 @@ mod tests {
             terminal_scrollback_lines: Some(999),
             yolo_disallowed_tools: None,
             env_passthrough: None,
+            work_items: None,
         };
         save_repo_config(tmp.path(), &repo_cfg).unwrap();
 
@@ -319,6 +368,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
             env_passthrough: None,
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -342,6 +392,7 @@ mod tests {
             terminal_scrollback_lines: Some(5_000),
             yolo_disallowed_tools: None,
             env_passthrough: None,
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -393,6 +444,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: Some(vec!["Bash".to_string(), "computer".to_string()]),
             env_passthrough: None,
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -411,6 +463,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: Some(vec!["Bash".to_string()]),
             env_passthrough: None,
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let tools = effective_yolo_disallowed_tools(tmp.path());
@@ -428,6 +481,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: Some(vec!["Bash".to_string(), "computer".to_string()]),
             env_passthrough: None,
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let tools = effective_yolo_disallowed_tools(tmp.path());
@@ -492,6 +546,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec!["ANTHROPIC_API_KEY".to_string()]),
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -510,6 +565,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec!["MY_VAR".to_string(), "OTHER_VAR".to_string()]),
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let names = effective_env_passthrough(tmp.path());
@@ -527,6 +583,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec!["REPO_ONLY_VAR".to_string()]),
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let names = effective_env_passthrough(tmp.path());
@@ -558,6 +615,7 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec![]), // explicit empty array
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let names = effective_env_passthrough(tmp.path());
@@ -578,11 +636,125 @@ mod tests {
             terminal_scrollback_lines: None,
             yolo_disallowed_tools: None,
             env_passthrough: None,
+            work_items: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         // Since repo.env_passthrough is None, the function must not panic and must
         // return a Vec<String> (either global config's list or empty).
         let names = effective_env_passthrough(tmp.path());
         let _: Vec<String> = names;
+    }
+
+    // ─── work_items config ───────────────────────────────────────────────────────
+
+    #[test]
+    fn work_items_config_serializes_with_camel_case_key() {
+        let config = RepoConfig {
+            work_items: Some(WorkItemsConfig {
+                dir: Some("./items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("workItems"), "expected camelCase 'workItems' key in JSON");
+        assert!(json.contains("\"dir\""), "expected 'dir' key in JSON");
+        assert!(!json.contains("template"), "template None should be omitted");
+    }
+
+    #[test]
+    fn work_items_config_round_trips_through_json() {
+        let original = RepoConfig {
+            work_items: Some(WorkItemsConfig {
+                dir: Some("./items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        let restored: RepoConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(restored.work_items.as_ref().unwrap().dir.as_deref(), Some("./items"));
+        assert_eq!(restored.work_items.as_ref().unwrap().template, None);
+    }
+
+    #[test]
+    fn work_items_config_absent_omitted_from_json() {
+        let config = RepoConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains("workItems"), "absent work_items should not appear in JSON");
+    }
+
+    #[test]
+    fn work_items_dir_resolves_relative_to_git_root() {
+        let config = RepoConfig {
+            work_items: Some(WorkItemsConfig {
+                dir: Some("my/items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        let root = PathBuf::from("/some/repo");
+        let dir = config.work_items_dir(&root).unwrap();
+        assert_eq!(dir, PathBuf::from("/some/repo/my/items"));
+    }
+
+    #[test]
+    fn work_items_dir_returns_none_when_not_set() {
+        let config = RepoConfig::default();
+        let root = PathBuf::from("/some/repo");
+        assert!(config.work_items_dir(&root).is_none());
+    }
+
+    #[test]
+    fn work_items_dir_returns_none_when_empty_string() {
+        let config = RepoConfig {
+            work_items: Some(WorkItemsConfig {
+                dir: Some(String::new()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        let root = PathBuf::from("/some/repo");
+        assert!(config.work_items_dir(&root).is_none());
+    }
+
+    #[test]
+    fn work_items_template_resolves_relative_to_git_root() {
+        let config = RepoConfig {
+            work_items: Some(WorkItemsConfig {
+                dir: None,
+                template: Some("my/template.md".to_string()),
+            }),
+            ..Default::default()
+        };
+        let root = PathBuf::from("/some/repo");
+        let tmpl = config.work_items_template(&root).unwrap();
+        assert_eq!(tmpl, PathBuf::from("/some/repo/my/template.md"));
+    }
+
+    #[test]
+    fn work_items_template_returns_none_when_not_set() {
+        let config = RepoConfig::default();
+        let root = PathBuf::from("/some/repo");
+        assert!(config.work_items_template(&root).is_none());
+    }
+
+    #[test]
+    fn work_items_config_roundtrips_through_save_load() {
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            work_items: Some(WorkItemsConfig {
+                dir: Some("./work-items".to_string()),
+                template: Some("./work-items/0000-template.md".to_string()),
+            }),
+            ..Default::default()
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        let loaded = load_repo_config(tmp.path()).unwrap();
+        assert_eq!(config, loaded);
+        let wi = loaded.work_items.unwrap();
+        assert_eq!(wi.dir.as_deref(), Some("./work-items"));
+        assert_eq!(wi.template.as_deref(), Some("./work-items/0000-template.md"));
     }
 }

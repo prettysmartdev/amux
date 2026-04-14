@@ -30,7 +30,9 @@ amux implement 0001
 implement 0001
 ```
 
-`implement` finds `aspec/work-items/0001-*.md`, builds a structured prompt from its contents, and launches the agent in a container. The prompt instructs the agent to implement the work item, iterate on builds and tests, write documentation, and report when complete.
+`implement` finds the work item file matching `0001-*.md` in the configured work items directory, builds a structured prompt from its contents, and launches the agent in a container. The prompt instructs the agent to implement the work item, iterate on builds and tests, write documentation, and report when complete.
+
+By default, amux looks in `aspec/work-items/`. If your repo uses a different layout, configure the path with `amux config set work_items.dir <path>`. See [Work item paths](07-configuration.md#work-item-paths) for the full resolution order.
 
 The work item number can be written with or without leading zeros: `1` and `0001` are equivalent.
 
@@ -116,7 +118,16 @@ amux specs new
 specs new
 ```
 
-Prompts for a type (Feature, Bug, Task, or Enhancement) and a title, then creates the file at `aspec/work-items/NNNN-title.md` using the project's template.
+Prompts for a type (Feature, Bug, Task, or Enhancement) and a title, then creates a numbered work item file in the configured work items directory using the project's template.
+
+By default, amux writes to `aspec/work-items/` and uses `aspec/work-items/0000-template.md`. If neither exists, amux auto-discovers any `*template.md` file in the work items directory and prompts you to confirm it. You can also configure the paths explicitly:
+
+```sh
+amux config set work_items.dir docs/work-items
+amux config set work_items.template docs/work-items/my-template.md
+```
+
+If no template is found or confirmed, the new file is created with a minimal stub (`# Kind: Title`). See [Work item paths](07-configuration.md#work-item-paths) for full details on path resolution and auto-discovery.
 
 ```sh
 amux specs new --interview
@@ -242,6 +253,8 @@ Initialises the current Git repository for use with amux. See [Getting Started](
 
 `--aspec` downloads the `aspec/` folder from `github.com/prettysmartdev/aspec`, providing spec templates and work item scaffolding. Skipped without the flag.
 
+When `--aspec` is not passed and no `aspec/` folder exists, `init` offers to configure a custom work items directory and template path interactively. This sets `work_items.dir` (and optionally `work_items.template`) in the repo config so `specs new` and `implement` work without requiring the `aspec/` folder layout. See [Work item paths](07-configuration.md#work-item-paths).
+
 ---
 
 ## Reference: `amux ready`
@@ -261,6 +274,8 @@ Verifies your environment is ready for agent sessions.
 | `--allow-docker` | Give the audit container access to the host Docker socket |
 
 Use `--refresh` after your project's toolchain changes to update `Dockerfile.dev` and rebuild the image.
+
+`amux ready` also checks whether work item paths are configured. If neither `aspec/work-items/` exists nor `work_items.dir` is set, the summary shows a `⚠ not configured` warning (not a failure) for the `work items config` row, and prints a tip to run `amux config set work_items.dir <path>`.
 
 ---
 

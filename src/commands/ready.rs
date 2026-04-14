@@ -120,6 +120,7 @@ pub struct ReadySummary {
     pub docker_daemon: StepStatus,
     pub dockerfile: StepStatus,
     pub aspec_folder: StepStatus,
+    pub work_items_config: StepStatus,
     pub local_agent: StepStatus,
     pub dev_image: StepStatus,
     pub refresh: StepStatus,
@@ -132,6 +133,7 @@ pub enum StepStatus {
     Ok(String),
     Skipped(String),
     Failed(String),
+    Warn(String),
 }
 
 impl Default for ReadySummary {
@@ -140,6 +142,7 @@ impl Default for ReadySummary {
             docker_daemon: StepStatus::Pending,
             dockerfile: StepStatus::Pending,
             aspec_folder: StepStatus::Pending,
+            work_items_config: StepStatus::Pending,
             local_agent: StepStatus::Pending,
             dev_image: StepStatus::Pending,
             refresh: StepStatus::Pending,
@@ -161,6 +164,7 @@ pub fn print_summary(out: &OutputSink, runtime_name: &str, summary: &ReadySummar
     print_summary_row(out, &runtime_row_label, &summary.docker_daemon);
     print_summary_row(out, "Dockerfile.dev", &summary.dockerfile);
     print_summary_row(out, "aspec folder", &summary.aspec_folder);
+    print_summary_row(out, "work items config", &summary.work_items_config);
     print_summary_row(out, "Local agent", &summary.local_agent);
     print_summary_row(out, "Dev image", &summary.dev_image);
     print_summary_row(out, "Refresh (audit)", &summary.refresh);
@@ -174,6 +178,7 @@ fn print_summary_row(out: &OutputSink, label: &str, status: &StepStatus) {
         StepStatus::Ok(msg) => ("✓", msg.clone()),
         StepStatus::Skipped(msg) => ("–", msg.clone()),
         StepStatus::Failed(msg) => ("✗", msg.clone()),
+        StepStatus::Warn(msg) => ("⚠", msg.clone()),
     };
     out.println(format!(
         "│ {:>17} │ {} {:<27} │",
@@ -425,6 +430,14 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
         out.println("Tip: run `amux init --aspec` to add an aspec folder to this project.");
     }
 
+    // Note missing work_items config if applicable.
+    if matches!(summary.work_items_config, StepStatus::Warn(_)) {
+        out.println(String::new());
+        out.println(
+            "Tip: run `amux config set work_items.dir <path>` to configure a work items directory.",
+        );
+    }
+
     out.println(String::new());
     out.println("amux is ready.");
 
@@ -472,6 +485,27 @@ pub async fn run_pre_audit(
     } else {
         summary.aspec_folder = StepStatus::Failed("missing".into());
         out.println("Note: no aspec folder found. Run `amux init --aspec` to add one.");
+    }
+
+    // 3b. Check work_items config (advisory only — does not fail ready).
+    {
+        let aspec_absent = matches!(summary.aspec_folder, StepStatus::Failed(_));
+        let work_items_dir_set = config
+            .work_items
+            .as_ref()
+            .and_then(|w| w.dir.as_deref())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if aspec_absent && !work_items_dir_set {
+            summary.work_items_config = StepStatus::Warn("not configured".into());
+            out.println(
+                "`specs new` and `implement` will not work. \
+                 Run `amux config set work_items.dir <path>` to configure a work items directory."
+                    .to_string(),
+            );
+        } else {
+            summary.work_items_config = StepStatus::Ok("ok".into());
+        }
     }
 
     // 4. Check local agent installation (non-containerized greeting).
@@ -712,6 +746,14 @@ pub async fn run_with_sink(
         out.println("Tip: run `amux init --aspec` to add an aspec folder to this project.");
     }
 
+    // Note missing work_items config if applicable.
+    if matches!(summary.work_items_config, StepStatus::Warn(_)) {
+        out.println(String::new());
+        out.println(
+            "Tip: run `amux config set work_items.dir <path>` to configure a work items directory.",
+        );
+    }
+
     out.println(String::new());
     out.println("amux is ready.");
     Ok(summary)
@@ -941,6 +983,7 @@ mod tests {
         assert_eq!(summary.docker_daemon, StepStatus::Pending);
         assert_eq!(summary.dockerfile, StepStatus::Pending);
         assert_eq!(summary.aspec_folder, StepStatus::Pending);
+        assert_eq!(summary.work_items_config, StepStatus::Pending);
         assert_eq!(summary.local_agent, StepStatus::Pending);
         assert_eq!(summary.dev_image, StepStatus::Pending);
         assert_eq!(summary.refresh, StepStatus::Pending);
@@ -955,6 +998,7 @@ mod tests {
             docker_daemon: StepStatus::Ok("running".into()),
             dockerfile: StepStatus::Ok("exists".into()),
             aspec_folder: StepStatus::Ok("present".into()),
+            work_items_config: StepStatus::Ok("ok".into()),
             local_agent: StepStatus::Ok("claude: installed & authenticated".into()),
             dev_image: StepStatus::Ok("exists".into()),
             refresh: StepStatus::Skipped("use --refresh to run".into()),
@@ -1114,5 +1158,221 @@ mod tests {
         );
         assert!(GREETINGS.contains(&greeting.as_str()), "Greeting must be from GREETINGS list");
         assert!(response.is_empty(), "Response should be empty for non-existent agent");
+    }
+
+    // ─── MockRuntime for run_pre_audit tests ─────────────────────────────────
+
+    /// Minimal runtime stub used to test `run_pre_audit` without Docker.
+    struct MockRuntime {
+        available: bool,
+        image_exists: bool,
+    }
+
+    impl MockRuntime {
+        fn available() -> Self {
+            Self { available: true, image_exists: true }
+        }
+    }
+
+    impl AgentRuntime for MockRuntime {
+        fn is_available(&self) -> bool { self.available }
+        fn image_exists(&self, _tag: &str) -> bool { self.image_exists }
+        fn name(&self) -> &'static str { "mock" }
+        fn cli_binary(&self) -> &'static str { "mock" }
+
+        fn build_image_streaming(
+            &self, _tag: &str, _dockerfile: &std::path::Path, _context: &std::path::Path,
+            _no_cache: bool, _on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<String> { unreachable!("build_image_streaming should not be called") }
+
+        fn run_container(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> anyhow::Result<()> { unreachable!("run_container should not be called") }
+
+        fn run_container_captured(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> anyhow::Result<(String, String)> { unreachable!("run_container_captured should not be called") }
+
+        fn run_container_at_path(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _entrypoint: &[&str], _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>, _allow_docker: bool,
+            _container_name: Option<&str>,
+        ) -> anyhow::Result<()> { unreachable!("run_container_at_path should not be called") }
+
+        fn run_container_captured_at_path(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _entrypoint: &[&str], _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>, _allow_docker: bool,
+        ) -> anyhow::Result<(String, String)> { unreachable!("run_container_captured_at_path should not be called") }
+
+        fn run_container_detached(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _container_name: Option<&str>, _env_vars: Vec<(String, String)>, _allow_docker: bool,
+            _host_settings: Option<&crate::runtime::HostSettings>,
+        ) -> anyhow::Result<String> { unreachable!("run_container_detached should not be called") }
+
+        fn start_container(&self, _id: &str) -> anyhow::Result<()> { unreachable!() }
+        fn stop_container(&self, _id: &str) -> anyhow::Result<()> { unreachable!() }
+        fn remove_container(&self, _id: &str) -> anyhow::Result<()> { unreachable!() }
+        fn is_container_running(&self, _id: &str) -> bool { unreachable!() }
+
+        fn find_stopped_container(
+            &self, _name: &str, _image: &str,
+        ) -> Option<crate::runtime::StoppedContainerInfo> { unreachable!() }
+
+        fn list_running_containers_by_prefix(&self, _prefix: &str) -> Vec<String> { unreachable!() }
+
+        fn list_running_containers_with_ids_by_prefix(
+            &self, _prefix: &str,
+        ) -> Vec<(String, String)> { unreachable!() }
+
+        fn get_container_workspace_mount(&self, _name: &str) -> Option<String> { unreachable!() }
+
+        fn query_container_stats(
+            &self, _name: &str,
+        ) -> Option<crate::runtime::ContainerStats> { unreachable!() }
+
+        fn build_run_args_pty(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_run_args_pty_display(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_run_args_pty_at_path(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _entrypoint: &[&str], _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>, _allow_docker: bool,
+            _container_name: Option<&str>,
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_exec_args_pty(
+            &self, _container_id: &str, _working_dir: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_run_args_display(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> { unreachable!() }
+    }
+
+    // ─── run_pre_audit work_items_config tests ────────────────────────────────
+
+    /// Helper: set up a minimal temp git repo with a Dockerfile.dev but no aspec folder.
+    ///
+    /// Uses `agent: "__nonexistent_test_agent__"` so `check_local_agent` returns
+    /// immediately with NotFound rather than running the real agent binary.
+    fn setup_bare_git_repo() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join("Dockerfile.dev"), "FROM ubuntu:22.04\n").unwrap();
+        // Use a non-existent agent so check_local_agent returns quickly.
+        let config = crate::config::RepoConfig {
+            agent: Some("__nonexistent_test_agent__".to_string()),
+            ..Default::default()
+        };
+        crate::config::save_repo_config(root, &config).unwrap();
+        tmp
+    }
+
+    #[tokio::test]
+    async fn run_pre_audit_warns_when_aspec_absent_and_no_work_items_dir() {
+        let tmp = setup_bare_git_repo();
+        let root = tmp.path().to_path_buf();
+
+        let (tx, mut rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+        let opts = ReadyOptions { auto_create_dockerfile: true, ..Default::default() };
+        let runtime = MockRuntime::available();
+
+        let mut summary = ReadySummary::default();
+        let result = run_pre_audit(&sink, root.clone(), vec![], &opts, &mut summary, &runtime).await;
+        // run_pre_audit may succeed or fail depending on agent binary availability;
+        // what matters is the work_items_config status set before check_local_agent.
+        let _ = result;
+
+        assert!(
+            matches!(summary.work_items_config, StepStatus::Warn(_)),
+            "expected Warn for work_items_config when aspec absent and dir not configured; got {:?}",
+            summary.work_items_config
+        );
+
+        let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let output = messages.join("\n");
+        assert!(
+            output.contains("specs new") || output.contains("work_items"),
+            "expected warning about work items in output; got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn run_pre_audit_ok_when_aspec_folder_present() {
+        let tmp = setup_bare_git_repo();
+        let root = tmp.path();
+
+        // Create aspec dir.
+        std::fs::create_dir_all(root.join("aspec")).unwrap();
+
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+        let opts = ReadyOptions { auto_create_dockerfile: true, ..Default::default() };
+        let runtime = MockRuntime::available();
+
+        let mut summary = ReadySummary::default();
+        let _ = run_pre_audit(&sink, root.to_path_buf(), vec![], &opts, &mut summary, &runtime).await;
+
+        assert!(
+            matches!(summary.work_items_config, StepStatus::Ok(_)),
+            "expected Ok for work_items_config when aspec folder present; got {:?}",
+            summary.work_items_config
+        );
+    }
+
+    #[tokio::test]
+    async fn run_pre_audit_ok_when_work_items_dir_configured_without_aspec() {
+        let tmp = setup_bare_git_repo();
+        let root = tmp.path();
+
+        // No aspec folder; override config to add work_items.dir while keeping
+        // the non-existent agent so check_local_agent returns quickly.
+        let items_dir = root.join("my-items");
+        std::fs::create_dir_all(&items_dir).unwrap();
+        let config = crate::config::RepoConfig {
+            agent: Some("__nonexistent_test_agent__".to_string()),
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("my-items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        crate::config::save_repo_config(root, &config).unwrap();
+
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+        let opts = ReadyOptions { auto_create_dockerfile: true, ..Default::default() };
+        let runtime = MockRuntime::available();
+
+        let mut summary = ReadySummary::default();
+        let _ = run_pre_audit(&sink, root.to_path_buf(), vec![], &opts, &mut summary, &runtime).await;
+
+        assert!(
+            matches!(summary.work_items_config, StepStatus::Ok(_)),
+            "expected Ok for work_items_config when work_items.dir is configured; got {:?}",
+            summary.work_items_config
+        );
     }
 }

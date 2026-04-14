@@ -1,8 +1,84 @@
 use crate::commands::download;
 use crate::commands::init::find_git_root_from;
 use crate::commands::output::OutputSink;
+use crate::config::{load_repo_config, save_repo_config, RepoConfig};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
+
+/// Resolve the work items directory and template path for the given repo config.
+///
+/// Resolution order for directory:
+/// 1. `repo_config.work_items.dir` (resolved relative to `git_root`)
+/// 2. `git_root/aspec/work-items/` (legacy fallback if it exists and is a directory)
+/// 3. `None` if neither exists
+///
+/// Resolution order for template:
+/// 1. `repo_config.work_items.template` (resolved relative to `git_root`)
+/// 2. `git_root/aspec/work-items/0000-template.md` (legacy path, if it exists)
+/// 3. `None` (triggers auto-discovery in callers)
+pub fn resolve_work_item_paths(
+    git_root: &Path,
+    repo_config: &RepoConfig,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    // ── Directory ──────────────────────────────────────────────────────────────
+    let dir = if let Some(configured) = repo_config.work_items_dir(git_root) {
+        if configured.is_dir() {
+            Some(configured)
+        } else {
+            // Configured but not a valid directory — treat as missing.
+            None
+        }
+    } else {
+        // Fall back to legacy path.
+        let legacy = git_root.join("aspec/work-items");
+        if legacy.is_dir() { Some(legacy) } else { None }
+    };
+
+    // ── Template ───────────────────────────────────────────────────────────────
+    let template = if let Some(configured) = repo_config.work_items_template(git_root) {
+        if configured.is_file() {
+            Some(configured)
+        } else {
+            // Configured but missing — fall through to auto-discovery.
+            None
+        }
+    } else {
+        // Fall back to legacy template path.
+        let legacy = git_root.join("aspec/work-items/0000-template.md");
+        if legacy.is_file() { Some(legacy) } else { None }
+    };
+
+    (dir, template)
+}
+
+/// Collect all files in `work_items_dir` whose name ends with `template.md`,
+/// sorted lexicographically. Returns an empty `Vec` if the directory is absent
+/// or unreadable.
+fn all_templates(work_items_dir: &Path) -> Vec<PathBuf> {
+    if !work_items_dir.is_dir() {
+        return vec![];
+    }
+    let mut matches: Vec<PathBuf> = std::fs::read_dir(work_items_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let n = name.to_string_lossy();
+            n.ends_with("template.md") && e.path().is_file()
+        })
+        .map(|e| e.path())
+        .collect();
+    matches.sort();
+    matches
+}
+
+/// Scan `work_items_dir` for files whose name ends with `template.md`.
+/// Returns the lexicographically first match, or `None` if none found.
+pub fn discover_template(work_items_dir: &Path) -> Option<PathBuf> {
+    all_templates(work_items_dir).into_iter().next()
+}
 
 /// Command-mode entry point: runs `new` interactively via stdin/stdout.
 pub async fn run() -> Result<()> {
@@ -24,11 +100,48 @@ pub async fn run_with_sink(
     cwd: &std::path::Path,
 ) -> Result<()> {
     let git_root = find_git_root_from(cwd).context("Not inside a Git repository")?;
+    let repo_config = load_repo_config(&git_root).unwrap_or_default();
 
-    // Locate or download the template.
-    let template_path = match find_template(&git_root) {
-        Ok(p) => p,
-        Err(_) => {
+    // If work_items.dir is configured but points to a non-directory, fail clearly.
+    if let Some(configured_dir) = repo_config.work_items_dir(&git_root) {
+        if !configured_dir.is_dir() {
+            bail!(
+                "Configured work_items.dir '{}' is not a directory.",
+                configured_dir.display()
+            );
+        }
+    }
+
+    let (work_items_dir_opt, template_path_opt) = resolve_work_item_paths(&git_root, &repo_config);
+
+    // Warn when a template was configured but the file is missing.
+    if let Some(configured_template) = repo_config.work_items_template(&git_root) {
+        if template_path_opt.is_none() {
+            out.println(format!(
+                "Warning: Configured template '{}' not found, falling back to auto-discovery.",
+                configured_template.display()
+            ));
+        }
+    }
+
+    // Resolve the work items directory, downloading aspec as a legacy fallback.
+    let work_items_dir = match work_items_dir_opt {
+        Some(d) => d,
+        None => {
+            let has_custom_dir = repo_config
+                .work_items
+                .as_ref()
+                .and_then(|w| w.dir.as_deref())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if has_custom_dir {
+                bail!(
+                    "`specs new` requires a work items directory. \
+                     Run `amux config set work_items.dir <path>` to configure one, \
+                     or run `amux init --aspec` to set up the aspec folder."
+                );
+            }
+            // No custom config — try downloading aspec for backward compatibility.
             out.println(
                 "Template not found locally, downloading aspec folder from GitHub..."
                     .to_string(),
@@ -36,17 +149,26 @@ pub async fn run_with_sink(
             download::download_aspec_folder(&git_root, out)
                 .await
                 .context("Failed to download aspec folder for template")?;
-            find_template(&git_root)?
+            let (d2, _) = resolve_work_item_paths(&git_root, &repo_config);
+            d2.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`specs new` requires a work items directory. \
+                     Run `amux config set work_items.dir <path>` to configure one, \
+                     or run `amux init --aspec` to set up the aspec folder."
+                )
+            })?
         }
     };
-    let template_content =
-        std::fs::read_to_string(&template_path).context("Failed to read template file")?;
 
-    // Determine the next sequential number.
-    let work_items_dir = template_path
-        .parent()
-        .context("Template has no parent directory")?;
-    let next_number = next_work_item_number(work_items_dir)?;
+    // Re-resolve template path after potential download.
+    let template_path_opt = if template_path_opt.is_none() {
+        let (_, t) = resolve_work_item_paths(&git_root, &repo_config);
+        t
+    } else {
+        template_path_opt
+    };
+
+    let next_number = next_work_item_number(&work_items_dir)?;
 
     // Get work item kind.
     let kind = match kind {
@@ -60,13 +182,66 @@ pub async fn run_with_sink(
         None => prompt_title(out)?,
     };
 
+    // Determine file content from template, auto-discovery, or minimal stub.
+    let content = match template_path_opt {
+        Some(ref path) => {
+            let tmpl =
+                std::fs::read_to_string(path).context("Failed to read template file")?;
+            apply_template(&tmpl, &kind, &title)
+        }
+        None => {
+            // Template auto-discovery (command mode only — TUI mode skips stdin prompts).
+            if out.supports_color() {
+                let candidates = all_templates(&work_items_dir);
+                match candidates.first().cloned() {
+                    Some(candidate) => {
+                        if candidates.len() > 1 {
+                            out.println(format!(
+                                "Found {} template candidates in {}.",
+                                candidates.len(),
+                                work_items_dir.display()
+                            ));
+                        }
+                        let rel = candidate
+                            .strip_prefix(&git_root)
+                            .unwrap_or(&candidate)
+                            .display()
+                            .to_string();
+                        out.println(format!(
+                            "Found potential template: {}. Use it? [Y/n]",
+                            rel
+                        ));
+                        let answer = out.read_line();
+                        let confirmed =
+                            matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes");
+                        if confirmed {
+                            // Save template path to repo config.
+                            let mut updated = load_repo_config(&git_root).unwrap_or_default();
+                            let wi = updated
+                                .work_items
+                                .get_or_insert_with(crate::config::WorkItemsConfig::default);
+                            wi.template = Some(rel);
+                            save_repo_config(&git_root, &updated)?;
+                            let tmpl = std::fs::read_to_string(&candidate)
+                                .context("Failed to read template file")?;
+                            apply_template(&tmpl, &kind, &title)
+                        } else {
+                            format!("# {}: {}\n", kind.as_str(), title)
+                        }
+                    }
+                    None => format!("# {}: {}\n", kind.as_str(), title),
+                }
+            } else {
+                // TUI mode: no stdin prompts, use minimal stub.
+                format!("# {}: {}\n", kind.as_str(), title)
+            }
+        }
+    };
+
     // Build the filename.
     let slug = slugify(&title);
     let filename = format!("{:04}-{}.md", next_number, slug);
     let file_path = work_items_dir.join(&filename);
-
-    // Build the file content from the template.
-    let content = apply_template(&template_content, &kind, &title);
 
     std::fs::write(&file_path, &content)
         .with_context(|| format!("Failed to write {}", file_path.display()))?;
@@ -236,14 +411,48 @@ pub async fn create_file_return_number(
     title: String,
     cwd: &Path,
 ) -> Result<u32> {
-    use crate::commands::init::find_git_root_from;
-
     let git_root = find_git_root_from(cwd).context("Not inside a Git repository")?;
+    let repo_config = load_repo_config(&git_root).unwrap_or_default();
 
-    // Locate or download the template.
-    let template_path = match find_template(&git_root) {
-        Ok(p) => p,
-        Err(_) => {
+    // If work_items.dir is configured but points to a non-directory, fail clearly.
+    if let Some(configured_dir) = repo_config.work_items_dir(&git_root) {
+        if !configured_dir.is_dir() {
+            bail!(
+                "Configured work_items.dir '{}' is not a directory.",
+                configured_dir.display()
+            );
+        }
+    }
+
+    let (work_items_dir_opt, template_path_opt) = resolve_work_item_paths(&git_root, &repo_config);
+
+    // Warn when a template was configured but the file is missing.
+    if let Some(configured_template) = repo_config.work_items_template(&git_root) {
+        if template_path_opt.is_none() {
+            out.println(format!(
+                "Warning: Configured template '{}' not found, falling back to auto-discovery.",
+                configured_template.display()
+            ));
+        }
+    }
+
+    let work_items_dir = match work_items_dir_opt {
+        Some(d) => d,
+        None => {
+            let has_custom_dir = repo_config
+                .work_items
+                .as_ref()
+                .and_then(|w| w.dir.as_deref())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if has_custom_dir {
+                bail!(
+                    "`specs new` requires a work items directory. \
+                     Run `amux config set work_items.dir <path>` to configure one, \
+                     or run `amux init --aspec` to set up the aspec folder."
+                );
+            }
+            // No custom config — try downloading aspec for backward compatibility.
             out.println(
                 "Template not found locally, downloading aspec folder from GitHub..."
                     .to_string(),
@@ -251,24 +460,38 @@ pub async fn create_file_return_number(
             download::download_aspec_folder(&git_root, out)
                 .await
                 .context("Failed to download aspec folder for template")?;
-            find_template(&git_root)?
+            let (d2, _) = resolve_work_item_paths(&git_root, &repo_config);
+            d2.context(
+                "`specs new` requires a work items directory. \
+                 Run `amux config set work_items.dir <path>` to configure one.",
+            )?
         }
     };
-    let template_content =
-        std::fs::read_to_string(&template_path).context("Failed to read template file")?;
 
-    let work_items_dir = template_path
-        .parent()
-        .context("Template has no parent directory")?;
-    let next_number = next_work_item_number(work_items_dir)?;
+    // Re-resolve template after possible download.
+    let template_path_opt = if template_path_opt.is_none() {
+        let (_, t) = resolve_work_item_paths(&git_root, &repo_config);
+        t
+    } else {
+        template_path_opt
+    };
+
+    let next_number = next_work_item_number(&work_items_dir)?;
+
+    // Determine content from template or minimal stub.
+    let content = match template_path_opt {
+        Some(ref path) => {
+            let tmpl =
+                std::fs::read_to_string(path).context("Failed to read template file")?;
+            apply_template(&tmpl, &kind, &title)
+        }
+        None => format!("# {}: {}\n", kind.as_str(), title),
+    };
 
     // Build the filename.
     let slug = slugify(&title);
     let filename = format!("{:04}-{}.md", next_number, slug);
     let file_path = work_items_dir.join(&filename);
-
-    // Build the file content from the template.
-    let content = apply_template(&template_content, &kind, &title);
 
     std::fs::write(&file_path, &content)
         .with_context(|| format!("Failed to write {}", file_path.display()))?;
@@ -507,5 +730,453 @@ mod tests {
         // In test environment, TERM_PROGRAM is unlikely to be "vscode".
         // We just verify the function doesn't panic.
         let _ = is_vscode_terminal();
+    }
+
+    // ─── resolve_work_item_paths ──────────────────────────────────────────────
+
+    #[test]
+    fn resolve_work_item_paths_config_only() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+
+        let items_dir = root.join("custom/items");
+        std::fs::create_dir_all(&items_dir).unwrap();
+        let tmpl = items_dir.join("0000-template.md");
+        std::fs::write(&tmpl, "# template").unwrap();
+
+        let config = crate::config::RepoConfig {
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("custom/items".to_string()),
+                template: Some("custom/items/0000-template.md".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let (dir, template) = resolve_work_item_paths(root, &config);
+        assert_eq!(dir, Some(items_dir));
+        assert_eq!(template, Some(tmpl));
+    }
+
+    #[test]
+    fn resolve_work_item_paths_legacy_only() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+
+        let legacy_dir = root.join("aspec/work-items");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_tmpl = legacy_dir.join("0000-template.md");
+        std::fs::write(&legacy_tmpl, "# template").unwrap();
+
+        let config = crate::config::RepoConfig::default();
+        let (dir, template) = resolve_work_item_paths(root, &config);
+        assert_eq!(dir, Some(legacy_dir));
+        assert_eq!(template, Some(legacy_tmpl));
+    }
+
+    #[test]
+    fn resolve_work_item_paths_config_wins_over_legacy() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+
+        // Legacy dir present.
+        let legacy_dir = root.join("aspec/work-items");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join("0000-template.md"), "# legacy").unwrap();
+
+        // Config dir present too.
+        let config_dir = root.join("custom/items");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_tmpl = config_dir.join("my-template.md");
+        std::fs::write(&config_tmpl, "# custom").unwrap();
+
+        let config = crate::config::RepoConfig {
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("custom/items".to_string()),
+                template: Some("custom/items/my-template.md".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let (dir, template) = resolve_work_item_paths(root, &config);
+        assert_eq!(dir, Some(config_dir), "configured dir should win over legacy aspec/work-items");
+        assert_eq!(template, Some(config_tmpl), "configured template should win over legacy");
+    }
+
+    #[test]
+    fn resolve_work_item_paths_neither_present() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+
+        let config = crate::config::RepoConfig::default();
+        let (dir, template) = resolve_work_item_paths(root, &config);
+        assert!(dir.is_none(), "dir should be None when neither config nor legacy present");
+        assert!(template.is_none(), "template should be None when neither present");
+    }
+
+    // ─── discover_template ────────────────────────────────────────────────────
+
+    #[test]
+    fn discover_template_returns_none_for_nonexistent_dir() {
+        let tmp = TempDir::new().unwrap();
+        let nonexistent = tmp.path().join("does-not-exist");
+        assert!(
+            discover_template(&nonexistent).is_none(),
+            "expected None for a directory that does not exist"
+        );
+    }
+
+    #[test]
+    fn discover_template_no_match() {
+        let tmp = TempDir::new().unwrap();
+        // Put a non-template file in the dir.
+        std::fs::write(tmp.path().join("readme.md"), "# readme").unwrap();
+        let result = discover_template(tmp.path());
+        assert!(result.is_none(), "expected None when no *template.md file");
+    }
+
+    #[test]
+    fn discover_template_single_match() {
+        let tmp = TempDir::new().unwrap();
+        let tmpl = tmp.path().join("0000-template.md");
+        std::fs::write(&tmpl, "# template").unwrap();
+        std::fs::write(tmp.path().join("readme.md"), "# not a template").unwrap();
+        let result = discover_template(tmp.path());
+        assert_eq!(result, Some(tmpl));
+    }
+
+    #[test]
+    fn discover_template_multiple_matches_returns_lexicographically_first() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("aaa-template.md");
+        let b = tmp.path().join("bbb-template.md");
+        let c = tmp.path().join("zzz-template.md");
+        std::fs::write(&a, "# a").unwrap();
+        std::fs::write(&b, "# b").unwrap();
+        std::fs::write(&c, "# c").unwrap();
+        let result = discover_template(tmp.path()).unwrap();
+        assert_eq!(result, a, "expected lexicographically first match");
+    }
+
+    // ─── integration: run_with_sink with configured work_items.dir ───────────
+
+    #[tokio::test]
+    async fn run_with_sink_uses_configured_work_items_dir() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir(root.join(".git")).unwrap();
+
+        // Create a custom work items dir (not the legacy aspec/work-items).
+        let items_dir = root.join("work");
+        std::fs::create_dir_all(&items_dir).unwrap();
+        std::fs::write(
+            items_dir.join("0000-template.md"),
+            "# Work Item: [Feature | Bug | Task]\n\nTitle: title\n",
+        )
+        .unwrap();
+
+        // Write repo config pointing to the custom dir.
+        let config = crate::config::RepoConfig {
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("work".to_string()),
+                template: Some("work/0000-template.md".to_string()),
+            }),
+            ..Default::default()
+        };
+        crate::config::save_repo_config(root, &config).unwrap();
+
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        let result = run_with_sink(
+            &sink,
+            Some(WorkItemKind::Task),
+            Some("Custom Dir Task".to_string()),
+            root,
+        )
+        .await;
+
+        assert!(result.is_ok(), "run_with_sink failed: {:?}", result.err());
+
+        // File must be in the configured dir, not in aspec/work-items.
+        let created = items_dir.join("0001-custom-dir-task.md");
+        assert!(created.exists(), "work item should be in configured dir: {}", created.display());
+        assert!(
+            !root.join("aspec/work-items").exists(),
+            "legacy aspec/work-items should not be created"
+        );
+    }
+
+    // ─── missing configured template → warning ────────────────────────────────
+
+    #[tokio::test]
+    async fn run_with_sink_warns_when_configured_template_missing() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir(root.join(".git")).unwrap();
+
+        let items_dir = root.join("items");
+        std::fs::create_dir_all(&items_dir).unwrap();
+
+        // Template is configured but the file does not exist.
+        let config = crate::config::RepoConfig {
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("items".to_string()),
+                template: Some("items/nonexistent-template.md".to_string()),
+            }),
+            ..Default::default()
+        };
+        crate::config::save_repo_config(root, &config).unwrap();
+
+        let (tx, mut rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        let result = run_with_sink(
+            &sink,
+            Some(WorkItemKind::Bug),
+            Some("Test Bug".to_string()),
+            root,
+        )
+        .await;
+
+        assert!(result.is_ok(), "run_with_sink should succeed: {:?}", result.err());
+
+        let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let output = messages.join("\n");
+        assert!(
+            output.contains("not found") || output.contains("falling back"),
+            "expected template-missing warning; got: {}",
+            output
+        );
+    }
+
+    // ─── auto-discovery with MockInput ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_with_sink_auto_discovery_confirm_uses_template_and_saves_config() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir(root.join(".git")).unwrap();
+
+        let items_dir = root.join("items");
+        std::fs::create_dir_all(&items_dir).unwrap();
+        std::fs::write(
+            items_dir.join("0000-template.md"),
+            "# Work Item: [Feature | Bug | Task]\n\nTitle: title\nIssue: issuelink\n",
+        )
+        .unwrap();
+
+        // No configured template → auto-discovery should find the file above.
+        let config = crate::config::RepoConfig {
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        crate::config::save_repo_config(root, &config).unwrap();
+
+        // MockInput: "y" → confirm the discovery prompt.
+        let (tx, mut rx) = unbounded_channel();
+        let sink = OutputSink::mock_input(tx, vec!["y"]);
+
+        let result = run_with_sink(
+            &sink,
+            Some(WorkItemKind::Feature),
+            Some("Discovered Feature".to_string()),
+            root,
+        )
+        .await;
+
+        assert!(result.is_ok(), "run_with_sink failed: {:?}", result.err());
+
+        // File should be created using full template content.
+        let created = items_dir.join("0001-discovered-feature.md");
+        assert!(created.exists(), "work item file should exist");
+        let content = std::fs::read_to_string(&created).unwrap();
+        assert!(content.contains("# Work Item: Feature"), "template should be applied");
+        assert!(content.contains("Title: Discovered Feature"));
+
+        // Config should have the template path saved.
+        let updated = crate::config::load_repo_config(root).unwrap();
+        let saved_tmpl = updated.work_items.as_ref().and_then(|w| w.template.as_deref());
+        assert!(
+            saved_tmpl.is_some(),
+            "template path should be saved to config after confirming"
+        );
+        assert!(
+            saved_tmpl.unwrap().contains("template.md"),
+            "saved path should reference template.md; got {:?}",
+            saved_tmpl
+        );
+
+        // Output should contain the discovery prompt.
+        let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let output = messages.join("\n");
+        assert!(
+            output.contains("Found potential template"),
+            "discovery prompt should appear in output; got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_sink_auto_discovery_decline_creates_minimal_stub() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir(root.join(".git")).unwrap();
+
+        let items_dir = root.join("items");
+        std::fs::create_dir_all(&items_dir).unwrap();
+        std::fs::write(
+            items_dir.join("0000-template.md"),
+            "# Work Item: [Feature | Bug | Task]\n\n## Summary:\n- summary\n",
+        )
+        .unwrap();
+
+        let config = crate::config::RepoConfig {
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        crate::config::save_repo_config(root, &config).unwrap();
+
+        // MockInput: "n" → decline the discovery prompt.
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::mock_input(tx, vec!["n"]);
+
+        let result = run_with_sink(
+            &sink,
+            Some(WorkItemKind::Bug),
+            Some("Declined Bug".to_string()),
+            root,
+        )
+        .await;
+
+        assert!(result.is_ok(), "run_with_sink failed: {:?}", result.err());
+
+        let created = items_dir.join("0001-declined-bug.md");
+        assert!(created.exists(), "work item file should exist");
+        let content = std::fs::read_to_string(&created).unwrap();
+        assert!(
+            content.contains("# Bug: Declined Bug"),
+            "expected minimal stub; got: {}",
+            content
+        );
+        assert!(
+            !content.contains("## Summary"),
+            "template should NOT be applied when declined"
+        );
+
+        // Config should NOT have a template path saved.
+        let updated = crate::config::load_repo_config(root).unwrap();
+        let saved_tmpl = updated.work_items.as_ref().and_then(|w| w.template.as_deref());
+        assert!(saved_tmpl.is_none(), "template should not be saved when declined");
+    }
+
+    #[tokio::test]
+    async fn run_with_sink_auto_discovery_shows_count_for_multiple_templates() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir(root.join(".git")).unwrap();
+
+        let items_dir = root.join("items");
+        std::fs::create_dir_all(&items_dir).unwrap();
+        // Two template files.
+        std::fs::write(
+            items_dir.join("aaa-template.md"),
+            "# Work Item: [Feature | Bug | Task]\n\nTitle: title\n",
+        )
+        .unwrap();
+        std::fs::write(items_dir.join("bbb-template.md"), "# template b").unwrap();
+
+        let config = crate::config::RepoConfig {
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        crate::config::save_repo_config(root, &config).unwrap();
+
+        // Decline so we don't need to check template content.
+        let (tx, mut rx) = unbounded_channel();
+        let sink = OutputSink::mock_input(tx, vec!["n"]);
+
+        let _ = run_with_sink(
+            &sink,
+            Some(WorkItemKind::Task),
+            Some("Count Test".to_string()),
+            root,
+        )
+        .await;
+
+        let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let output = messages.join("\n");
+        assert!(
+            output.contains("2") && output.contains("template"),
+            "expected candidate count in output; got: {}",
+            output
+        );
+        // The lexicographically first template (aaa-...) should be offered.
+        assert!(
+            output.contains("aaa-template.md"),
+            "expected first template to be offered; got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_sink_no_template_channel_creates_minimal_stub() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir(root.join(".git")).unwrap();
+
+        // Create work items dir but no template file.
+        let items_dir = root.join("items");
+        std::fs::create_dir_all(&items_dir).unwrap();
+
+        let config = crate::config::RepoConfig {
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        crate::config::save_repo_config(root, &config).unwrap();
+
+        // Channel sink → supports_color() is false → auto-discovery skipped, minimal stub used.
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        let result = run_with_sink(
+            &sink,
+            Some(WorkItemKind::Bug),
+            Some("Test Bug".to_string()),
+            root,
+        )
+        .await;
+
+        assert!(result.is_ok(), "run_with_sink failed: {:?}", result.err());
+
+        let created = items_dir.join("0001-test-bug.md");
+        assert!(created.exists(), "work item file should exist");
+        let content = std::fs::read_to_string(&created).unwrap();
+        assert!(
+            content.contains("# Bug: Test Bug"),
+            "expected minimal stub content, got: {}",
+            content
+        );
     }
 }

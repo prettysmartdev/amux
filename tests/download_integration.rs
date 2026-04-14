@@ -193,9 +193,9 @@ async fn init_downloads_aspec_folder_when_missing() {
         "Dockerfile.dev should be created"
     );
 
-    // Config should be written.
+    // Config should be written (to the current config path, not legacy aspec/.amux.json).
     assert!(
-        tmp.path().join("aspec/.amux.json").exists(),
+        tmp.path().join(".amux/config.json").exists(),
         "Config should be written"
     );
 

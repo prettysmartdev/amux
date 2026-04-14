@@ -2,7 +2,7 @@ use crate::cli::{Agent, ConfigAction};
 use crate::commands::init::find_git_root;
 use crate::config::{
     load_global_config, load_repo_config, migrate_legacy_repo_config, save_global_config,
-    save_repo_config, GlobalConfig, RepoConfig, DEFAULT_SCROLLBACK_LINES,
+    save_repo_config, GlobalConfig, RepoConfig, WorkItemsConfig, DEFAULT_SCROLLBACK_LINES,
 };
 use anyhow::{bail, Result};
 use std::path::Path;
@@ -78,6 +78,20 @@ pub static ALL_FIELDS: &[ConfigFieldDef] = &[
         hint: "managed by the agent auth flow; read-only here",
         builtin_default: "(not set)",
         settable: false,
+    },
+    ConfigFieldDef {
+        key: "work_items.dir",
+        scope: FieldScope::RepoOnly,
+        hint: "Path to the work items directory (relative to repo root)",
+        builtin_default: "(not set)",
+        settable: true,
+    },
+    ConfigFieldDef {
+        key: "work_items.template",
+        scope: FieldScope::RepoOnly,
+        hint: "Path to the work item template file (relative to repo root)",
+        builtin_default: "(not set)",
+        settable: true,
     },
 ];
 
@@ -196,6 +210,20 @@ pub fn repo_display(field: &ConfigFieldDef, repo: Option<&RepoConfig>) -> String
                     .as_ref()
                     .map(|v| format_vec(v))
                     .unwrap_or_else(|| "(not set)".to_string()),
+                "work_items.dir" => repo
+                    .work_items
+                    .as_ref()
+                    .and_then(|w| w.dir.as_deref())
+                    .filter(|s| !s.is_empty())
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "(not set)".to_string()),
+                "work_items.template" => repo
+                    .work_items
+                    .as_ref()
+                    .and_then(|w| w.template.as_deref())
+                    .filter(|s| !s.is_empty())
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "(not set)".to_string()),
                 _ => "(not set)".to_string(),
             }
         }
@@ -264,6 +292,30 @@ pub fn effective_display(
             } else {
                 "(not set)".to_string()
             }
+        }
+        "work_items.dir" => {
+            if let Some(repo) = repo {
+                if let Some(ref w) = repo.work_items {
+                    if let Some(ref d) = w.dir {
+                        if !d.is_empty() {
+                            return d.clone();
+                        }
+                    }
+                }
+            }
+            "(not set)".to_string()
+        }
+        "work_items.template" => {
+            if let Some(repo) = repo {
+                if let Some(ref w) = repo.work_items {
+                    if let Some(ref t) = w.template {
+                        if !t.is_empty() {
+                            return t.clone();
+                        }
+                    }
+                }
+            }
+            "(not set)".to_string()
         }
         _ => "?".to_string(),
     }
@@ -363,6 +415,10 @@ pub fn validate_value(field: &ConfigFieldDef, value: &str) -> Result<()> {
         "yolo_disallowed_tools" | "env_passthrough" => {
             // Any comma-separated string is valid; empty string clears the field.
         }
+        "work_items.dir" | "work_items.template" => {
+            // Any string is valid; empty string clears the field.
+            // Path escape validation is performed in set() where git_root is available.
+        }
         _ => {}
     }
     Ok(())
@@ -381,6 +437,14 @@ pub fn apply_to_repo(field: &ConfigFieldDef, value: &str, repo: &mut RepoConfig)
         }
         "env_passthrough" => {
             repo.env_passthrough = Some(parse_vec_value(value));
+        }
+        "work_items.dir" => {
+            let work_items = repo.work_items.get_or_insert_with(WorkItemsConfig::default);
+            work_items.dir = if value.is_empty() { None } else { Some(value.to_string()) };
+        }
+        "work_items.template" => {
+            let work_items = repo.work_items.get_or_insert_with(WorkItemsConfig::default);
+            work_items.template = if value.is_empty() { None } else { Some(value.to_string()) };
         }
         _ => {}
     }
@@ -413,6 +477,18 @@ fn repo_field_is_set(field: &ConfigFieldDef, repo: &RepoConfig) -> bool {
         "terminal_scrollback_lines" => repo.terminal_scrollback_lines.is_some(),
         "yolo_disallowed_tools" => repo.yolo_disallowed_tools.is_some(),
         "env_passthrough" => repo.env_passthrough.is_some(),
+        "work_items.dir" => repo
+            .work_items
+            .as_ref()
+            .and_then(|w| w.dir.as_deref())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "work_items.template" => repo
+            .work_items
+            .as_ref()
+            .and_then(|w| w.template.as_deref())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         _ => false,
     }
 }
@@ -515,6 +591,49 @@ fn scope_annotation(
         }
         _ => "",
     }
+}
+
+/// Validate that a user-supplied path does not escape the repository root.
+/// Rejects relative paths with `..` escape attempts and absolute paths outside the root.
+pub fn validate_path_within_git_root(path_str: &str, git_root: &Path) -> Result<()> {
+    let p = std::path::Path::new(path_str);
+    let candidate = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        git_root.join(p)
+    };
+
+    // Normalize by resolving . and .. without touching the filesystem.
+    let mut normalized = std::path::PathBuf::new();
+    for comp in candidate.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            c => normalized.push(c),
+        }
+    }
+
+    // Normalize git_root the same way.
+    let mut norm_root = std::path::PathBuf::new();
+    for comp in git_root.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                norm_root.pop();
+            }
+            c => norm_root.push(c),
+        }
+    }
+
+    if !normalized.starts_with(&norm_root) {
+        bail!(
+            "Path '{}' is outside the repository root. Paths must be within the repository.",
+            path_str
+        );
+    }
+    Ok(())
 }
 
 // ── Command entry point ────────────────────────────────────────────────────────
@@ -683,6 +802,13 @@ pub(crate) fn set(field_key: &str, value: &str, use_global: bool, git_root: Opti
     // Validate value before writing.
     validate_value(field, value)?;
 
+    // Security: validate work_items.* paths don't escape the repo root.
+    if field.key.starts_with("work_items.") && !value.is_empty() {
+        if let Some(root) = git_root {
+            validate_path_within_git_root(value, root)?;
+        }
+    }
+
     // Warn when setting apple-containers on a non-macOS host.
     #[cfg(not(target_os = "macos"))]
     if field.key == "runtime" && value == "apple-containers" {
@@ -762,6 +888,8 @@ mod tests {
             "env_passthrough",
             "agent",
             "auto_agent_auth_accepted",
+            "work_items.dir",
+            "work_items.template",
         ] {
             assert!(find_field(key).is_some(), "expected Some for key '{}'", key);
         }
@@ -1031,5 +1159,209 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(effective_display(field, &global, Some(&repo)), "(empty)");
+    }
+
+    // ── work_items fields ─────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_value_accepts_any_string_for_work_items_dir() {
+        let field = find_field("work_items.dir").unwrap();
+        assert!(validate_value(field, "my/items").is_ok());
+        assert!(validate_value(field, "./work-items").is_ok());
+        assert!(validate_value(field, "").is_ok(), "empty string should clear the field");
+        assert!(validate_value(field, "deeply/nested/path").is_ok());
+    }
+
+    #[test]
+    fn validate_value_accepts_any_string_for_work_items_template() {
+        let field = find_field("work_items.template").unwrap();
+        assert!(validate_value(field, "my/template.md").is_ok());
+        assert!(validate_value(field, "").is_ok(), "empty string should clear the field");
+        assert!(validate_value(field, "docs/0000-template.md").is_ok());
+    }
+
+    #[test]
+    fn apply_to_repo_sets_work_items_dir() {
+        let field = find_field("work_items.dir").unwrap();
+        let mut repo = RepoConfig::default();
+        apply_to_repo(field, "my/items", &mut repo);
+        assert_eq!(repo.work_items.as_ref().unwrap().dir.as_deref(), Some("my/items"));
+    }
+
+    #[test]
+    fn apply_to_repo_sets_work_items_template() {
+        let field = find_field("work_items.template").unwrap();
+        let mut repo = RepoConfig::default();
+        apply_to_repo(field, "my/template.md", &mut repo);
+        assert_eq!(
+            repo.work_items.as_ref().unwrap().template.as_deref(),
+            Some("my/template.md")
+        );
+    }
+
+    #[test]
+    fn apply_to_repo_clears_work_items_dir_on_empty_string() {
+        let field = find_field("work_items.dir").unwrap();
+        let mut repo = RepoConfig {
+            work_items: Some(WorkItemsConfig {
+                dir: Some("old/path".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        apply_to_repo(field, "", &mut repo);
+        let dir = repo.work_items.as_ref().and_then(|w| w.dir.as_deref());
+        assert!(dir.is_none(), "empty string should clear work_items.dir");
+    }
+
+    #[test]
+    fn apply_to_repo_clears_work_items_template_on_empty_string() {
+        let field = find_field("work_items.template").unwrap();
+        let mut repo = RepoConfig {
+            work_items: Some(WorkItemsConfig {
+                dir: None,
+                template: Some("old/tmpl.md".to_string()),
+            }),
+            ..Default::default()
+        };
+        apply_to_repo(field, "", &mut repo);
+        let tmpl = repo.work_items.as_ref().and_then(|w| w.template.as_deref());
+        assert!(tmpl.is_none(), "empty string should clear work_items.template");
+    }
+
+    #[test]
+    fn repo_display_work_items_dir_shows_not_set_when_absent() {
+        let field = find_field("work_items.dir").unwrap();
+        let repo = RepoConfig::default();
+        assert_eq!(repo_display(field, Some(&repo)), "(not set)");
+        assert_eq!(repo_display(field, None), "(not set)");
+    }
+
+    #[test]
+    fn repo_display_work_items_dir_shows_value_when_set() {
+        let field = find_field("work_items.dir").unwrap();
+        let repo = RepoConfig {
+            work_items: Some(WorkItemsConfig {
+                dir: Some("my/items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(repo_display(field, Some(&repo)), "my/items");
+    }
+
+    #[test]
+    fn effective_display_work_items_dir_returns_value_when_set() {
+        let field = find_field("work_items.dir").unwrap();
+        let global = GlobalConfig::default();
+        let repo = RepoConfig {
+            work_items: Some(WorkItemsConfig {
+                dir: Some("my/items".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(effective_display(field, &global, Some(&repo)), "my/items");
+    }
+
+    #[test]
+    fn effective_display_work_items_dir_returns_not_set_when_absent() {
+        let field = find_field("work_items.dir").unwrap();
+        let global = GlobalConfig::default();
+        assert_eq!(effective_display(field, &global, Some(&RepoConfig::default())), "(not set)");
+        assert_eq!(effective_display(field, &global, None), "(not set)");
+    }
+
+    #[test]
+    fn effective_display_work_items_template_returns_value_when_set() {
+        let field = find_field("work_items.template").unwrap();
+        let global = GlobalConfig::default();
+        let repo = RepoConfig {
+            work_items: Some(WorkItemsConfig {
+                dir: None,
+                template: Some("my/template.md".to_string()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(effective_display(field, &global, Some(&repo)), "my/template.md");
+    }
+
+    // ── integration: set() round-trips ────────────────────────────────────────
+
+    #[test]
+    fn set_work_items_dir_round_trips_through_config() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        set("work_items.dir", "my/items", false, Some(tmp.path())).unwrap();
+
+        let loaded = crate::config::load_repo_config(tmp.path()).unwrap();
+        assert_eq!(
+            loaded.work_items.as_ref().and_then(|w| w.dir.as_deref()),
+            Some("my/items")
+        );
+    }
+
+    #[test]
+    fn set_work_items_template_round_trips_through_config() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        set("work_items.template", "my/template.md", false, Some(tmp.path())).unwrap();
+
+        let loaded = crate::config::load_repo_config(tmp.path()).unwrap();
+        assert_eq!(
+            loaded.work_items.as_ref().and_then(|w| w.template.as_deref()),
+            Some("my/template.md")
+        );
+    }
+
+    #[test]
+    fn set_work_items_dir_with_global_flag_fails() {
+        let err = set("work_items.dir", "my/items", true, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("repo-only") || msg.contains("--global"),
+            "expected repo-only scope error, got: {}",
+            msg
+        );
+    }
+
+    // ── path escape validation ─────────────────────────────────────────────────
+
+    #[test]
+    fn validate_path_within_git_root_rejects_escape_with_dotdot() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let err = validate_path_within_git_root("../../outside", tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("outside the repository root"),
+            "expected escape rejection, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_path_within_git_root_accepts_valid_nested_path() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        assert!(validate_path_within_git_root("my/items", tmp.path()).is_ok());
+        assert!(validate_path_within_git_root("./items", tmp.path()).is_ok());
+        assert!(validate_path_within_git_root("items", tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn set_work_items_dir_path_escape_rejected() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let err = set("work_items.dir", "../../outside", false, Some(tmp.path())).unwrap_err();
+        assert!(
+            err.to_string().contains("outside the repository root"),
+            "expected path escape rejection, got: {}",
+            err
+        );
     }
 }
