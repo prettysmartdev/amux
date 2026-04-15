@@ -4,7 +4,7 @@ use crate::commands::implement::confirm_mount_scope_stdin;
 use crate::commands::init::find_git_root;
 use crate::commands::output::OutputSink;
 use crate::config::{effective_env_passthrough, effective_yolo_disallowed_tools, load_repo_config};
-use crate::runtime::docker as docker;
+use crate::runtime::HostSettings;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -73,7 +73,7 @@ pub async fn run_with_sink(
     env_vars: Vec<(String, String)>,
     non_interactive: bool,
     plan: bool,
-    host_settings: Option<&docker::HostSettings>,
+    host_settings: Option<&HostSettings>,
     allow_docker: bool,
     mount_ssh: bool,
     yolo: bool,

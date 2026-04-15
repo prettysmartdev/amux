@@ -1,38 +1,71 @@
 FROM debian:bookworm-slim
 
-# System packages required for building, testing, and running the project
+# ── System packages ───────────────────────────────────────────────────────────
+# build-essential : C compiler + linker required by Rust crates that call `cc`
+#                   (portable-pty, ring, etc.).  Also brings in `make`.
+# pkg-config      : lets Rust build scripts locate system libraries.
+# libxcb*-dev     : X11 clipboard backend compiled into the `arboard` crate.
+# libwayland-dev  : Wayland clipboard backend compiled into the `arboard` crate.
+# gnuplot         : criterion writes HTML benchmark reports with gnuplot
+#                   (cargo bench → target/criterion/).
+# heaptrack       : heap profiler referenced in aspec/devops/localdev.md
+#                   §Heap profiling.
+# linux-perf      : perf(1) required by cargo-flamegraph on Linux
+#                   (aspec/devops/localdev.md §Flamegraph profiling).
+# musl-tools      : musl-gcc cross-compiler; required to build the
+#                   x86_64-unknown-linux-musl target for the statically-linked
+#                   release binary (aspec/architecture/design.md).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
+    build-essential \
     ca-certificates \
     curl \
-    make \
-    gcc \
-    libc6-dev \
+    git \
+    gnuplot \
+    heaptrack \
+    libwayland-dev \
+    libxcb1-dev \
+    libxcb-render0-dev \
+    libxcb-shape0-dev \
+    libxcb-xfixes0-dev \
+    linux-perf \
+    musl-tools \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust toolchain pinned to the version declared in Cargo.toml (rust-version)
+# ── GitHub CLI ────────────────────────────────────────────────────────────────
+# scripts/release.sh calls `gh auth status`, `gh release create`, etc.
+# Pin the official GitHub apt repository so the version is controlled.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Rust toolchain ────────────────────────────────────────────────────────────
+# Pin to the MSRV declared in Cargo.toml (rust-version = "1.94.0").
+# RUSTUP_HOME and CARGO_HOME are placed under /usr/local so the installation
+# is shared across all users without needing per-user ~/.cargo in PATH.
+# The x86_64-unknown-linux-musl target is added for the statically-linked
+# release binary required by aspec/architecture/design.md.
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH="/usr/local/cargo/bin:${PATH}"
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain 1.94.0 --profile minimal \
-    && rustc --version && cargo --version
+    RUST_VERSION=1.94.0 \
+    PATH=/usr/local/cargo/bin:$PATH
 
-# Install Docker CLI (pinned version) so the container can interact with the host Docker daemon
-ENV DOCKER_VERSION=27.5.1
-RUN curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_VERSION}.tgz" \
-    | tar xz --strip-components=1 -C /usr/local/bin docker/docker \
-    && docker --version
+RUN curl -sSf https://sh.rustup.rs \
+        | sh -s -- --no-modify-path --default-toolchain ${RUST_VERSION} -y \
+    && rustup target add x86_64-unknown-linux-musl
 
-# Install Claude Code via official standalone installer
-RUN curl -fsSL https://claude.ai/install.sh | bash \
-    && cp /root/.local/bin/claude /usr/local/bin/claude
+# ── Cargo-installed dev tools ─────────────────────────────────────────────────
+# tokio-console 0.1.12 : live Tokio task inspector used during development
+#   (aspec/devops/localdev.md §tokio-console).
+# flamegraph 0.6.6     : cargo-flamegraph wraps perf to produce CPU flame
+#   graphs (aspec/devops/localdev.md §Flamegraph profiling).
+# --locked ensures the versions recorded in each crate's Cargo.lock are used,
+# making the install reproducible.
+RUN cargo install tokio-console --version 0.1.12 --locked \
+    && cargo install flamegraph --version 0.6.6 --locked
 
-# Create non-root user and set up workspace
-RUN useradd -m -s /bin/bash amux \
-    && mkdir -p /workspace \
-    && chown amux:amux /workspace
-
-USER amux
 WORKDIR /workspace

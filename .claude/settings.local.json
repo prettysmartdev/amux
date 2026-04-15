@@ -105,7 +105,9 @@
       "WebFetch(domain:geminicli.com)",
       "Bash(RUSTFLAGS=\"-W unused-imports -W dead-code -W unused-variables -W unused-mut\" cargo build)",
       "Bash(perl:*)",
-      "Bash(ls /workspace/Dockerfile*)"
+      "Bash(ls /workspace/Dockerfile*)",
+      "Read(//usr/local/cargo/**)",
+      "Read(//home/**)"
     ]
   }
 }

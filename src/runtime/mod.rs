@@ -302,20 +302,30 @@ impl HostSettings {
         std::fs::write(&settings_path, serde_json::to_string(&settings)?)
     }
 
-    /// Creates a minimal `HostSettings` with only LSP recommendations disabled.
+    /// Creates a minimal `HostSettings` with `/workspace` project trust and LSP recommendations
+    /// disabled.
     ///
     /// Used as a fallback when the host has no `~/.claude.json` (e.g. the user has never
-    /// run Claude Code on this machine). This ensures LSP recommendation dialogs are always
-    /// suppressed inside containers, even without a full host config. Only applies to the
-    /// `claude` agent — returns `None` for all others.
+    /// run Claude Code on this machine). This ensures the project trust dialog and LSP
+    /// recommendation dialogs are always suppressed inside containers, even without a full
+    /// host config. Only applies to the `claude` agent — returns `None` for all others.
     pub fn prepare_minimal(agent: &str) -> Option<Self> {
         if agent != "claude" {
             return None;
         }
         let temp_dir = tempfile::TempDir::new().ok()?;
         let config_path = temp_dir.path().join("claude.json");
-        // Write a minimal valid config so the bind-mount target exists.
-        std::fs::write(&config_path, "{}").ok()?;
+        // Write a minimal config with /workspace project trust so the trust dialog
+        // is never shown inside containers, even when the host has no ~/.claude.json.
+        let minimal_config = serde_json::json!({
+            "projects": {
+                "/workspace": {
+                    "hasTrustDialogAccepted": true
+                }
+            }
+        });
+        let config_json = serde_json::to_string(&minimal_config).unwrap_or_else(|_| "{}".to_string());
+        std::fs::write(&config_path, &config_json).ok()?;
         let claude_dir_path = temp_dir.path().join("dot-claude");
         std::fs::create_dir_all(&claude_dir_path).ok()?;
         disable_lsp_recommendations(&claude_dir_path).ok()?;
@@ -450,12 +460,85 @@ pub(crate) fn copy_dir_filtered(src: &Path, dst: &Path, denylist: &[&str]) -> st
     Ok(())
 }
 
+// ─── Runtime-independent utilities ───────────────────────────────────────────
+//
+// These functions derive names or format display strings. They contain no
+// Docker-specific logic and are safe to call regardless of which runtime is
+// configured.
+
+/// Derives the project-specific image tag from the Git root folder name.
+///
+/// E.g. `/home/user/myproject` → `amux-myproject:latest`.
+pub fn project_image_tag(git_root: &Path) -> String {
+    let project_name = git_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+    format!("amux-{}:latest", project_name)
+}
+
+/// Returns the image tag for an agent-specific image layered on top of the project base.
+/// Pattern: `amux-{projectname}-{agentname}:latest`
+pub fn agent_image_tag(git_root: &Path, agent: &str) -> String {
+    let project_name = git_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+    format!("amux-{}-{}:latest", project_name, agent)
+}
+
+/// Generate a unique container name for amux-managed containers.
+pub fn generate_container_name() -> String {
+    use std::time::SystemTime;
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let pid = std::process::id();
+    format!("amux-{}-{}", pid, ts.subsec_nanos())
+}
+
+/// Parse a CPU percentage string like `"5.23%"` into a `f64` (`5.23`).
+pub fn parse_cpu_percent(s: &str) -> f64 {
+    s.trim_end_matches('%').trim().parse::<f64>().unwrap_or(0.0)
+}
+
+/// Parse a memory string like `"200MiB"` or `"1.5GiB"` into megabytes as `f64`.
+pub fn parse_memory_mb(s: &str) -> f64 {
+    let s = s.trim();
+    if let Some(val) = s.strip_suffix("GiB") {
+        val.trim().parse::<f64>().unwrap_or(0.0) * 1024.0
+    } else if let Some(val) = s.strip_suffix("MiB") {
+        val.trim().parse::<f64>().unwrap_or(0.0)
+    } else if let Some(val) = s.strip_suffix("KiB") {
+        val.trim().parse::<f64>().unwrap_or(0.0) / 1024.0
+    } else if let Some(val) = s.strip_suffix('B') {
+        val.trim().parse::<f64>().unwrap_or(0.0) / (1024.0 * 1024.0)
+    } else {
+        0.0
+    }
+}
+
+/// Formats a build invocation as a single-line CLI string for display.
+pub fn format_build_cmd(binary: &str, tag: &str, dockerfile: &str, context: &str) -> String {
+    format!("{} build -t {} -f {} {}", binary, tag, dockerfile, context)
+}
+
+/// Formats a `--no-cache` build invocation as a single-line CLI string for display.
+pub fn format_build_cmd_no_cache(binary: &str, tag: &str, dockerfile: &str, context: &str) -> String {
+    format!("{} build --no-cache -t {} -f {} {}", binary, tag, dockerfile, context)
+}
+
 /// The `AgentRuntime` trait abstracts over container runtimes (Docker, Apple Containers, etc.).
 ///
 /// All methods are object-safe so the runtime can be stored as `Arc<dyn AgentRuntime>`.
 pub trait AgentRuntime: Send + Sync {
     /// Returns true if the runtime daemon is available on this host.
     fn is_available(&self) -> bool;
+
+    /// Checks that the runtime socket/endpoint is accessible.
+    ///
+    /// Returns the socket path on success, or an error describing the problem.
+    fn check_socket(&self) -> anyhow::Result<PathBuf>;
 
     /// Builds a container image from the given Dockerfile and context directory,
     /// streaming output lines to `on_line` as they are produced.
@@ -886,6 +969,21 @@ mod tests {
                 serde_json::from_str(&std::fs::read_to_string(&lsp_settings).unwrap()).unwrap();
             assert_eq!(content[LSP_SETTINGS_KEY], serde_json::json!(true));
         }
+    }
+
+    #[test]
+    fn host_settings_prepare_minimal_claude_includes_workspace_project_trust() {
+        // prepare_minimal must add /workspace project trust so the trust dialog is never shown
+        // inside containers, even when the host has no ~/.claude.json.
+        let s = HostSettings::prepare_minimal("claude")
+            .expect("prepare_minimal must return Some for claude");
+        let config_json = std::fs::read_to_string(&s.config_path).expect("config must be readable");
+        let config: serde_json::Value = serde_json::from_str(&config_json).expect("config must be valid JSON");
+        assert_eq!(
+            config["projects"]["/workspace"]["hasTrustDialogAccepted"],
+            serde_json::json!(true),
+            "prepare_minimal must set hasTrustDialogAccepted for /workspace"
+        );
     }
 
     // ─── resolve_runtime ─────────────────────────────────────────────────────

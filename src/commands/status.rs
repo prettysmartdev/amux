@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn format_status_output_contains_both_sections() {
-        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let runtime = crate::runtime::DockerRuntime::new();
         let output = format_status_output("test tip", &[], &runtime);
         assert!(output.contains("CODE AGENTS"));
         assert!(output.contains("NANOCLAW"));
@@ -545,14 +545,14 @@ mod tests {
 
     #[test]
     fn format_status_output_contains_dashboard_header() {
-        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let runtime = crate::runtime::DockerRuntime::new();
         let output = format_status_output("test tip", &[], &runtime);
         assert!(output.contains("AMUX STATUS DASHBOARD"));
     }
 
     #[test]
     fn format_status_output_contains_tip() {
-        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let runtime = crate::runtime::DockerRuntime::new();
         let output = format_status_output("my custom tip", &[], &runtime);
         assert!(output.contains("Tip: my custom tip"));
     }
@@ -561,7 +561,7 @@ mod tests {
     fn format_status_output_empty_state_messages_when_no_docker() {
         // When no containers are running (or Docker is unavailable), both sections
         // should show their empty-state messages rather than a table.
-        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let runtime = crate::runtime::DockerRuntime::new();
         let output = format_status_output("test tip", &[], &runtime);
         // One or both sections will be empty in the test environment.
         // At minimum, both section headers must be present.
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn project_and_agent_for_unknown_container_returns_unknown() {
         // A container that does not exist has no workspace mount → "unknown".
-        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let runtime = crate::runtime::DockerRuntime::new();
         let (project, agent) = project_and_agent_for("amux-test-nonexistent-xyz-99999", &runtime);
         assert_eq!(project, "unknown");
         assert_eq!(agent, "unknown");
@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn stats_for_nonexistent_container_returns_dashes() {
-        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let runtime = crate::runtime::DockerRuntime::new();
         let (cpu, mem) = stats_for("amux-test-nonexistent-xyz-99999", &runtime);
         assert_eq!(cpu, "--");
         assert_eq!(mem, "--");

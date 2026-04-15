@@ -17,7 +17,7 @@ use crate::commands::specs::{amend_agent_entrypoint, interview_agent_entrypoint}
 use crate::commands::{claws, init, new, ready, status};
 use crate::commands::ready::{ReadyOptions, print_interactive_notice, print_summary};
 use crate::config::{effective_env_passthrough, effective_scrollback_lines, load_repo_config};
-use crate::runtime::docker as docker;
+use crate::runtime::{generate_container_name, ContainerStats};
 use crate::tui::input::Action;
 use crate::tui::pty::{spawn_text_command, PtySession};
 use crate::tui::render::{calculate_container_inner_size, workflow_strip_height};
@@ -244,6 +244,7 @@ where
         // Check if a ready workflow phase just completed and continue to the next phase.
         if was_running && now_done {
             check_ready_continuation(&mut app).await;
+            check_init_continuation(&mut app).await;
             check_claws_continuation(&mut app).await;
             check_workflow_step_completion(&mut app).await;
         }
@@ -527,6 +528,59 @@ async fn handle_action(app: &mut App, action: Action) {
                 }
             }
             app.active_tab_mut().clear_terminal_selection();
+        }
+
+        Action::ReadyLegacyMigrate => {
+            // Back up Dockerfile.dev and replace with the minimal project base template.
+            let tab_cwd = app.active_tab().cwd.clone();
+            if let Some(git_root) = find_git_root_from(&tab_cwd) {
+                let dockerfile_path = git_root.join("Dockerfile.dev");
+                let backup_path = git_root.join("Dockerfile.dev.bak");
+                if let Err(e) = std::fs::copy(&dockerfile_path, &backup_path) {
+                    app.active_tab_mut().push_output(format!("Error backing up Dockerfile.dev: {}", e));
+                    return;
+                }
+                app.active_tab_mut().push_output(format!("Backed up Dockerfile.dev to {}.", backup_path.display()));
+                let content = crate::commands::init::project_dockerfile_embedded();
+                if let Err(e) = std::fs::write(&dockerfile_path, content) {
+                    app.active_tab_mut().push_output(format!("Error writing new Dockerfile.dev: {}", e));
+                    return;
+                }
+                app.active_tab_mut().push_output("Dockerfile.dev recreated with project base template.".to_string());
+            }
+            // Force refresh so the audit runs and restores project dependencies.
+            app.active_tab_mut().ready_opts.refresh = true;
+            app.active_tab_mut().ready_opts.legacy_mode = false;
+            // Also update the pending command flags so ready_opts stays consistent.
+            if let PendingCommand::Ready { ref mut refresh, .. } = app.active_tab_mut().pending_command {
+                *refresh = true;
+            }
+            show_pre_command_dialogs(app).await;
+        }
+
+        Action::ReadyLegacyKeep => {
+            app.active_tab_mut().push_output("Keeping existing layout. Using project image for this session.".to_string());
+            app.active_tab_mut().push_output("DEPRECATION WARNING: Run `amux ready` again to migrate to the modular layout.".to_string());
+            app.active_tab_mut().ready_opts.legacy_mode = true;
+            show_pre_command_dialogs(app).await;
+        }
+
+        Action::InitReplaceAspecAccepted { agent } => {
+            // User confirmed replacing aspec; proceed to the audit question.
+            app.active_tab_mut().dialog = Dialog::InitAuditConfirm { agent, aspec: true, replace_aspec: true };
+        }
+
+        Action::InitReplaceAspecDeclined { agent } => {
+            // User declined replacing aspec; still ask about the audit.
+            app.active_tab_mut().dialog = Dialog::InitAuditConfirm { agent, aspec: true, replace_aspec: false };
+        }
+
+        Action::InitAuditAccepted { agent, aspec, replace_aspec } => {
+            launch_init(app, agent, aspec, replace_aspec, true).await;
+        }
+
+        Action::InitAuditDeclined { agent, aspec, replace_aspec } => {
+            launch_init(app, agent, aspec, replace_aspec, false).await;
         }
     }
 }
@@ -844,16 +898,20 @@ async fn execute_command(app: &mut App, cmd: &str) {
     match parts[0] {
         "init" => {
             let agent = parse_agent_flag(&parts).unwrap_or(Agent::Claude);
-            app.active_tab_mut().start_command(cmd.to_string());
-            let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
-            app.active_tab_mut().exit_rx = Some(exit_rx);
-            let tx = app.active_tab().output_tx.clone();
             let aspec = parts.iter().any(|p| *p == "--aspec");
+
+            // If --aspec and the aspec folder already exists, ask whether to replace it first.
             let tab_cwd = app.active_tab().cwd.clone();
-            let runtime = app.runtime.clone();
-            spawn_text_command(tx, exit_tx, move |sink| async move {
-                init::run_with_sink(agent, aspec, false, false, &sink, &tab_cwd, runtime).await
-            });
+            if aspec {
+                if let Some(git_root) = find_git_root_from(&tab_cwd) {
+                    if git_root.join("aspec").exists() {
+                        app.active_tab_mut().dialog = Dialog::InitReplaceAspec { agent };
+                        return;
+                    }
+                }
+            }
+            // Show audit confirmation dialog (ask whether to run the agent audit after init).
+            app.active_tab_mut().dialog = Dialog::InitAuditConfirm { agent, aspec, replace_aspec: false };
         }
 
         "ready" => {
@@ -862,6 +920,22 @@ async fn execute_command(app: &mut App, cmd: &str) {
             let effective_build = if refresh { false } else { build };
             app.active_tab_mut().pending_command = PendingCommand::Ready { refresh, build: effective_build, no_cache, non_interactive, allow_docker };
             app.active_tab_mut().ready_opts = ReadyOptions { refresh, build: effective_build, no_cache, non_interactive, allow_docker, auto_create_dockerfile: true, legacy_mode: false };
+
+            // Detect legacy layout: Dockerfile.dev exists but .amux/Dockerfile.{agent} does not.
+            // Show the migration dialog before proceeding to allow the user to migrate.
+            let tab_cwd = app.active_tab().cwd.clone();
+            if let Some(git_root) = find_git_root_from(&tab_cwd) {
+                let config = load_repo_config(&git_root).unwrap_or_default();
+                let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
+                let dockerfile_path = git_root.join("Dockerfile.dev");
+                let agent_df_path = git_root.join(".amux").join(format!("Dockerfile.{}", agent_name));
+                let is_known_agent = crate::cli::KNOWN_AGENT_NAMES.contains(&agent_name.as_str());
+                if dockerfile_path.exists() && is_known_agent && !agent_df_path.exists() {
+                    app.active_tab_mut().dialog = Dialog::ReadyLegacyMigration { agent_name };
+                    return;
+                }
+            }
+
             show_pre_command_dialogs(app).await;
         }
 
@@ -1060,8 +1134,11 @@ async fn show_pre_command_dialogs(app: &mut App) {
 /// Resume the pending command after all dialogs have been answered.
 async fn launch_pending_command(app: &mut App) {
     match app.active_tab().pending_command.clone() {
-        PendingCommand::Ready { refresh, build, no_cache, non_interactive, allow_docker } => {
-            app.active_tab_mut().ready_opts = ReadyOptions { refresh, build, no_cache, non_interactive, allow_docker, auto_create_dockerfile: true, legacy_mode: false };
+        PendingCommand::Ready { .. } => {
+            // ready_opts was set in execute_command and may have been updated by dialogs
+            // (e.g. ReadyLegacyMigration sets legacy_mode). Preserve those values and
+            // only ensure auto_create_dockerfile is true for TUI mode.
+            app.active_tab_mut().ready_opts.auto_create_dockerfile = true;
             launch_ready(app).await;
         }
         PendingCommand::Implement { work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto } => {
@@ -1115,9 +1192,12 @@ async fn launch_ready(app: &mut App) {
     // Prepare host settings (sanitized config files in a temp dir).
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     {
-        let dockerfile = git_root.join("Dockerfile.dev");
+        // Use the agent dockerfile for apply_dockerfile_user in the new modular layout
+        // (USER amux lives there), falling back to Dockerfile.dev for legacy layout.
+        let (_, agent_dockerfile_path, _) =
+            crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
         let msg = app.active_tab_mut().host_settings.as_mut()
-            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
         if let Some(msg) = msg {
             app.active_tab_mut().push_output(msg);
         }
@@ -1233,12 +1313,14 @@ fn launch_ready_audit(app: &mut App) {
 
     // If --allow-docker, check the socket and print a warning before launching.
     if allow_docker {
-        match docker::check_docker_socket() {
+        let runtime_name = app.runtime.name();
+        match app.runtime.check_socket() {
             Ok(socket_path) => {
-                app.active_tab_mut().push_output(format!("Docker socket: {} (found)", socket_path.display()));
+                app.active_tab_mut().push_output(format!("{} socket: {} (found)", runtime_name, socket_path.display()));
                 app.active_tab_mut().push_output(format!(
-                    "WARNING: --allow-docker: mounting host Docker socket into audit container ({}:{}). \
+                    "WARNING: --allow-docker: mounting host {} socket into audit container ({}:{}). \
                      This grants the agent elevated host access.",
+                    runtime_name,
                     socket_path.display(),
                     socket_path.display()
                 ));
@@ -1251,12 +1333,16 @@ fn launch_ready_audit(app: &mut App) {
         }
     }
 
-    let container_name = docker::generate_container_name();
+    let container_name = generate_container_name();
     let entrypoint = ready::audit_entrypoint(&ctx.agent_name);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
+    // Use the agent image (which has the agent tools installed) for the audit container.
+    // Fall back to the project base image when in legacy mode (agent_image_tag is None).
+    let audit_image_tag = ctx.agent_image_tag.as_deref().unwrap_or(&ctx.image_tag).to_string();
+
     let pty_args = app.runtime.build_run_args_pty(
-        &ctx.image_tag,
+        &audit_image_tag,
         &ctx.mount_path,
         &entrypoint_refs,
         &ctx.env_vars,
@@ -1316,12 +1402,14 @@ fn launch_ready_audit_captured(app: &mut App) {
 
     // If --allow-docker, check the socket and print a warning before launching.
     if allow_docker {
-        match docker::check_docker_socket() {
+        let runtime_name = app.runtime.name();
+        match app.runtime.check_socket() {
             Ok(socket_path) => {
-                app.active_tab_mut().push_output(format!("Docker socket: {} (found)", socket_path.display()));
+                app.active_tab_mut().push_output(format!("{} socket: {} (found)", runtime_name, socket_path.display()));
                 app.active_tab_mut().push_output(format!(
-                    "WARNING: --allow-docker: mounting host Docker socket into audit container ({}:{}). \
+                    "WARNING: --allow-docker: mounting host {} socket into audit container ({}:{}). \
                      This grants the agent elevated host access.",
+                    runtime_name,
                     socket_path.display(),
                     socket_path.display()
                 ));
@@ -1344,12 +1432,16 @@ fn launch_ready_audit_captured(app: &mut App) {
     app.active_tab_mut().exit_rx = Some(exit_rx);
     let tx = app.active_tab().output_tx.clone();
 
+    // Use the agent image (which has the agent tools installed) for the audit container.
+    // Fall back to the project base image when in legacy mode (agent_image_tag is None).
+    let audit_image_tag = ctx.agent_image_tag.as_deref().unwrap_or(&ctx.image_tag).to_string();
+
     let audit_runtime = app.runtime.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
         let entrypoint = ready::audit_entrypoint_non_interactive(&ctx.agent_name);
         let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
         let (_cmd, output) = audit_runtime.run_container_captured(
-            &ctx.image_tag,
+            &audit_image_tag,
             &ctx.mount_path,
             &entrypoint_refs,
             &ctx.env_vars,
@@ -1396,6 +1488,79 @@ fn launch_ready_post_audit(app: &mut App) {
         sink.println("amux is ready.");
         Ok(())
     });
+}
+
+/// Launch the `init` command as a text task.
+///
+/// If `run_audit` is true, sets `pending_init_run_audit` so that a `ready --refresh`
+/// audit is automatically triggered after init completes.
+async fn launch_init(app: &mut App, agent: Agent, aspec: bool, replace_aspec: bool, run_audit: bool) {
+    let tab_cwd = app.active_tab().cwd.clone();
+    let runtime = app.runtime.clone();
+
+    if run_audit {
+        app.active_tab_mut().pending_init_run_audit = true;
+    }
+
+    app.active_tab_mut().start_command("init".to_string());
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+    app.active_tab_mut().exit_rx = Some(exit_rx);
+    let tx = app.active_tab().output_tx.clone();
+    spawn_text_command(tx, exit_tx, move |sink| async move {
+        init::run_with_sink(agent, aspec, replace_aspec, false, &sink, &tab_cwd, runtime).await
+    });
+}
+
+/// After a TUI `init` completes, if `pending_init_run_audit` is set, automatically
+/// trigger a `ready --refresh` flow to run the agent audit.
+///
+/// This matches the CLI behavior where `init` offers to run the agent audit inline.
+async fn check_init_continuation(app: &mut App) {
+    if !app.active_tab().pending_init_run_audit {
+        return;
+    }
+    // Always clear the flag — only trigger audit on success.
+    app.active_tab_mut().pending_init_run_audit = false;
+
+    if !matches!(app.active_tab().phase, crate::tui::state::ExecutionPhase::Done { .. }) {
+        return;
+    }
+
+    // Set up a ready --refresh flow to run the audit agent.
+    app.active_tab_mut().push_output(String::new());
+    app.active_tab_mut().push_output("Running agent audit (amux ready --refresh) to configure Dockerfile.dev for your project...".to_string());
+
+    app.active_tab_mut().pending_command = PendingCommand::Ready {
+        refresh: true,
+        build: false,
+        no_cache: false,
+        non_interactive: false,
+        allow_docker: false,
+    };
+    app.active_tab_mut().ready_opts = ReadyOptions {
+        refresh: true,
+        build: false,
+        no_cache: false,
+        non_interactive: false,
+        allow_docker: false,
+        auto_create_dockerfile: true,
+        legacy_mode: false,
+    };
+
+    // init just wrote the agent dockerfile, so legacy detection is not needed.
+    // Go directly to the mount-scope check.
+    let tab_cwd = app.active_tab().cwd.clone();
+    if let Some(git_root) = find_git_root_from(&tab_cwd) {
+        if tab_cwd != git_root {
+            app.active_tab_mut().dialog = Dialog::MountScope {
+                git_root,
+                cwd: tab_cwd,
+            };
+        } else {
+            app.active_tab_mut().pending_mount_path = Some(git_root);
+            launch_ready(app).await;
+        }
+    }
 }
 
 /// Actually spawn the docker container for `implement` via PTY.
@@ -1531,12 +1696,29 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         }
     }
 
+    // Resolve which image and dockerfile to use (new modular layout vs legacy).
+    let (image_tag, agent_dockerfile_path, is_legacy_layout) =
+        crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
+    if is_legacy_layout {
+        app.active_tab_mut().push_output(format!(
+            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
+             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
+            agent_name
+        ));
+    } else if !app.runtime.image_exists(&image_tag) {
+        app.active_tab_mut().push_output(format!(
+            "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
+        ));
+        app.active_tab_mut().finish_command(1);
+        return;
+    }
+
     // Prepare host settings (sanitized config files in a temp dir).
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     {
-        let dockerfile = git_root.join("Dockerfile.dev");
+        // Use the agent dockerfile for USER detection in the new layout, Dockerfile.dev for legacy.
         let msg = app.active_tab_mut().host_settings.as_mut()
-            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
         if let Some(msg) = msg {
             app.active_tab_mut().push_output(msg);
         }
@@ -1635,10 +1817,9 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
     let entrypoint = effective_entrypoint;
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    let image_tag = docker::project_image_tag(&git_root);
-
+    // image_tag was resolved above via resolve_agent_image_and_dockerfile.
     // Generate a container name for stats polling.
-    let container_name = docker::generate_container_name();
+    let container_name = generate_container_name();
 
     // Show the full CLI command in the execution window (with masked env values).
     let display_args = if non_interactive {
@@ -1653,12 +1834,14 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
 
     // If --allow-docker, check the socket and print a warning before launching.
     if allow_docker {
-        match docker::check_docker_socket() {
+        let runtime_name = app.runtime.name();
+        match app.runtime.check_socket() {
             Ok(socket_path) => {
-                app.active_tab_mut().push_output(format!("Docker socket: {} (found)", socket_path.display()));
+                app.active_tab_mut().push_output(format!("{} socket: {} (found)", runtime_name, socket_path.display()));
                 app.active_tab_mut().push_output(format!(
-                    "WARNING: --allow-docker: mounting host Docker socket into container ({}:{}). \
+                    "WARNING: --allow-docker: mounting host {} socket into container ({}:{}). \
                      This grants the agent elevated host access.",
+                    runtime_name,
                     socket_path.display(),
                     socket_path.display()
                 ));
@@ -1795,12 +1978,29 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
         }
     }
 
+    // Resolve which image and dockerfile to use (new modular layout vs legacy).
+    let (image_tag, agent_dockerfile_path, is_legacy_layout) =
+        crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
+    if is_legacy_layout {
+        app.active_tab_mut().push_output(format!(
+            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
+             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
+            agent_name
+        ));
+    } else if !app.runtime.image_exists(&image_tag) {
+        app.active_tab_mut().push_output(format!(
+            "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
+        ));
+        app.active_tab_mut().finish_command(1);
+        return;
+    }
+
     // Prepare host settings (sanitized config files in a temp dir).
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     {
-        let dockerfile = git_root.join("Dockerfile.dev");
+        // Use the agent dockerfile for USER detection in the new layout, Dockerfile.dev for legacy.
         let msg = app.active_tab_mut().host_settings.as_mut()
-            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
         if let Some(msg) = msg {
             app.active_tab_mut().push_output(msg);
         }
@@ -1829,10 +2029,9 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
 
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    let image_tag = docker::project_image_tag(&git_root);
-
+    // image_tag was resolved above via resolve_agent_image_and_dockerfile.
     // Generate a container name for stats polling.
-    let container_name = docker::generate_container_name();
+    let container_name = generate_container_name();
 
     // Show the full CLI command in the execution window (with masked env values).
     let display_args = if non_interactive {
@@ -1848,12 +2047,14 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
 
     // If --allow-docker, check the socket and print a warning before launching.
     if allow_docker {
-        match docker::check_docker_socket() {
+        let runtime_name = app.runtime.name();
+        match app.runtime.check_socket() {
             Ok(socket_path) => {
-                app.active_tab_mut().push_output(format!("Docker socket: {} (found)", socket_path.display()));
+                app.active_tab_mut().push_output(format!("{} socket: {} (found)", runtime_name, socket_path.display()));
                 app.active_tab_mut().push_output(format!(
-                    "WARNING: --allow-docker: mounting host Docker socket into container ({}:{}). \
+                    "WARNING: --allow-docker: mounting host {} socket into container ({}:{}). \
                      This grants the agent elevated host access.",
+                    runtime_name,
                     socket_path.display(),
                     socket_path.display()
                 ));
@@ -1941,7 +2142,7 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
 fn spawn_stats_poller(
     container_name: String,
     runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
-) -> tokio::sync::mpsc::UnboundedReceiver<docker::ContainerStats> {
+) -> tokio::sync::mpsc::UnboundedReceiver<ContainerStats> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -2739,11 +2940,27 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
     let credentials = agent_keychain_credentials(&agent_name);
     let env_vars = credentials.env_vars;
 
+    // Resolve which image and dockerfile to use (new modular layout vs legacy).
+    let (image_tag, agent_dockerfile_path, is_legacy_layout) =
+        crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
+    if is_legacy_layout {
+        app.active_tab_mut().push_output(format!(
+            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
+             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
+            agent_name
+        ));
+    } else if !app.runtime.image_exists(&image_tag) {
+        app.active_tab_mut().push_output(format!(
+            "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
+        ));
+        app.active_tab_mut().finish_command(1);
+        return;
+    }
+
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     {
-        let dockerfile = git_root.join("Dockerfile.dev");
         let msg = app.active_tab_mut().host_settings.as_mut()
-            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
         if let Some(msg) = msg {
             app.active_tab_mut().push_output(msg);
         }
@@ -2752,8 +2969,7 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
     let entrypoint = amend_agent_entrypoint(&agent_name, work_item);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    let image_tag = docker::project_image_tag(&git_root);
-    let container_name = docker::generate_container_name();
+    let container_name = generate_container_name();
 
     let display_args = app.runtime.build_run_args_pty_display(
         &image_tag,
@@ -2772,9 +2988,10 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
     app.active_tab_mut().start_command(command_display);
 
     if allow_docker {
-        match docker::check_docker_socket() {
+        let runtime_name = app.runtime.name();
+        match app.runtime.check_socket() {
             Ok(socket_path) => {
-                app.active_tab_mut().push_output(format!("Docker socket: {} (found)", socket_path.display()));
+                app.active_tab_mut().push_output(format!("{} socket: {} (found)", runtime_name, socket_path.display()));
             }
             Err(e) => {
                 app.active_tab_mut().push_output(format!("Error: {}", e));
@@ -2855,11 +3072,27 @@ async fn launch_specs_interview_agent(
     let credentials = agent_keychain_credentials(&agent_name);
     let env_vars = credentials.env_vars;
 
+    // Resolve which image and dockerfile to use (new modular layout vs legacy).
+    let (image_tag, agent_dockerfile_path, is_legacy_layout) =
+        crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
+    if is_legacy_layout {
+        app.active_tab_mut().push_output(format!(
+            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
+             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
+            agent_name
+        ));
+    } else if !app.runtime.image_exists(&image_tag) {
+        app.active_tab_mut().push_output(format!(
+            "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
+        ));
+        app.active_tab_mut().finish_command(1);
+        return;
+    }
+
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     {
-        let dockerfile = git_root.join("Dockerfile.dev");
         let msg = app.active_tab_mut().host_settings.as_mut()
-            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
         if let Some(msg) = msg {
             app.active_tab_mut().push_output(msg);
         }
@@ -2868,8 +3101,7 @@ async fn launch_specs_interview_agent(
     let entrypoint = interview_agent_entrypoint(&agent_name, work_item_number, &kind, &title, &summary);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    let image_tag = docker::project_image_tag(&git_root);
-    let container_name = docker::generate_container_name();
+    let container_name = generate_container_name();
 
     let display_args = app.runtime.build_run_args_pty_display(
         &image_tag,
@@ -2888,9 +3120,10 @@ async fn launch_specs_interview_agent(
     app.active_tab_mut().start_command(command_display);
 
     if allow_docker {
-        match docker::check_docker_socket() {
+        let runtime_name = app.runtime.name();
+        match app.runtime.check_socket() {
             Ok(socket_path) => {
-                app.active_tab_mut().push_output(format!("Docker socket: {} (found)", socket_path.display()));
+                app.active_tab_mut().push_output(format!("{} socket: {} (found)", runtime_name, socket_path.display()));
             }
             Err(e) => {
                 app.active_tab_mut().push_output(format!("Error: {}", e));
@@ -3236,8 +3469,24 @@ async fn launch_next_workflow_step(app: &mut App) {
     }
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    let image_tag = docker::project_image_tag(&git_root);
-    let container_name = docker::generate_container_name();
+    // Resolve which image and dockerfile to use (new modular layout vs legacy).
+    let (image_tag, agent_dockerfile_path, is_legacy_layout) =
+        crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
+    if is_legacy_layout {
+        app.active_tab_mut().push_output(format!(
+            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
+             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
+            agent_name
+        ));
+    } else if !app.runtime.image_exists(&image_tag) {
+        app.active_tab_mut().push_output(format!(
+            "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
+        ));
+        app.active_tab_mut().finish_command(1);
+        return;
+    }
+
+    let container_name = generate_container_name();
 
     if app.active_tab().host_settings.is_none() {
         app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
@@ -3246,9 +3495,8 @@ async fn launch_next_workflow_step(app: &mut App) {
                 let _ = s.apply_yolo_settings();
             }
         }
-        let dockerfile = git_root.join("Dockerfile.dev");
         let msg = app.active_tab_mut().host_settings.as_mut()
-            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &dockerfile));
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
         if let Some(msg) = msg {
             app.active_tab_mut().push_output(msg);
         }

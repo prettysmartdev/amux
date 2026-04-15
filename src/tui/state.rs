@@ -2,7 +2,7 @@ use crate::commands::claws::ClawsAuditCtx;
 use crate::commands::ready::{ReadyContext, ReadyOptions, ReadySummary};
 use crate::commands::status::TuiTabInfo;
 use crate::config::{GlobalConfig, RepoConfig};
-use crate::runtime::docker as docker;
+use crate::runtime::{ContainerStats, HostSettings, parse_cpu_percent, parse_memory_mb};
 use crate::tui::pty::PtySession;
 use crate::workflow::{StepStatus, WorkflowState};
 use ratatui::layout::Rect;
@@ -198,6 +198,22 @@ pub enum Dialog {
     },
     /// Full-screen config view/edit dialog (triggered by `config show` in the TUI command input).
     ConfigShow(ConfigDialogState),
+    /// Ready: legacy single-file Dockerfile.dev layout detected — ask whether to migrate
+    /// to the modular layout (separate project + agent Dockerfiles).
+    ReadyLegacyMigration {
+        agent_name: String,
+    },
+    /// Init: ask whether to run the agent audit container after creating project files.
+    InitAuditConfirm {
+        agent: crate::cli::Agent,
+        aspec: bool,
+        replace_aspec: bool,
+    },
+    /// Init: `--aspec` was passed and the aspec folder already exists —
+    /// ask whether to replace it with fresh templates.
+    InitReplaceAspec {
+        agent: crate::cli::Agent,
+    },
 }
 
 /// Tracks which command is waiting for dialog answers (mount scope, auth).
@@ -284,7 +300,7 @@ pub struct ContainerInfo {
     pub container_name: String,
     pub agent_display_name: String,
     pub start_time: Instant,
-    pub latest_stats: Option<docker::ContainerStats>,
+    pub latest_stats: Option<ContainerStats>,
     /// History of (cpu%, memory_mb) samples for averaging.
     pub stats_history: Vec<(f64, f64)>,
 }
@@ -415,11 +431,11 @@ pub struct TabState {
     /// Summary of the last container session (shown after container exits).
     pub last_container_summary: Option<LastContainerSummary>,
     /// Receives Docker stats from the background polling task.
-    pub stats_rx: Option<UnboundedReceiver<docker::ContainerStats>>,
+    pub stats_rx: Option<UnboundedReceiver<ContainerStats>>,
 
     /// Host settings mounted into the container (sanitized config files in a temp dir).
     /// Held here so the temp dir lives as long as the container runs; dropped on finish.
-    pub host_settings: Option<docker::HostSettings>,
+    pub host_settings: Option<HostSettings>,
 
     /// Number of scrollback lines for the vt100 parser. Loaded from config before
     /// `start_container` is called; defaults to `crate::config::DEFAULT_SCROLLBACK_LINES`.
@@ -546,6 +562,10 @@ pub struct TabState {
     /// detection while the user is actively engaged with the active tab.
     pub last_user_activity_time: Option<Instant>,
 
+    /// Set after a TUI `init` command if the user requested the agent audit.
+    /// Checked after the init text command completes to trigger a `ready --refresh` flow.
+    pub pending_init_run_audit: bool,
+
     /// Single authoritative timestamp for the yolo countdown timer.
     /// Set by `tick_all()` when a tab (active or background) first becomes stuck in yolo
     /// mode. Cleared when the countdown expires, when new output arrives, or when the
@@ -628,6 +648,7 @@ impl TabState {
             yolo_countdown_expired: false,
             last_user_activity_time: None,
             yolo_countdown_started_at: None,
+            pending_init_run_audit: false,
         }
     }
 
@@ -1259,8 +1280,8 @@ impl TabState {
         if let Some(ref mut rx) = self.stats_rx {
             while let Ok(stats) = rx.try_recv() {
                 if let Some(ref mut info) = self.container_info {
-                    let cpu = docker::parse_cpu_percent(&stats.cpu_percent);
-                    let mem = docker::parse_memory_mb(&stats.memory);
+                    let cpu = parse_cpu_percent(&stats.cpu_percent);
+                    let mem = parse_memory_mb(&stats.memory);
                     info.stats_history.push((cpu, mem));
                     info.latest_stats = Some(stats);
                 }
@@ -1289,7 +1310,7 @@ impl App {
     pub fn new(cwd: std::path::PathBuf) -> Self {
         Self::new_with_runtime(
             cwd,
-            Arc::new(crate::runtime::docker::DockerRuntime::new()),
+            Arc::new(crate::runtime::DockerRuntime::new()),
         )
     }
 

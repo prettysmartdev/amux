@@ -220,7 +220,7 @@ pub enum ClawsAction {
     Chat,
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, PartialEq, ValueEnum)]
 pub enum Agent {
     Claude,
     Codex,

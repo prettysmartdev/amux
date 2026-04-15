@@ -7,7 +7,7 @@ use crate::commands::new::{is_vscode_terminal, open_in_vscode};
 use crate::commands::new::{create_file_return_number, prompt_kind, prompt_title, WorkItemKind};
 use crate::commands::output::OutputSink;
 use crate::config::load_repo_config;
-use crate::runtime::docker as docker;
+use crate::runtime::HostSettings;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -253,7 +253,7 @@ pub async fn run_with_sink_amend(
     mount_override: Option<PathBuf>,
     env_vars: Vec<(String, String)>,
     non_interactive: bool,
-    host_settings: Option<&docker::HostSettings>,
+    host_settings: Option<&HostSettings>,
     allow_docker: bool,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {

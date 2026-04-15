@@ -4,7 +4,7 @@ use crate::commands::download;
 use crate::commands::output::OutputSink;
 use crate::commands::ready::{audit_entrypoint, print_interactive_notice, StepStatus};
 use crate::config::{load_repo_config, save_repo_config};
-use crate::runtime::docker as docker;
+use crate::runtime::{format_build_cmd, project_image_tag};
 use crate::runtime::AgentRuntime;
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -157,23 +157,23 @@ pub async fn run_with_sink(
         summary.dockerfile = StepStatus::Ok("already exists".into());
     }
     // Write .amux/Dockerfile.{agent} if missing (never overwrites existing).
-    write_agent_dockerfile(&git_root, &agent, out).await?;
+    let agent_dockerfile_was_new = write_agent_dockerfile(&git_root, &agent, out).await?;
 
     // 4. Optionally run the agent audit container, then build both images.
     //    Build any time a new Dockerfile was created OR the audit ran.
     if run_audit {
-        // Need Docker daemon running to build and run the containers.
-        out.print("Checking Docker daemon... ");
-        if !docker::is_daemon_running() {
+        // Need the container runtime running to build and run the containers.
+        out.print(format!("Checking {} runtime... ", runtime.name()));
+        if !runtime.is_available() {
             out.println("FAILED");
-            out.println("Docker daemon is not running. Skipping audit and image build.");
-            summary.audit = StepStatus::Failed("Docker not running".into());
-            summary.image_build = StepStatus::Failed("Docker not running".into());
+            out.println(format!("{} runtime is not running. Skipping audit and image build.", runtime.name()));
+            summary.audit = StepStatus::Failed(format!("{} not running", runtime.name()));
+            summary.image_build = StepStatus::Failed(format!("{} not running", runtime.name()));
         } else {
             out.println("OK");
 
-            let image_tag = docker::project_image_tag(&git_root);
-            let agent_image_tag = docker::agent_image_tag(&git_root, agent.as_str());
+            let image_tag = crate::runtime::project_image_tag(&git_root);
+            let agent_image_tag = crate::runtime::agent_image_tag(&git_root, agent.as_str());
             let dockerfile_str = git_root.join("Dockerfile.dev").to_str().unwrap().to_string();
             let agent_df_path = git_root.join(".amux").join(format!("Dockerfile.{}", agent.as_str()));
             let agent_df_str = agent_df_path.to_str().unwrap().to_string();
@@ -183,12 +183,23 @@ pub async fn run_with_sink(
             // Get credentials for the agent (needed to run the audit container).
             let credentials = resolve_auth(&git_root, agent.as_str())
                 .unwrap_or_default();
-            let env_vars = credentials.env_vars;
+            let mut env_vars = credentials.env_vars;
+            // Pick up additional env vars from envPassthrough config (e.g. CLAUDE_CODE_OAUTH_TOKEN
+            // on Linux where the macOS keychain is unavailable). Keychain values take precedence.
+            let passthrough_names = crate::config::effective_env_passthrough(&git_root);
+            for name in &passthrough_names {
+                if env_vars.iter().any(|(k, _)| k == name) {
+                    continue;
+                }
+                if let Ok(val) = std::env::var(name) {
+                    env_vars.push((name.clone(), val));
+                }
+            }
             let host_settings = crate::passthrough::passthrough_for_agent(agent.as_str()).prepare_host_settings();
 
             // Build the project base image first.
             out.println(format!("Building image {}...", image_tag));
-            let build_cmd = docker::format_build_cmd(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str);
+            let build_cmd = format_build_cmd(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str);
             out.println(format!("$ {}", build_cmd));
             let out_clone = out.clone();
             match runtime.build_image_streaming(
@@ -215,7 +226,7 @@ pub async fn run_with_sink(
 
             // Build the agent image on top of the project base.
             out.println(format!("Building agent image {}...", agent_image_tag));
-            let agent_build_cmd = docker::format_build_cmd(runtime.cli_binary(), &agent_image_tag, &agent_df_str, &git_root_str);
+            let agent_build_cmd = format_build_cmd(runtime.cli_binary(), &agent_image_tag, &agent_df_str, &git_root_str);
             out.println(format!("$ {}", agent_build_cmd));
             let out_clone_a = out.clone();
             match runtime.build_image_streaming(
@@ -244,12 +255,31 @@ pub async fn run_with_sink(
             print_interactive_notice(out, agent.as_str());
             let entrypoint = audit_entrypoint(agent.as_str());
             let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+
+            // Detect the last USER directive in the agent dockerfile and update settings mounts
+            // to target the correct home directory inside the container (e.g. /home/amux instead
+            // of the default /root). This mirrors what run_agent_with_sink does for chat/implement.
+            let modified_settings: Option<crate::runtime::HostSettings> =
+                host_settings.as_ref().and_then(|settings| {
+                    let mut new_settings = settings.clone_view();
+                    if let Some(msg) =
+                        crate::runtime::apply_dockerfile_user(&mut new_settings, &agent_df_path)
+                    {
+                        out.println(msg);
+                        Some(new_settings)
+                    } else {
+                        None
+                    }
+                });
+            let effective_settings: Option<&crate::runtime::HostSettings> =
+                modified_settings.as_ref().or(host_settings.as_ref());
+
             match runtime.run_container(
                 &agent_image_tag,
                 &mount_path,
                 &entrypoint_refs,
                 &env_vars,
-                host_settings.as_ref(),
+                effective_settings,
                 false,
                 None,
                 None,
@@ -309,17 +339,17 @@ pub async fn run_with_sink(
                 }
             }
         }
-    } else if dockerfile_was_new {
-        // New Dockerfile.dev was created but user declined audit — build both images.
-        out.print("Checking Docker daemon... ");
-        if !docker::is_daemon_running() {
+    } else if dockerfile_was_new || agent_dockerfile_was_new {
+        // A new Dockerfile was created (project or agent) but user declined audit — build both images.
+        out.print(format!("Checking {} runtime... ", runtime.name()));
+        if !runtime.is_available() {
             out.println("not running (skipping image build)");
             summary.audit = StepStatus::Skipped("declined".into());
-            summary.image_build = StepStatus::Skipped("Docker not running".into());
+            summary.image_build = StepStatus::Skipped(format!("{} not running", runtime.name()));
         } else {
             out.println("OK");
-            let image_tag = docker::project_image_tag(&git_root);
-            let agent_image_tag = docker::agent_image_tag(&git_root, agent.as_str());
+            let image_tag = crate::runtime::project_image_tag(&git_root);
+            let agent_image_tag = crate::runtime::agent_image_tag(&git_root, agent.as_str());
             let dockerfile_str =
                 git_root.join("Dockerfile.dev").to_str().unwrap().to_string();
             let agent_df_path = git_root.join(".amux").join(format!("Dockerfile.{}", agent.as_str()));
@@ -329,7 +359,7 @@ pub async fn run_with_sink(
             // Build project base image.
             out.println(format!("Building image {}...", image_tag));
             let build_cmd =
-                docker::format_build_cmd(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str);
+                format_build_cmd(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str);
             out.println(format!("$ {}", build_cmd));
             let out_clone = out.clone();
             let base_ok = match runtime.build_image_streaming(
@@ -355,7 +385,7 @@ pub async fn run_with_sink(
                 // Build agent image on top of the project base.
                 out.println(format!("Building agent image {}...", agent_image_tag));
                 let agent_build_cmd =
-                    docker::format_build_cmd(runtime.cli_binary(), &agent_image_tag, &agent_df_str, &git_root_str);
+                    format_build_cmd(runtime.cli_binary(), &agent_image_tag, &agent_df_str, &git_root_str);
                 out.println(format!("$ {}", agent_build_cmd));
                 let out_clone_a = out.clone();
                 match runtime.build_image_streaming(
@@ -613,7 +643,7 @@ pub async fn write_agent_dockerfile(
         return Ok(false);
     }
 
-    let base_tag = crate::runtime::docker::project_image_tag(git_root);
+    let base_tag = project_image_tag(git_root);
     let template = download_or_fallback_agent_dockerfile(agent, out).await;
     let content = template.replace("{{AMUX_BASE_IMAGE}}", &base_tag);
 
@@ -696,7 +726,7 @@ mod tests {
         // We don't run the real init (it would write files) but we verify the function
         // signature and that it calls the sink. Run from within the project's git root.
         let cwd = std::env::current_dir().unwrap();
-        let runtime = std::sync::Arc::new(crate::runtime::docker::DockerRuntime::new());
+        let runtime = std::sync::Arc::new(crate::runtime::DockerRuntime::new());
         let result = run_with_sink(Agent::Claude, false, false, false, &sink, &cwd, runtime).await;
         // May succeed or fail depending on environment; we just verify sink received calls.
         drop(result);
@@ -843,7 +873,7 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let sink = OutputSink::Channel(tx);
         let cwd = std::env::current_dir().unwrap();
-        let runtime = std::sync::Arc::new(crate::runtime::docker::DockerRuntime::new());
+        let runtime = std::sync::Arc::new(crate::runtime::DockerRuntime::new());
         // aspec=false means the aspec folder download is skipped.
         let result = run_with_sink(Agent::Claude, false, false, false, &sink, &cwd, runtime).await;
         drop(result);
@@ -898,7 +928,7 @@ mod tests {
 
         let (tx, _rx) = unbounded_channel();
         let sink = OutputSink::Channel(tx);
-        let runtime = std::sync::Arc::new(crate::runtime::docker::DockerRuntime::new());
+        let runtime = std::sync::Arc::new(crate::runtime::DockerRuntime::new());
 
         // Re-run init — Channel sink → work items offer is skipped (supports_color = false).
         let _ = run_with_sink(Agent::Claude, false, false, false, &sink, root, runtime).await;
@@ -919,7 +949,7 @@ mod tests {
         // MockInput: "y" → accept offer, "my/items" → dir path, "" → no template.
         let (tx, mut rx) = unbounded_channel();
         let sink = OutputSink::mock_input(tx, vec!["y", "my/items", ""]);
-        let runtime = std::sync::Arc::new(crate::runtime::docker::DockerRuntime::new());
+        let runtime = std::sync::Arc::new(crate::runtime::DockerRuntime::new());
 
         let _ = run_with_sink(Agent::Claude, false, false, false, &sink, root, runtime).await;
 
@@ -962,7 +992,7 @@ mod tests {
         // if the offer fires it would panic popping an empty queue.
         let (tx, mut rx) = unbounded_channel();
         let sink = OutputSink::mock_input(tx, vec![] as Vec<String>);
-        let runtime = std::sync::Arc::new(crate::runtime::docker::DockerRuntime::new());
+        let runtime = std::sync::Arc::new(crate::runtime::DockerRuntime::new());
 
         let result =
             run_with_sink(Agent::Claude, false, false, false, &sink, root, runtime).await;
@@ -1062,7 +1092,7 @@ mod tests {
     fn agent_dockerfile_embedded_base_image_substitution_for_testproject() {
         use std::path::Path;
         let base_tag =
-            crate::runtime::docker::project_image_tag(Path::new("/repos/testproject"));
+            crate::runtime::project_image_tag(Path::new("/repos/testproject"));
         assert_eq!(base_tag, "amux-testproject:latest");
 
         let template = dockerfile_for_agent_embedded(&Agent::Claude);
@@ -1105,7 +1135,7 @@ mod tests {
     fn agent_dockerfile_embedded_substitution_replaces_placeholder() {
         use std::path::Path;
         let base_tag =
-            crate::runtime::docker::project_image_tag(Path::new("/work/myapp"));
+            crate::runtime::project_image_tag(Path::new("/work/myapp"));
         assert_eq!(base_tag, "amux-myapp:latest");
 
         for agent in &[

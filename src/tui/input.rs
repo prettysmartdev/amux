@@ -103,6 +103,18 @@ pub enum Action {
     WorktreePreCommitCommit { message: String },
     /// Copy the current terminal text selection to the system clipboard.
     CopyToClipboard,
+    /// Ready: user chose to migrate from legacy single-file to modular Dockerfile layout.
+    ReadyLegacyMigrate,
+    /// Ready: user chose to keep the legacy single-file Dockerfile layout.
+    ReadyLegacyKeep,
+    /// Init: user confirmed running the agent audit after init (with agent/aspec/replace_aspec state).
+    InitAuditAccepted { agent: crate::cli::Agent, aspec: bool, replace_aspec: bool },
+    /// Init: user declined the audit after init.
+    InitAuditDeclined { agent: crate::cli::Agent, aspec: bool, replace_aspec: bool },
+    /// Init: user confirmed replacing the existing aspec folder.
+    InitReplaceAspecAccepted { agent: crate::cli::Agent },
+    /// Init: user declined replacing the existing aspec folder.
+    InitReplaceAspecDeclined { agent: crate::cli::Agent },
 }
 
 /// Dispatch a key press to the correct handler based on application state.
@@ -197,6 +209,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         Dialog::ConfigShow(state) => {
             return handle_config_show(app.active_tab_mut(), key, state)
+        }
+        Dialog::ReadyLegacyMigration { agent_name } => {
+            return handle_ready_legacy_migration(app.active_tab_mut(), key, agent_name)
+        }
+        Dialog::InitAuditConfirm { agent, aspec, replace_aspec } => {
+            return handle_init_audit_confirm(app.active_tab_mut(), key, agent, aspec, replace_aspec)
+        }
+        Dialog::InitReplaceAspec { agent } => {
+            return handle_init_replace_aspec(app.active_tab_mut(), key, agent)
         }
         Dialog::None => {}
     }
@@ -1720,6 +1741,58 @@ fn constrain_col(state: &mut crate::tui::state::ConfigDialogState) {
         FieldScope::GlobalOnly => state.selected_col = 0,
         FieldScope::RepoOnly => state.selected_col = 1,
         FieldScope::Both => {} // keep current col
+    }
+}
+
+// ── Ready legacy-migration dialog ─────────────────────────────────────────────
+
+fn handle_ready_legacy_migration(tab: &mut TabState, key: KeyEvent, _agent_name: String) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('1') => {
+            tab.dialog = Dialog::None;
+            Action::ReadyLegacyMigrate
+        }
+        KeyCode::Char('n') | KeyCode::Char('2') | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::ReadyLegacyKeep
+        }
+        _ => Action::None,
+    }
+}
+
+// ── Init audit / replace-aspec dialogs ───────────────────────────────────────
+
+fn handle_init_audit_confirm(
+    tab: &mut TabState,
+    key: KeyEvent,
+    agent: crate::cli::Agent,
+    aspec: bool,
+    replace_aspec: bool,
+) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('1') => {
+            tab.dialog = Dialog::None;
+            Action::InitAuditAccepted { agent, aspec, replace_aspec }
+        }
+        KeyCode::Char('n') | KeyCode::Char('2') | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::InitAuditDeclined { agent, aspec, replace_aspec }
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_init_replace_aspec(tab: &mut TabState, key: KeyEvent, agent: crate::cli::Agent) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('1') => {
+            tab.dialog = Dialog::None;
+            Action::InitReplaceAspecAccepted { agent }
+        }
+        KeyCode::Char('n') | KeyCode::Char('2') | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::InitReplaceAspecDeclined { agent }
+        }
+        _ => Action::None,
     }
 }
 

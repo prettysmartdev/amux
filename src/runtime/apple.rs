@@ -149,6 +149,12 @@ impl AgentRuntime for AppleContainersRuntime {
             .unwrap_or(false)
     }
 
+    fn check_socket(&self) -> anyhow::Result<std::path::PathBuf> {
+        // Apple Containers uses the same Docker-compatible socket when --allow-docker
+        // is passed. Delegate to the shared docker socket path check.
+        crate::runtime::docker::check_docker_socket()
+    }
+
     fn build_image_streaming(
         &self,
         tag: &str,

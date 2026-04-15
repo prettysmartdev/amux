@@ -7,7 +7,7 @@ use crate::commands::init::{
 };
 use crate::commands::output::OutputSink;
 use crate::config::{load_repo_config, migrate_legacy_repo_config};
-use crate::runtime::docker as docker;
+use crate::runtime::{agent_image_tag, format_build_cmd, format_build_cmd_no_cache, project_image_tag};
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
@@ -286,8 +286,18 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
     let config = load_repo_config(&git_root)?;
     let agent_name = config.agent.as_deref().unwrap_or("claude");
     let credentials = resolve_auth(&git_root, agent_name)?;
-    let env_vars = credentials.env_vars.clone();
-    let host_settings = crate::passthrough::passthrough_for_agent(agent_name).prepare_host_settings();
+    let mut env_vars = credentials.env_vars.clone();
+    // Pick up additional env vars from envPassthrough config (e.g. CLAUDE_CODE_OAUTH_TOKEN
+    // on Linux where the macOS keychain is unavailable). Keychain values take precedence.
+    for name in &crate::config::effective_env_passthrough(&git_root) {
+        if env_vars.iter().any(|(k, _)| k == name) {
+            continue;
+        }
+        if let Ok(val) = std::env::var(name) {
+            env_vars.push((name.clone(), val));
+        }
+    }
+    let mut host_settings = crate::passthrough::passthrough_for_agent(agent_name).prepare_host_settings();
     let out = &OutputSink::Stdout;
 
     // Determine whether to auto-create Dockerfile.dev or prompt the user.
@@ -398,18 +408,34 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
     let ctx = run_pre_audit(out, mount_path, env_vars, &opts, &mut summary, &*runtime).await?;
 
     if opts.refresh {
+        // Apply the agent dockerfile USER directive so settings are mounted at the correct home
+        // directory inside the container. In the new modular layout, USER amux lives in
+        // .amux/Dockerfile.{agent}; in legacy mode, fall back to Dockerfile.dev.
+        {
+            let dockerfile_for_user = ctx.agent_dockerfile_str
+                .as_deref()
+                .map(std::path::Path::new)
+                .unwrap_or_else(|| std::path::Path::new(&ctx.dockerfile_str));
+            if let Some(settings) = host_settings.as_mut() {
+                if let Some(msg) = crate::runtime::apply_dockerfile_user(settings, dockerfile_for_user) {
+                    out.println(msg);
+                }
+            }
+        }
+
         if !opts.non_interactive {
             print_interactive_notice(out, &ctx.agent_name);
         }
 
         // If --allow-docker, check the socket and print a warning before launching.
         if opts.allow_docker {
-            let socket_path = docker::check_docker_socket()
-                .context("Cannot mount Docker socket for audit container")?;
-            out.println(format!("Docker socket: {} (found)", socket_path.display()));
+            let socket_path = runtime.check_socket()
+                .context("Cannot mount socket for audit container")?;
+            out.println(format!("{} socket: {} (found)", runtime.name(), socket_path.display()));
             out.println(format!(
-                "WARNING: --allow-docker: mounting host Docker socket into audit container ({}:{}). \
+                "WARNING: --allow-docker: mounting host {} socket into audit container ({}:{}). \
                  This grants the agent elevated host access.",
+                runtime.name(),
                 socket_path.display(),
                 socket_path.display()
             ));
@@ -523,7 +549,7 @@ pub async fn run_pre_audit(
     if migrate_legacy_repo_config(&git_root)? {
         out.println("Migrated config: aspec/.amux.json -> .amux/config.json".to_string());
     }
-    let image_tag = docker::project_image_tag(&git_root);
+    let image_tag = project_image_tag(&git_root);
     let dockerfile = git_root.join("Dockerfile.dev");
     let config = load_repo_config(&git_root)?;
     let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
@@ -624,9 +650,9 @@ pub async fn run_pre_audit(
         };
         out.println(&reason);
         let build_cmd_display = if opts.no_cache {
-            docker::format_build_cmd_no_cache(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str)
+            format_build_cmd_no_cache(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str)
         } else {
-            docker::format_build_cmd(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str)
+            format_build_cmd(runtime.cli_binary(), &image_tag, &dockerfile_str, &git_root_str)
         };
         out.println(format!("$ {}", build_cmd_display));
         let out_clone = out.clone();
@@ -655,25 +681,33 @@ pub async fn run_pre_audit(
             .join(".amux")
             .join(format!("Dockerfile.{}", agent_name));
 
-        // Write agent dockerfile if missing.
-        if !agent_df_path.exists() {
+        // Write agent dockerfile if missing; track whether it was just created.
+        let agent_dockerfile_was_missing = if !agent_df_path.exists() {
             out.println(format!("Writing agent Dockerfile to {}...", agent_df_path.display()));
             write_agent_dockerfile(&git_root, &agent_enum, out).await?;
+            true
         } else {
             out.println(format!("Agent Dockerfile found: {}", agent_df_path.display()));
-        }
+            false
+        };
 
-        let agent_tag = docker::agent_image_tag(&git_root, &agent_name);
+        let agent_tag = agent_image_tag(&git_root, &agent_name);
         let agent_df_str = agent_df_path.to_str().unwrap().to_string();
 
-        // Build agent image if missing or forced by --build.
-        let agent_needs_build = !runtime.image_exists(&agent_tag);
+        // Build agent image when missing, just created, or forced by --build.
+        let agent_needs_build =
+            agent_dockerfile_was_missing || opts.build || !runtime.image_exists(&agent_tag);
         if agent_needs_build {
-            out.println(format!("Agent image {} not found. Building...", agent_tag));
-            let build_cmd_display = if opts.no_cache {
-                docker::format_build_cmd_no_cache(runtime.cli_binary(), &agent_tag, &agent_df_str, &git_root_str)
+            let reason = if !runtime.image_exists(&agent_tag) {
+                format!("Agent image {} not found. Building...", agent_tag)
             } else {
-                docker::format_build_cmd(runtime.cli_binary(), &agent_tag, &agent_df_str, &git_root_str)
+                format!("Agent Dockerfile was missing — rebuilding agent image {}...", agent_tag)
+            };
+            out.println(&reason);
+            let build_cmd_display = if opts.no_cache {
+                format_build_cmd_no_cache(runtime.cli_binary(), &agent_tag, &agent_df_str, &git_root_str)
+            } else {
+                format_build_cmd(runtime.cli_binary(), &agent_tag, &agent_df_str, &git_root_str)
             };
             out.println(format!("$ {}", build_cmd_display));
             let out_clone = out.clone();
@@ -730,9 +764,9 @@ async fn rebuild_images(
 
     // 1. Rebuild project base image.
     let build_cmd_display = if opts.no_cache {
-        docker::format_build_cmd_no_cache(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
+        format_build_cmd_no_cache(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
     } else {
-        docker::format_build_cmd(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
+        format_build_cmd(runtime.cli_binary(), &ctx.image_tag, &ctx.dockerfile_str, &ctx.git_root_str)
     };
     out.println(format!("$ {}", build_cmd_display));
     let out_clone = out.clone();
@@ -762,13 +796,13 @@ async fn rebuild_images(
                 if agent_name.is_empty() {
                     continue;
                 }
-                let agent_tag = docker::agent_image_tag(git_root, agent_name);
+                let agent_tag = agent_image_tag(git_root, agent_name);
                 let agent_df_str = entry.path().to_str().unwrap().to_string();
                 out.println(format!("Rebuilding agent image {}...", agent_tag));
                 let agent_build_cmd = if opts.no_cache {
-                    docker::format_build_cmd_no_cache(runtime.cli_binary(), &agent_tag, &agent_df_str, &ctx.git_root_str)
+                    format_build_cmd_no_cache(runtime.cli_binary(), &agent_tag, &agent_df_str, &ctx.git_root_str)
                 } else {
-                    docker::format_build_cmd(runtime.cli_binary(), &agent_tag, &agent_df_str, &ctx.git_root_str)
+                    format_build_cmd(runtime.cli_binary(), &agent_tag, &agent_df_str, &ctx.git_root_str)
                 };
                 out.println(format!("$ {}", agent_build_cmd));
                 let out_clone2 = out.clone();
@@ -839,12 +873,13 @@ pub async fn run_with_sink(
     if opts.refresh {
         // If --allow-docker, check the socket and print a warning before launching.
         if opts.allow_docker {
-            let socket_path = docker::check_docker_socket()
-                .context("Cannot mount Docker socket for audit container")?;
-            out.println(format!("Docker socket: {} (found)", socket_path.display()));
+            let socket_path = runtime.check_socket()
+                .context("Cannot mount socket for audit container")?;
+            out.println(format!("{} socket: {} (found)", runtime.name(), socket_path.display()));
             out.println(format!(
-                "WARNING: --allow-docker: mounting host Docker socket into audit container ({}:{}). \
+                "WARNING: --allow-docker: mounting host {} socket into audit container ({}:{}). \
                  This grants the agent elevated host access.",
+                runtime.name(),
                 socket_path.display(),
                 socket_path.display()
             ));
@@ -964,7 +999,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_sink_fails_gracefully_without_docker() {
-        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let runtime = crate::runtime::DockerRuntime::new();
         if runtime.is_available() {
             return;
         }
@@ -982,7 +1017,7 @@ mod tests {
     /// through the OutputSink (including Docker daemon check, local agent, etc.).
     #[tokio::test]
     async fn run_with_sink_routes_all_output_through_sink() {
-        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let runtime = crate::runtime::DockerRuntime::new();
         if !runtime.is_available() {
             return;
         }
@@ -1314,6 +1349,9 @@ mod tests {
 
     impl AgentRuntime for MockRuntime {
         fn is_available(&self) -> bool { self.available }
+        fn check_socket(&self) -> anyhow::Result<std::path::PathBuf> {
+            Ok(std::path::PathBuf::from("/var/run/mock.sock"))
+        }
         fn image_exists(&self, _tag: &str) -> bool { self.image_exists }
         fn name(&self) -> &'static str { "mock" }
         fn cli_binary(&self) -> &'static str { "mock" }

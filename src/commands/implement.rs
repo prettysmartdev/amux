@@ -3,7 +3,7 @@ use crate::commands::auth::resolve_auth;
 use crate::commands::init::find_git_root;
 use crate::commands::output::OutputSink;
 use crate::config::{effective_env_passthrough, effective_yolo_disallowed_tools, load_repo_config};
-use crate::runtime::docker as docker;
+use crate::runtime::{generate_container_name, HostSettings};
 use crate::workflow::{self, StepStatus, WorkflowState};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -218,7 +218,7 @@ pub async fn run_with_sink(
     env_vars: Vec<(String, String)>,
     non_interactive: bool,
     plan: bool,
-    host_settings: Option<&docker::HostSettings>,
+    host_settings: Option<&HostSettings>,
     allow_docker: bool,
     worktree: bool,
     mount_ssh: bool,
@@ -474,7 +474,7 @@ async fn run_workflow(
     mount_path: PathBuf,
     env_vars: Vec<(String, String)>,
     agent: &str,
-    host_settings: Option<docker::HostSettings>,
+    host_settings: Option<HostSettings>,
     non_interactive: bool,
     plan: bool,
     allow_docker: bool,
@@ -578,7 +578,7 @@ async fn run_workflow(
         );
 
         // Generate a container name and record it for state persistence.
-        let container_name = docker::generate_container_name();
+        let container_name = generate_container_name();
         state.set_container_id(&step_name, container_name.clone());
 
         // Mark step as Running and save state.

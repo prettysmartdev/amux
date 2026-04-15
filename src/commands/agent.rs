@@ -1,10 +1,30 @@
 use crate::commands::init::find_git_root;
 use crate::commands::output::OutputSink;
 use crate::config::load_repo_config;
-use crate::runtime::docker as docker;
+use crate::runtime::{agent_image_tag, project_image_tag, HostSettings};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use dirs;
+
+/// Resolves which Docker image tag and Dockerfile path to use for a given agent.
+///
+/// - New layout: `.amux/Dockerfile.{agent}` exists → agent image tag + agent dockerfile
+/// - Legacy layout: no agent dockerfile → project image tag + Dockerfile.dev
+///
+/// Returns `(image_tag, dockerfile_path, is_legacy)`.
+pub fn resolve_agent_image_and_dockerfile(
+    git_root: &std::path::Path,
+    agent_name: &str,
+) -> (String, std::path::PathBuf, bool) {
+    let agent_dockerfile = git_root.join(".amux").join(format!("Dockerfile.{}", agent_name));
+    if agent_dockerfile.exists() {
+        let agent_tag = agent_image_tag(git_root, agent_name);
+        (agent_tag, agent_dockerfile, false)
+    } else {
+        let project_tag = project_image_tag(git_root);
+        (project_tag, git_root.join("Dockerfile.dev"), true)
+    }
+}
 
 /// Shared logic for launching a containerized agent session.
 ///
@@ -25,7 +45,7 @@ pub async fn run_agent_with_sink(
     mount_override: Option<PathBuf>,
     env_vars: Vec<(String, String)>,
     non_interactive: bool,
-    host_settings: Option<&docker::HostSettings>,
+    host_settings: Option<&HostSettings>,
     allow_docker: bool,
     mount_ssh: bool,
     container_name_override: Option<String>,
@@ -51,12 +71,13 @@ pub async fn run_agent_with_sink(
 
     // If --allow-docker, check the socket and print a warning before launching.
     if allow_docker {
-        let socket_path = docker::check_docker_socket()
-            .context("Cannot mount Docker socket")?;
+        let socket_path = runtime.check_socket()
+            .context("Cannot mount socket")?;
         out.println(format!("{} socket: {} (found)", runtime.name(), socket_path.display()));
         out.println(format!(
-            "WARNING: --allow-docker: mounting host Docker socket into container ({}:{}). \
+            "WARNING: --allow-docker: mounting host {} socket into container ({}:{}). \
              This grants the agent elevated host access.",
+            runtime.name(),
             socket_path.display(),
             socket_path.display()
         ));
@@ -88,10 +109,10 @@ pub async fn run_agent_with_sink(
     let agent_dockerfile = git_root.join(".amux").join(format!("Dockerfile.{}", agent));
     let (image_tag, dockerfile_for_user) = if agent_dockerfile.exists() {
         // New layout: ensure agent image exists, build if needed
-        let agent_tag = docker::agent_image_tag(&git_root, &agent);
+        let agent_tag = agent_image_tag(&git_root, &agent);
         if !runtime.image_exists(&agent_tag) {
             // Agent dockerfile exists but image doesn't — build it (first-run case)
-            let project_tag = docker::project_image_tag(&git_root);
+            let project_tag = project_image_tag(&git_root);
             if !runtime.image_exists(&project_tag) {
                 anyhow::bail!(
                     "Agent image {} not found and project base image {} is not built. \
@@ -114,7 +135,7 @@ pub async fn run_agent_with_sink(
         (agent_tag, agent_dockerfile.clone())
     } else {
         // Legacy layout: use project image with deprecation warning
-        let project_tag = docker::project_image_tag(&git_root);
+        let project_tag = project_image_tag(&git_root);
         if !runtime.image_exists(&project_tag) {
             anyhow::bail!(
                 "No agent image and no project base image found. \
@@ -503,7 +524,7 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
 
-        let runtime = crate::runtime::docker::DockerRuntime::new();
+        let runtime = crate::runtime::DockerRuntime::new();
         let result = run_agent_with_sink(
             entrypoint,
             "test",

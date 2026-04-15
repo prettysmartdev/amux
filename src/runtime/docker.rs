@@ -2,17 +2,13 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::runtime::{AgentRuntime, StoppedContainerInfo};
-
-// Re-export shared types so callers can use `use crate::runtime::docker as docker`
-// and access docker::HostSettings, docker::ContainerStats directly.
-pub use crate::runtime::ContainerStats;
-pub use crate::runtime::HostSettings;
+use crate::runtime::{AgentRuntime, ContainerStats, HostSettings, StoppedContainerInfo};
 
 /// Docker-backed implementation of `AgentRuntime`.
 ///
-/// Calls the `docker` CLI directly. Free utility functions (`check_docker_socket`,
-/// `project_image_tag`, etc.) are also defined in this module alongside the trait impl.
+/// Calls the `docker` CLI directly.  Runtime-independent utilities (image tag
+/// derivation, container name generation, build command formatting, etc.) live in
+/// `runtime/mod.rs` and are accessed via `crate::runtime::*`.
 pub struct DockerRuntime;
 
 impl DockerRuntime {
@@ -127,6 +123,10 @@ impl AgentRuntime for DockerRuntime {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    fn check_socket(&self) -> anyhow::Result<std::path::PathBuf> {
+        check_docker_socket()
     }
 
     fn build_image_streaming(
@@ -904,89 +904,14 @@ pub fn check_docker_socket() -> anyhow::Result<std::path::PathBuf> {
     Ok(path)
 }
 
-/// Derives the project-specific image tag from the Git root folder name.
-///
-/// E.g. `/home/user/myproject` → `amux-myproject:latest`.
-pub fn project_image_tag(git_root: &Path) -> String {
-    let project_name = git_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("project");
-    format!("amux-{}:latest", project_name)
-}
-
-/// Returns the image tag for an agent-specific image layered on top of the project base.
-/// Pattern: amux-{projectname}-{agentname}:latest
-pub fn agent_image_tag(git_root: &Path, agent: &str) -> String {
-    let project_name = git_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("project");
-    format!("amux-{}-{}:latest", project_name, agent)
-}
-
-/// Generate a unique container name for amux-managed containers.
-pub fn generate_container_name() -> String {
-    use std::time::SystemTime;
-    let ts = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let pid = std::process::id();
-    format!("amux-{}-{}", pid, ts.subsec_nanos())
-}
-
-/// Parse a CPU percentage string like "5.23%" into a f64 (5.23).
-pub fn parse_cpu_percent(s: &str) -> f64 {
-    s.trim_end_matches('%').trim().parse::<f64>().unwrap_or(0.0)
-}
-
-/// Parse a memory string like "200MiB" or "1.5GiB" into megabytes as f64.
-pub fn parse_memory_mb(s: &str) -> f64 {
-    let s = s.trim();
-    if let Some(val) = s.strip_suffix("GiB") {
-        val.trim().parse::<f64>().unwrap_or(0.0) * 1024.0
-    } else if let Some(val) = s.strip_suffix("MiB") {
-        val.trim().parse::<f64>().unwrap_or(0.0)
-    } else if let Some(val) = s.strip_suffix("KiB") {
-        val.trim().parse::<f64>().unwrap_or(0.0) / 1024.0
-    } else if let Some(val) = s.strip_suffix("B") {
-        val.trim().parse::<f64>().unwrap_or(0.0) / (1024.0 * 1024.0)
-    } else {
-        0.0
-    }
-}
-
-/// Formats a build invocation as a single-line CLI string for display.
-pub fn format_build_cmd(binary: &str, tag: &str, dockerfile: &str, context: &str) -> String {
-    format!("{} build -t {} -f {} {}", binary, tag, dockerfile, context)
-}
-
-/// Formats a build `--no-cache` invocation as a single-line CLI string for display.
-pub fn format_build_cmd_no_cache(binary: &str, tag: &str, dockerfile: &str, context: &str) -> String {
-    format!("{} build --no-cache -t {} -f {} {}", binary, tag, dockerfile, context)
-}
-
-/// Returns true if the Docker daemon is running and accessible.
-pub fn is_daemon_running() -> bool {
-    Command::new("docker")
-        .args(["info", "--format", "{{.ServerVersion}}"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        agent_image_tag, check_docker_socket, docker_socket_path, format_build_cmd,
-        format_build_cmd_no_cache, generate_container_name, parse_cpu_percent, parse_memory_mb,
-        project_image_tag, DockerRuntime,
+    use super::{check_docker_socket, docker_socket_path, DockerRuntime};
+    use crate::runtime::{
+        agent_image_tag, format_build_cmd, format_build_cmd_no_cache, generate_container_name,
+        parse_cpu_percent, parse_memory_mb, project_image_tag, AgentRuntime, HostSettings,
     };
-    #[allow(unused_imports)]
-    use super::is_daemon_running;
-    use crate::runtime::{AgentRuntime, HostSettings};
     use std::path::{Path, PathBuf};
 
     fn rt() -> DockerRuntime {

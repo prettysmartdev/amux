@@ -5,7 +5,7 @@ use crate::commands::download;
 use crate::commands::output::OutputSink;
 use crate::commands::ready::StepStatus;
 use crate::config::load_repo_config;
-use crate::runtime::docker as docker;
+use crate::runtime::HostSettings;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -587,7 +587,7 @@ pub async fn build_nanoclaw_pre_audit(
     out: &OutputSink,
     env_vars: Vec<(String, String)>,
     summary: &mut ClawsSummary,
-    host_settings: Option<&docker::HostSettings>,
+    host_settings: Option<&HostSettings>,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<ClawsAuditCtx> {
     let nanoclaw_dir = nanoclaw_path();
@@ -642,7 +642,7 @@ pub async fn build_nanoclaw_image(
     out: &OutputSink,
     env_vars: &[(String, String)],
     summary: &mut ClawsSummary,
-    host_settings: Option<&docker::HostSettings>,
+    host_settings: Option<&HostSettings>,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<ClawsAuditCtx> {
     let ctx = build_nanoclaw_pre_audit(out, env_vars.to_vec(), summary, host_settings, runtime).await?;
@@ -711,7 +711,7 @@ pub async fn launch_nanoclaw_container(
     out: &OutputSink,
     env_vars: &[(String, String)],
     summary: &mut ClawsSummary,
-    host_settings: Option<&docker::HostSettings>,
+    host_settings: Option<&HostSettings>,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<String> {
     let nanoclaw_str = nanoclaw_path_str();

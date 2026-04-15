@@ -1003,6 +1003,35 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
                 ),
             )
         }
+        Dialog::ReadyLegacyMigration { agent_name } => (
+            " Ready — Legacy Layout Detected ",
+            format!(
+                "  Detected legacy single-file Dockerfile.dev layout.\n\
+                 \n\
+                 Migrating will:\n\
+                   1. Back up Dockerfile.dev to Dockerfile.dev.bak\n\
+                   2. Recreate Dockerfile.dev with a minimal project base\n\
+                   3. Write .amux/Dockerfile.{} using the agent template\n\
+                   4. Build both images\n\
+                   5. Run the audit agent to restore project dependencies\n\
+                 \n\
+                 Migrate to modular Dockerfile layout? [y=migrate / n=keep existing]  ",
+                agent_name
+            ),
+        ),
+        Dialog::InitAuditConfirm { .. } => (
+            " Init — Agent Audit ",
+            "  The agent audit container will scan your project and update Dockerfile.dev\n\
+             to ensure all tools needed to build, run, and test your project are installed.\n\
+             \n\
+             Run the agent audit container after init? [y=yes / n=skip]  ".to_string(),
+        ),
+        Dialog::InitReplaceAspec { .. } => (
+            " Init — Replace aspec ",
+            "  An aspec folder already exists at this Git root.\n\
+             \n\
+             Replace existing aspec folder with fresh templates? [y=yes / n=keep existing]  ".to_string(),
+        ),
         Dialog::None => return,
         // NewInterviewSummary is handled by the early return above — this arm is unreachable.
         Dialog::NewInterviewSummary { .. } => return,
