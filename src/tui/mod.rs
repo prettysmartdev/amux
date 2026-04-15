@@ -15,7 +15,7 @@ use crate::commands::init::find_git_root_from;
 use crate::commands::new::WorkItemKind;
 use crate::commands::specs::{amend_agent_entrypoint, interview_agent_entrypoint};
 use crate::commands::{claws, init, new, ready, status};
-use crate::commands::ready::{ReadyOptions, print_interactive_notice, print_summary};
+use crate::commands::ready::{ReadyOptions, apply_ready_user_directive, build_audit_setup, check_allow_docker, compute_ready_build_flag, gather_ready_env_vars, create_ready_host_settings, is_legacy_layout, perform_legacy_migration, print_interactive_notice, print_summary};
 use crate::config::{effective_env_passthrough, effective_scrollback_lines, load_repo_config};
 use crate::runtime::{generate_container_name, ContainerStats};
 use crate::tui::input::Action;
@@ -534,26 +534,27 @@ async fn handle_action(app: &mut App, action: Action) {
             // Back up Dockerfile.dev and replace with the minimal project base template.
             let tab_cwd = app.active_tab().cwd.clone();
             if let Some(git_root) = find_git_root_from(&tab_cwd) {
-                let dockerfile_path = git_root.join("Dockerfile.dev");
-                let backup_path = git_root.join("Dockerfile.dev.bak");
-                if let Err(e) = std::fs::copy(&dockerfile_path, &backup_path) {
-                    app.active_tab_mut().push_output(format!("Error backing up Dockerfile.dev: {}", e));
-                    return;
+                match perform_legacy_migration(&git_root) {
+                    Ok(messages) => {
+                        for msg in messages {
+                            app.active_tab_mut().push_output(msg);
+                        }
+                    }
+                    Err(e) => {
+                        app.active_tab_mut().push_output(format!("Error during migration: {}", e));
+                        return;
+                    }
                 }
-                app.active_tab_mut().push_output(format!("Backed up Dockerfile.dev to {}.", backup_path.display()));
-                let content = crate::commands::init::project_dockerfile_embedded();
-                if let Err(e) = std::fs::write(&dockerfile_path, content) {
-                    app.active_tab_mut().push_output(format!("Error writing new Dockerfile.dev: {}", e));
-                    return;
-                }
-                app.active_tab_mut().push_output("Dockerfile.dev recreated with project base template.".to_string());
             }
             // Force refresh so the audit runs and restores project dependencies.
             app.active_tab_mut().ready_opts.refresh = true;
             app.active_tab_mut().ready_opts.legacy_mode = false;
+            // Force rebuild of the project base image from the new minimal Dockerfile.dev.
+            app.active_tab_mut().ready_opts.build = true;
             // Also update the pending command flags so ready_opts stays consistent.
-            if let PendingCommand::Ready { ref mut refresh, .. } = app.active_tab_mut().pending_command {
+            if let PendingCommand::Ready { ref mut refresh, ref mut build, .. } = app.active_tab_mut().pending_command {
                 *refresh = true;
+                *build = true;
             }
             show_pre_command_dialogs(app).await;
         }
@@ -916,8 +917,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
 
         "ready" => {
             let (refresh, build, no_cache, non_interactive, allow_docker) = parse_ready_flags(&parts);
-            // If --refresh is set, ignore --build (refresh always rebuilds after audit).
-            let effective_build = if refresh { false } else { build };
+            let effective_build = compute_ready_build_flag(refresh, build);
             app.active_tab_mut().pending_command = PendingCommand::Ready { refresh, build: effective_build, no_cache, non_interactive, allow_docker };
             app.active_tab_mut().ready_opts = ReadyOptions { refresh, build: effective_build, no_cache, non_interactive, allow_docker, auto_create_dockerfile: true, legacy_mode: false };
 
@@ -927,10 +927,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
             if let Some(git_root) = find_git_root_from(&tab_cwd) {
                 let config = load_repo_config(&git_root).unwrap_or_default();
                 let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
-                let dockerfile_path = git_root.join("Dockerfile.dev");
-                let agent_df_path = git_root.join(".amux").join(format!("Dockerfile.{}", agent_name));
-                let is_known_agent = crate::cli::KNOWN_AGENT_NAMES.contains(&agent_name.as_str());
-                if dockerfile_path.exists() && is_known_agent && !agent_df_path.exists() {
+                if is_legacy_layout(&git_root, &agent_name) {
                     app.active_tab_mut().dialog = Dialog::ReadyLegacyMigration { agent_name };
                     return;
                 }
@@ -1177,31 +1174,19 @@ async fn launch_ready(app: &mut App) {
     let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
     let mount_path = app.active_tab_mut().pending_mount_path.take().unwrap_or_else(|| git_root.clone());
 
-    // Auto-passthrough: always pass credentials from keychain if available.
-    let credentials = agent_keychain_credentials(&agent_name);
-    let mut env_vars = credentials.env_vars;
-    for name in &effective_env_passthrough(&git_root) {
-        if env_vars.iter().any(|(k, _)| k == name) {
-            continue;
+    // Gather env vars (keychain credentials + env passthrough).
+    let env_vars = match gather_ready_env_vars(&git_root, &agent_name) {
+        Ok(vars) => vars,
+        Err(e) => {
+            app.active_tab_mut().input_error = Some(format!("Failed to gather credentials: {}", e));
+            return;
         }
-        if let Ok(val) = std::env::var(name) {
-            env_vars.push((name.clone(), val));
-        }
-    }
+    };
 
     // Prepare host settings (sanitized config files in a temp dir).
-    app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
-    {
-        // Use the agent dockerfile for apply_dockerfile_user in the new modular layout
-        // (USER amux lives there), falling back to Dockerfile.dev for legacy layout.
-        let (_, agent_dockerfile_path, _) =
-            crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
-        let msg = app.active_tab_mut().host_settings.as_mut()
-            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
-        if let Some(msg) = msg {
-            app.active_tab_mut().push_output(msg);
-        }
-    }
+    // apply_ready_user_directive is called after run_pre_audit() returns so that the
+    // agent dockerfile exists before we try to read the USER directive from it.
+    app.active_tab_mut().host_settings = create_ready_host_settings(&agent_name);
 
     let opts = app.active_tab().ready_opts.clone();
 
@@ -1242,6 +1227,7 @@ async fn check_ready_continuation(app: &mut App) {
                 tab.ready_phase = ReadyPhase::Inactive;
                 tab.ready_ctx = None;
                 tab.ready_ctx_rx = None;
+                tab.ready_summary = None;
                 tab.host_settings = None;
                 return;
             }
@@ -1262,6 +1248,15 @@ async fn check_ready_continuation(app: &mut App) {
                     let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
                     print_interactive_notice(&sink, &agent_name);
                 }
+                // Apply the agent dockerfile USER directive now that run_pre_audit() has
+                // written the agent dockerfile. This must happen before the audit launches.
+                let ctx_ref = app.active_tab().ready_ctx.clone();
+                if let Some(ctx) = ctx_ref {
+                    let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+                    if let Some(msg) = apply_ready_user_directive(app.active_tab_mut().host_settings.as_mut(), &ctx) {
+                        sink.println(msg);
+                    }
+                }
                 // Launch the audit via PTY (or captured if non-interactive).
                 if opts.non_interactive {
                     launch_ready_audit_captured(app);
@@ -1270,9 +1265,14 @@ async fn check_ready_continuation(app: &mut App) {
                 }
             } else {
                 // No refresh — skip audit & post-audit, print summary.
+                // This branch is dead code in practice (launch_ready() sets ready_phase
+                // to Inactive immediately when !opts.refresh, so check_ready_continuation
+                // never enters ReadyPhase::PreAudit for a no-refresh run). Clear
+                // ready_summary defensively to match every other ready_ctx = None site.
                 let tab = app.active_tab_mut();
                 tab.ready_phase = ReadyPhase::Inactive;
                 tab.ready_ctx = None;
+                tab.ready_summary = None;
             }
         }
         ReadyPhase::Audit => {
@@ -1281,6 +1281,7 @@ async fn check_ready_continuation(app: &mut App) {
                 let tab = app.active_tab_mut();
                 tab.ready_phase = ReadyPhase::Inactive;
                 tab.ready_ctx = None;
+                tab.ready_summary = None;
                 tab.host_settings = None;
                 return;
             }
@@ -1293,6 +1294,7 @@ async fn check_ready_continuation(app: &mut App) {
             let tab = app.active_tab_mut();
             tab.ready_phase = ReadyPhase::Inactive;
             tab.ready_ctx = None;
+            tab.ready_summary = None;
         }
         ReadyPhase::Inactive => {}
     }
@@ -1311,35 +1313,20 @@ fn launch_ready_audit(app: &mut App) {
 
     let allow_docker = app.active_tab().ready_opts.allow_docker;
 
-    // If --allow-docker, check the socket and print a warning before launching.
-    if allow_docker {
-        let runtime_name = app.runtime.name();
-        match app.runtime.check_socket() {
-            Ok(socket_path) => {
-                app.active_tab_mut().push_output(format!("{} socket: {} (found)", runtime_name, socket_path.display()));
-                app.active_tab_mut().push_output(format!(
-                    "WARNING: --allow-docker: mounting host {} socket into audit container ({}:{}). \
-                     This grants the agent elevated host access.",
-                    runtime_name,
-                    socket_path.display(),
-                    socket_path.display()
-                ));
-            }
-            Err(e) => {
-                app.active_tab_mut().push_output(format!("Error: {}", e));
-                app.active_tab_mut().finish_command(1);
-                return;
-            }
+    // Check the Docker socket if --allow-docker is set.
+    {
+        let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+        if let Err(e) = check_allow_docker(&sink, allow_docker, &*app.runtime) {
+            app.active_tab_mut().push_output(format!("Error: {}", e));
+            app.active_tab_mut().finish_command(1);
+            return;
         }
     }
 
     let container_name = generate_container_name();
-    let entrypoint = ready::audit_entrypoint(&ctx.agent_name);
-    let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
-
-    // Use the agent image (which has the agent tools installed) for the audit container.
-    // Fall back to the project base image when in legacy mode (agent_image_tag is None).
-    let audit_image_tag = ctx.agent_image_tag.as_deref().unwrap_or(&ctx.image_tag).to_string();
+    let audit = build_audit_setup(&ctx, false);
+    let entrypoint_refs: Vec<&str> = audit.entrypoint.iter().map(String::as_str).collect();
+    let audit_image_tag = audit.image_tag;
 
     let pty_args = app.runtime.build_run_args_pty(
         &audit_image_tag,
@@ -1400,25 +1387,13 @@ fn launch_ready_audit_captured(app: &mut App) {
 
     let allow_docker = app.active_tab().ready_opts.allow_docker;
 
-    // If --allow-docker, check the socket and print a warning before launching.
-    if allow_docker {
-        let runtime_name = app.runtime.name();
-        match app.runtime.check_socket() {
-            Ok(socket_path) => {
-                app.active_tab_mut().push_output(format!("{} socket: {} (found)", runtime_name, socket_path.display()));
-                app.active_tab_mut().push_output(format!(
-                    "WARNING: --allow-docker: mounting host {} socket into audit container ({}:{}). \
-                     This grants the agent elevated host access.",
-                    runtime_name,
-                    socket_path.display(),
-                    socket_path.display()
-                ));
-            }
-            Err(e) => {
-                app.active_tab_mut().push_output(format!("Error: {}", e));
-                app.active_tab_mut().finish_command(1);
-                return;
-            }
+    // Check the Docker socket if --allow-docker is set.
+    {
+        let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+        if let Err(e) = check_allow_docker(&sink, allow_docker, &*app.runtime) {
+            app.active_tab_mut().push_output(format!("Error: {}", e));
+            app.active_tab_mut().finish_command(1);
+            return;
         }
     }
 
@@ -1432,14 +1407,12 @@ fn launch_ready_audit_captured(app: &mut App) {
     app.active_tab_mut().exit_rx = Some(exit_rx);
     let tx = app.active_tab().output_tx.clone();
 
-    // Use the agent image (which has the agent tools installed) for the audit container.
-    // Fall back to the project base image when in legacy mode (agent_image_tag is None).
-    let audit_image_tag = ctx.agent_image_tag.as_deref().unwrap_or(&ctx.image_tag).to_string();
+    let audit = build_audit_setup(&ctx, true);
+    let audit_image_tag = audit.image_tag;
 
     let audit_runtime = app.runtime.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
-        let entrypoint = ready::audit_entrypoint_non_interactive(&ctx.agent_name);
-        let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+        let entrypoint_refs: Vec<&str> = audit.entrypoint.iter().map(String::as_str).collect();
         let (_cmd, output) = audit_runtime.run_container_captured(
             &audit_image_tag,
             &ctx.mount_path,
@@ -1475,13 +1448,17 @@ fn launch_ready_post_audit(app: &mut App) {
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     app.active_tab_mut().exit_rx = Some(exit_rx);
     let tx = app.active_tab().output_tx.clone();
+    let summary_init = app.active_tab_mut().ready_summary.take()
+        .unwrap_or_else(|| {
+            let mut s = ready::ReadySummary::default();
+            s.docker_daemon = ready::StepStatus::Ok("running".into());
+            s.dockerfile = ready::StepStatus::Ok("checked".into());
+            s.dev_image = ready::StepStatus::Ok("checked".into());
+            s.refresh = ready::StepStatus::Ok("completed".into());
+            s
+        });
     spawn_text_command(tx, exit_tx, move |sink| async move {
-        let mut summary = ready::ReadySummary::default();
-        // Populate summary fields for the steps that already completed.
-        summary.docker_daemon = ready::StepStatus::Ok("running".into());
-        summary.dockerfile = ready::StepStatus::Ok("checked".into());
-        summary.dev_image = ready::StepStatus::Ok("checked".into());
-        summary.refresh = ready::StepStatus::Ok("completed".into());
+        let mut summary = summary_init;
         ready::run_post_audit(&sink, &ctx, &opts, &mut summary, &*post_audit_runtime).await?;
         print_summary(&sink, post_audit_runtime.name(), &summary);
         sink.println(String::new());

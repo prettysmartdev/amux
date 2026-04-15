@@ -416,6 +416,9 @@ pub struct TabState {
     pub ready_phase: ReadyPhase,
     /// Options for the current ready workflow.
     pub ready_opts: ReadyOptions,
+    /// Summary produced by the pre-audit phase, stored so post-audit can use it
+    /// without pre-populating defaults.
+    pub ready_summary: Option<ReadySummary>,
 
     // --- Container window state ---
     /// Whether the container overlay window is visible (and in what state).
@@ -602,6 +605,7 @@ impl TabState {
             ready_ctx_rx: None,
             ready_phase: ReadyPhase::Inactive,
             ready_opts: ReadyOptions::default(),
+            ready_summary: None,
             container_window: ContainerWindowState::Hidden,
             container_scroll_offset: 0,
             container_info: None,
@@ -1240,8 +1244,9 @@ impl TabState {
 
         // Check for ready context from pre-audit phase.
         if let Some(ref mut rx) = self.ready_ctx_rx {
-            if let Ok((ctx, _summary)) = rx.try_recv() {
+            if let Ok((ctx, summary)) = rx.try_recv() {
                 self.ready_ctx = Some(ctx);
+                self.ready_summary = Some(summary);
             }
         }
 

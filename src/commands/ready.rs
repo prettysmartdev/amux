@@ -273,23 +273,70 @@ pub async fn check_local_agent(agent_name: &str) -> (StepStatus, String, String)
     }
 }
 
-/// Command-mode entry point: prompts for mount scope and auth, then runs ready phases.
-/// The audit phase is only run when `--refresh` is passed.
-pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bool, allow_docker: bool, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
-    // If --refresh is set, ignore --build (refresh always rebuilds after audit).
-    let effective_build = if refresh { false } else { build };
-    let git_root = find_git_root().context("Not inside a Git repository")?;
-    if migrate_legacy_repo_config(&git_root)? {
-        println!("Migrated config: aspec/.amux.json -> .amux/config.json");
-    }
-    let mount_path = confirm_mount_scope_stdin(&git_root)?;
-    let config = load_repo_config(&git_root)?;
-    let agent_name = config.agent.as_deref().unwrap_or("claude");
-    let credentials = resolve_auth(&git_root, agent_name)?;
-    let mut env_vars = credentials.env_vars.clone();
-    // Pick up additional env vars from envPassthrough config (e.g. CLAUDE_CODE_OAUTH_TOKEN
-    // on Linux where the macOS keychain is unavailable). Keychain values take precedence.
-    for name in &crate::config::effective_env_passthrough(&git_root) {
+/// Compute the effective `--build` flag for the ready command.
+///
+/// When `--refresh` is set, the image is always rebuilt after the audit runs,
+/// so passing `--build` during the pre-audit phase is unnecessary. This mirrors
+/// the comment at the top of `run()`: "ignore --build when --refresh is set."
+/// Note: migration code sets `build = true` programmatically *after* this call,
+/// overriding the computed value — that is intentional.
+pub fn compute_ready_build_flag(refresh: bool, build: bool) -> bool {
+    if refresh { false } else { build }
+}
+
+/// Detect whether the project is using the legacy single-file Dockerfile.dev layout.
+///
+/// Returns `true` when:
+/// - `Dockerfile.dev` exists in the git root, AND
+/// - the agent name is a known amux agent, AND
+/// - `.amux/Dockerfile.{agent_name}` does NOT exist yet.
+///
+/// This is the condition that triggers migration to the modular layout.
+pub fn is_legacy_layout(git_root: &std::path::Path, agent_name: &str) -> bool {
+    let dockerfile_path = git_root.join("Dockerfile.dev");
+    let agent_dockerfile_path = git_root
+        .join(".amux")
+        .join(format!("Dockerfile.{}", agent_name));
+    let is_known_agent = crate::cli::KNOWN_AGENT_NAMES.contains(&agent_name);
+    dockerfile_path.exists() && is_known_agent && !agent_dockerfile_path.exists()
+}
+
+/// Perform the legacy Dockerfile.dev → modular layout migration.
+///
+/// - Backs up `Dockerfile.dev` to `Dockerfile.dev.bak`.
+/// - Overwrites `Dockerfile.dev` with the minimal project base template.
+///
+/// Returns a list of human-readable messages describing what was done.
+/// Callers should print these messages via their respective output mechanism.
+pub fn perform_legacy_migration(git_root: &std::path::Path) -> Result<Vec<String>> {
+    let dockerfile_path = git_root.join("Dockerfile.dev");
+    let backup_path = dockerfile_path.with_extension("dev.bak");
+    std::fs::copy(&dockerfile_path, &backup_path)
+        .context("Failed to back up Dockerfile.dev")?;
+    let content = crate::commands::init::project_dockerfile_embedded();
+    std::fs::write(&dockerfile_path, content)
+        .context("Failed to overwrite Dockerfile.dev with project template")?;
+    Ok(vec![
+        format!("Backed up existing Dockerfile.dev to {}.", backup_path.display()),
+        "Dockerfile.dev recreated with project base template.".to_string(),
+    ])
+}
+
+/// Gather environment variables for the ready audit container.
+///
+/// - Calls `resolve_auth()` to read keychain credentials (e.g., Claude OAuth token
+///   for OAuth-based agents). `resolve_auth()` is keychain-only.
+/// - Then appends any `effective_env_passthrough` vars not already present, for
+///   API-key-based agents (Codex, Gemini, etc.) that inject credentials via env vars
+///   rather than the keychain.
+///
+/// File-based auth (`.claude.json` / `.claude` dir mounts) is handled separately by
+/// `create_ready_host_settings()`; this function only produces env vars.
+/// Both CLI and TUI call this function to ensure identical credential gathering.
+pub fn gather_ready_env_vars(git_root: &std::path::Path, agent_name: &str) -> Result<Vec<(String, String)>> {
+    let credentials = resolve_auth(git_root, agent_name)?;
+    let mut env_vars = credentials.env_vars;
+    for name in &crate::config::effective_env_passthrough(git_root) {
         if env_vars.iter().any(|(k, _)| k == name) {
             continue;
         }
@@ -297,7 +344,96 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
             env_vars.push((name.clone(), val));
         }
     }
-    let mut host_settings = crate::passthrough::passthrough_for_agent(agent_name).prepare_host_settings();
+    Ok(env_vars)
+}
+
+/// Create host settings (sanitized config files in a temp dir) for the ready audit container.
+pub fn create_ready_host_settings(agent_name: &str) -> Option<crate::runtime::HostSettings> {
+    crate::passthrough::passthrough_for_agent(agent_name).prepare_host_settings()
+}
+
+/// Apply the USER directive from the agent dockerfile to the host settings.
+///
+/// Ensures settings files are mounted at the correct home directory inside the
+/// container. Must be called after `run_pre_audit()` returns (so the agent
+/// dockerfile has been written), before the audit container is launched.
+///
+/// Returns the informational message from `apply_dockerfile_user` (if any).
+pub fn apply_ready_user_directive(
+    host_settings: Option<&mut crate::runtime::HostSettings>,
+    ctx: &ReadyContext,
+) -> Option<String> {
+    let settings = host_settings?;
+    let dockerfile_for_user = ctx.agent_dockerfile_str
+        .as_deref()
+        .map(std::path::Path::new)
+        .unwrap_or_else(|| std::path::Path::new(&ctx.dockerfile_str));
+    crate::runtime::apply_dockerfile_user(settings, dockerfile_for_user)
+}
+
+/// Check whether the host Docker socket is accessible when `--allow-docker` is set.
+///
+/// Returns `Ok(())` when:
+/// - `allow_docker` is false (no check needed), or
+/// - `allow_docker` is true and the socket is found (prints a warning to `out`).
+///
+/// Returns `Err` when `allow_docker` is true but the socket is not found.
+pub fn check_allow_docker(
+    out: &OutputSink,
+    allow_docker: bool,
+    runtime: &dyn crate::runtime::AgentRuntime,
+) -> Result<()> {
+    if !allow_docker {
+        return Ok(());
+    }
+    let socket_path = runtime.check_socket()
+        .context("Cannot mount socket for audit container")?;
+    out.println(format!("{} socket: {} (found)", runtime.name(), socket_path.display()));
+    out.println(format!(
+        "WARNING: --allow-docker: mounting host {} socket into audit container ({}:{}). \
+         This grants the agent elevated host access.",
+        runtime.name(),
+        socket_path.display(),
+        socket_path.display()
+    ));
+    Ok(())
+}
+
+/// Carries the Docker image tag and entrypoint command for the audit container.
+pub struct AuditSetup {
+    pub image_tag: String,
+    pub entrypoint: Vec<String>,
+}
+
+/// Build the audit container setup (image tag + entrypoint) from the ready context.
+///
+/// - `non_interactive`: when `true`, uses the non-interactive (print/quiet) entrypoint.
+/// - `image_tag`: uses the agent image when available; falls back to the project base image
+///   in legacy mode (when `ctx.agent_image_tag` is `None`).
+pub fn build_audit_setup(ctx: &ReadyContext, non_interactive: bool) -> AuditSetup {
+    let image_tag = ctx.agent_image_tag.as_deref().unwrap_or(&ctx.image_tag).to_string();
+    let entrypoint = if non_interactive {
+        audit_entrypoint_non_interactive(&ctx.agent_name)
+    } else {
+        audit_entrypoint(&ctx.agent_name)
+    };
+    AuditSetup { image_tag, entrypoint }
+}
+
+/// Command-mode entry point: prompts for mount scope and auth, then runs ready phases.
+/// The audit phase is only run when `--refresh` is passed.
+pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bool, allow_docker: bool, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
+    // If --refresh is set, ignore --build (refresh always rebuilds after audit).
+    let mut effective_build = compute_ready_build_flag(refresh, build);
+    let git_root = find_git_root().context("Not inside a Git repository")?;
+    if migrate_legacy_repo_config(&git_root)? {
+        println!("Migrated config: aspec/.amux.json -> .amux/config.json");
+    }
+    let mount_path = confirm_mount_scope_stdin(&git_root)?;
+    let config = load_repo_config(&git_root)?;
+    let agent_name = config.agent.as_deref().unwrap_or("claude");
+    let env_vars = gather_ready_env_vars(&git_root, agent_name)?;
+    let mut host_settings = create_ready_host_settings(agent_name);
     let out = &OutputSink::Stdout;
 
     // Determine whether to auto-create Dockerfile.dev or prompt the user.
@@ -351,13 +487,8 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
         auto_create_dockerfile = true;
     }
 
-    // Detect legacy layout: Dockerfile.dev exists but .amux/Dockerfile.{agent} does not.
-    // When detected, offer migration to the modular layout.
-    let agent_dockerfile_path = git_root
-        .join(".amux")
-        .join(format!("Dockerfile.{}", agent_name));
-    let is_known_agent = crate::cli::KNOWN_AGENT_NAMES.contains(&agent_name);
-    let legacy_mode = if dockerfile_path.exists() && is_known_agent && !agent_dockerfile_path.exists() {
+    // Detect legacy layout and offer migration to the modular layout.
+    let legacy_mode = if is_legacy_layout(&git_root, agent_name) {
         println!();
         println!("Detected legacy single-file Dockerfile.dev layout.");
         println!("Would you like to migrate to the modular layout? (agent tools move to .amux/Dockerfile.{})", agent_name);
@@ -370,19 +501,13 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
         println!("  5. Run the audit agent to restore project dependencies in Dockerfile.dev");
         println!();
         if ask_yes_no_stdin("Migrate to modular Dockerfile layout?") {
-            // Back up the existing Dockerfile.dev before overwriting so the user's
-            // content is not lost if the audit agent fails to restore project deps.
-            let backup_path = dockerfile_path.with_extension("dev.bak");
-            std::fs::copy(&dockerfile_path, &backup_path)
-                .context("Failed to back up Dockerfile.dev")?;
-            println!("Backed up existing Dockerfile.dev to {}.", backup_path.display());
-
-            // Overwrite Dockerfile.dev with the minimal project base template.
-            let content = project_dockerfile_embedded();
-            std::fs::write(&dockerfile_path, &content)
-                .context("Failed to overwrite Dockerfile.dev with project template")?;
-            println!("Dockerfile.dev recreated with project base template.");
-            // Force refresh so the audit runs and restores project deps
+            let messages = perform_legacy_migration(&git_root)?;
+            for msg in &messages {
+                println!("{}", msg);
+            }
+            // Force a project image rebuild from the new minimal Dockerfile.dev.
+            effective_build = true;
+            // Force refresh so the audit runs and restores project deps.
             effective_refresh = true;
             false // not legacy mode — proceed with new layout
         } else {
@@ -408,52 +533,22 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
     let ctx = run_pre_audit(out, mount_path, env_vars, &opts, &mut summary, &*runtime).await?;
 
     if opts.refresh {
-        // Apply the agent dockerfile USER directive so settings are mounted at the correct home
-        // directory inside the container. In the new modular layout, USER amux lives in
-        // .amux/Dockerfile.{agent}; in legacy mode, fall back to Dockerfile.dev.
-        {
-            let dockerfile_for_user = ctx.agent_dockerfile_str
-                .as_deref()
-                .map(std::path::Path::new)
-                .unwrap_or_else(|| std::path::Path::new(&ctx.dockerfile_str));
-            if let Some(settings) = host_settings.as_mut() {
-                if let Some(msg) = crate::runtime::apply_dockerfile_user(settings, dockerfile_for_user) {
-                    out.println(msg);
-                }
-            }
+        if let Some(msg) = apply_ready_user_directive(host_settings.as_mut(), &ctx) {
+            out.println(msg);
         }
 
         if !opts.non_interactive {
             print_interactive_notice(out, &ctx.agent_name);
         }
 
-        // If --allow-docker, check the socket and print a warning before launching.
-        if opts.allow_docker {
-            let socket_path = runtime.check_socket()
-                .context("Cannot mount socket for audit container")?;
-            out.println(format!("{} socket: {} (found)", runtime.name(), socket_path.display()));
-            out.println(format!(
-                "WARNING: --allow-docker: mounting host {} socket into audit container ({}:{}). \
-                 This grants the agent elevated host access.",
-                runtime.name(),
-                socket_path.display(),
-                socket_path.display()
-            ));
-        }
+        check_allow_docker(out, opts.allow_docker, &*runtime)?;
 
-        // Run audit interactively (inherited stdio → user can interact with agent).
-        let entrypoint = if opts.non_interactive {
-            audit_entrypoint_non_interactive(&ctx.agent_name)
-        } else {
-            audit_entrypoint(&ctx.agent_name)
-        };
-        let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+        let audit = build_audit_setup(&ctx, opts.non_interactive);
+        let entrypoint_refs: Vec<&str> = audit.entrypoint.iter().map(String::as_str).collect();
 
-        // Use agent image (has agent installed) when available; fall back to project base for legacy.
-        let audit_image = ctx.agent_image_tag.as_deref().unwrap_or(&ctx.image_tag);
         if opts.non_interactive {
             let (_cmd, audit_output) = runtime.run_container_captured(
-                audit_image,
+                &audit.image_tag,
                 &ctx.mount_path,
                 &entrypoint_refs,
                 &ctx.env_vars,
@@ -468,7 +563,7 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
             }
         } else {
             runtime.run_container(
-                audit_image,
+                &audit.image_tag,
                 &ctx.mount_path,
                 &entrypoint_refs,
                 &ctx.env_vars,
@@ -523,6 +618,13 @@ pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bo
 /// Phase 1 — Pre-audit: Docker checks, Dockerfile init, aspec check, agent check, image build.
 ///
 /// Returns the context needed to launch the audit and post-audit phases.
+///
+/// **Migration interaction**: when the legacy-layout migration has run, the caller sets
+/// `opts.build = true` *before* calling this function. Step 6 (`needs_build` check) is
+/// the only place that flag matters for migration correctness: it forces the project image
+/// to rebuild from the new minimal `Dockerfile.dev` before the agent image is layered on
+/// top in step 7. The post-audit phase (`rebuild_images`) then rebuilds both images again
+/// after the audit agent populates `Dockerfile.dev` with project-specific tooling.
 pub async fn run_pre_audit(
     out: &OutputSink,
     mount_path: PathBuf,
@@ -638,7 +740,7 @@ pub async fn run_pre_audit(
     let git_root_str = git_root.to_str().unwrap().to_string();
     let mount_path_str = mount_path.to_str().unwrap().to_string();
 
-    let needs_build = dockerfile_was_missing || !runtime.image_exists(&image_tag);
+    let needs_build = dockerfile_was_missing || opts.build || !runtime.image_exists(&image_tag);
 
     if needs_build {
         let reason = if !runtime.image_exists(&image_tag) {
@@ -871,31 +973,13 @@ pub async fn run_with_sink(
     let ctx = run_pre_audit(out, mount_path, env_vars, opts, &mut summary, runtime).await?;
 
     if opts.refresh {
-        // If --allow-docker, check the socket and print a warning before launching.
-        if opts.allow_docker {
-            let socket_path = runtime.check_socket()
-                .context("Cannot mount socket for audit container")?;
-            out.println(format!("{} socket: {} (found)", runtime.name(), socket_path.display()));
-            out.println(format!(
-                "WARNING: --allow-docker: mounting host {} socket into audit container ({}:{}). \
-                 This grants the agent elevated host access.",
-                runtime.name(),
-                socket_path.display(),
-                socket_path.display()
-            ));
-        }
+        check_allow_docker(out, opts.allow_docker, runtime)?;
 
-        let entrypoint = if opts.non_interactive {
-            audit_entrypoint_non_interactive(&ctx.agent_name)
-        } else {
-            audit_entrypoint(&ctx.agent_name)
-        };
-        let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+        let audit = build_audit_setup(&ctx, opts.non_interactive);
+        let entrypoint_refs: Vec<&str> = audit.entrypoint.iter().map(String::as_str).collect();
 
-        // Use agent image (has agent installed) when available; fall back to project base for legacy.
-        let audit_image = ctx.agent_image_tag.as_deref().unwrap_or(&ctx.image_tag);
         let (_run_cmd, audit_output) = runtime.run_container_captured(
-            audit_image,
+            &audit.image_tag,
             &ctx.mount_path,
             &entrypoint_refs,
             &ctx.env_vars,
@@ -1595,6 +1679,634 @@ mod tests {
         assert_eq!(
             audit_image_legacy, base_tag,
             "legacy layout: audit must fall back to project base image"
+        );
+    }
+
+    // ─── compute_ready_build_flag tests ──────────────────────────────────────
+
+    #[test]
+    fn compute_ready_build_flag_no_refresh_with_build_returns_true() {
+        assert!(compute_ready_build_flag(false, true));
+    }
+
+    #[test]
+    fn compute_ready_build_flag_with_refresh_and_build_returns_false() {
+        assert!(!compute_ready_build_flag(true, true));
+    }
+
+    #[test]
+    fn compute_ready_build_flag_no_refresh_no_build_returns_false() {
+        assert!(!compute_ready_build_flag(false, false));
+    }
+
+    #[test]
+    fn compute_ready_build_flag_with_refresh_no_build_also_returns_false() {
+        assert!(!compute_ready_build_flag(true, false));
+    }
+
+    // ─── is_legacy_layout tests ──────────────────────────────────────────────
+
+    #[test]
+    fn is_legacy_layout_true_when_dockerfile_exists_no_agent_dockerfile() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("Dockerfile.dev"), "FROM ubuntu:22.04\n").unwrap();
+        // No .amux/Dockerfile.claude — classic legacy state.
+        assert!(
+            is_legacy_layout(root, "claude"),
+            "Should be legacy when Dockerfile.dev exists but .amux/Dockerfile.claude does not"
+        );
+    }
+
+    #[test]
+    fn is_legacy_layout_false_when_agent_dockerfile_already_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("Dockerfile.dev"), "FROM ubuntu:22.04\n").unwrap();
+        std::fs::create_dir_all(root.join(".amux")).unwrap();
+        std::fs::write(
+            root.join(".amux").join("Dockerfile.claude"),
+            "FROM amux-project:latest\n",
+        )
+        .unwrap();
+        assert!(
+            !is_legacy_layout(root, "claude"),
+            "Should not be legacy when .amux/Dockerfile.claude already exists"
+        );
+    }
+
+    #[test]
+    fn is_legacy_layout_false_when_no_dockerfile_dev() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        // No Dockerfile.dev at all — not even a legacy layout.
+        assert!(
+            !is_legacy_layout(root, "claude"),
+            "Should not be legacy when Dockerfile.dev is absent"
+        );
+    }
+
+    #[test]
+    fn is_legacy_layout_false_for_unknown_agent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("Dockerfile.dev"), "FROM ubuntu:22.04\n").unwrap();
+        // Dockerfile.dev exists, but agent name is not in KNOWN_AGENT_NAMES.
+        assert!(
+            !is_legacy_layout(root, "unknown-agent-xyz"),
+            "Should not be legacy for unknown agent names"
+        );
+    }
+
+    #[test]
+    fn is_legacy_layout_true_for_all_known_agents_when_agent_dockerfile_absent() {
+        for &agent in crate::cli::KNOWN_AGENT_NAMES {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let root = tmp.path();
+            std::fs::write(root.join("Dockerfile.dev"), "FROM ubuntu:22.04\n").unwrap();
+            // No .amux/Dockerfile.{agent}
+            assert!(
+                is_legacy_layout(root, agent),
+                "Expected legacy layout for known agent '{}' when .amux/Dockerfile.{} is absent",
+                agent,
+                agent
+            );
+        }
+    }
+
+    #[test]
+    fn is_legacy_layout_false_for_all_known_agents_when_agent_dockerfile_present() {
+        for &agent in crate::cli::KNOWN_AGENT_NAMES {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let root = tmp.path();
+            std::fs::write(root.join("Dockerfile.dev"), "FROM ubuntu:22.04\n").unwrap();
+            std::fs::create_dir_all(root.join(".amux")).unwrap();
+            std::fs::write(
+                root.join(".amux").join(format!("Dockerfile.{}", agent)),
+                "FROM amux-project:latest\n",
+            )
+            .unwrap();
+            assert!(
+                !is_legacy_layout(root, agent),
+                "Should not be legacy for agent '{}' when .amux/Dockerfile.{} exists",
+                agent,
+                agent
+            );
+        }
+    }
+
+    // ─── perform_legacy_migration tests ──────────────────────────────────────
+
+    #[test]
+    fn perform_legacy_migration_creates_backup_and_replaces_with_template() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let original = "FROM ubuntu:22.04\nRUN apt-get update\n";
+        std::fs::write(root.join("Dockerfile.dev"), original).unwrap();
+
+        let result = perform_legacy_migration(root);
+        assert!(
+            result.is_ok(),
+            "perform_legacy_migration should succeed when Dockerfile.dev exists: {:?}",
+            result
+        );
+
+        // Backup must exist and contain the original content.
+        let backup = root.join("Dockerfile.dev.bak");
+        assert!(backup.exists(), "Backup file Dockerfile.dev.bak must be created");
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            original,
+            "Backup must contain the original Dockerfile.dev content verbatim"
+        );
+
+        // Dockerfile.dev must be overwritten with the project base template.
+        let template = crate::commands::init::project_dockerfile_embedded();
+        let new_content = std::fs::read_to_string(root.join("Dockerfile.dev")).unwrap();
+        assert_eq!(
+            new_content.trim(),
+            template.trim(),
+            "Dockerfile.dev must be replaced with the minimal project base template"
+        );
+    }
+
+    #[test]
+    fn perform_legacy_migration_returns_messages_describing_actions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("Dockerfile.dev"), "FROM ubuntu:22.04\n").unwrap();
+
+        let messages = perform_legacy_migration(root).unwrap();
+        assert!(!messages.is_empty(), "Must return at least one message");
+
+        let all = messages.join("\n");
+        assert!(
+            all.contains("Backed up") || all.contains(".bak"),
+            "Messages must mention the backup operation: {:?}",
+            messages
+        );
+        assert!(
+            all.contains("Dockerfile.dev"),
+            "Messages must reference Dockerfile.dev: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn perform_legacy_migration_errors_when_source_file_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        // Dockerfile.dev deliberately absent.
+        let result = perform_legacy_migration(root);
+        assert!(
+            result.is_err(),
+            "perform_legacy_migration must return Err when Dockerfile.dev is absent"
+        );
+    }
+
+    // ─── build_audit_setup tests ─────────────────────────────────────────────
+
+    /// Convenience constructor for ReadyContext with only audit-relevant fields set.
+    fn make_audit_context(agent: &str, agent_tag: Option<String>) -> ReadyContext {
+        ReadyContext {
+            image_tag: "amux-project:latest".to_string(),
+            dockerfile_str: String::new(),
+            git_root_str: String::new(),
+            mount_path: String::new(),
+            agent_name: agent.to_string(),
+            env_vars: vec![],
+            agent_image_tag: agent_tag,
+            agent_dockerfile_str: None,
+        }
+    }
+
+    #[test]
+    fn build_audit_setup_interactive_uses_audit_entrypoint() {
+        let ctx = make_audit_context("claude", None);
+        let setup = build_audit_setup(&ctx, false);
+        assert_eq!(
+            setup.entrypoint,
+            audit_entrypoint("claude"),
+            "non_interactive=false must produce the interactive audit_entrypoint"
+        );
+    }
+
+    #[test]
+    fn build_audit_setup_non_interactive_uses_non_interactive_entrypoint() {
+        let ctx = make_audit_context("claude", None);
+        let setup = build_audit_setup(&ctx, true);
+        assert_eq!(
+            setup.entrypoint,
+            audit_entrypoint_non_interactive("claude"),
+            "non_interactive=true must produce audit_entrypoint_non_interactive"
+        );
+    }
+
+    #[test]
+    fn build_audit_setup_uses_agent_image_tag_when_some() {
+        let agent_tag = "amux-project-claude:latest".to_string();
+        let ctx = make_audit_context("claude", Some(agent_tag.clone()));
+        let setup = build_audit_setup(&ctx, false);
+        assert_eq!(
+            setup.image_tag, agent_tag,
+            "agent_image_tag=Some(...) must be used as the audit image_tag"
+        );
+    }
+
+    #[test]
+    fn build_audit_setup_falls_back_to_project_tag_when_agent_tag_none() {
+        let ctx = make_audit_context("claude", None);
+        let setup = build_audit_setup(&ctx, false);
+        assert_eq!(
+            setup.image_tag, "amux-project:latest",
+            "agent_image_tag=None must fall back to the project base image tag"
+        );
+    }
+
+    #[test]
+    fn build_audit_setup_entrypoint_correct_for_all_known_agents() {
+        for &agent in crate::cli::KNOWN_AGENT_NAMES {
+            let ctx = make_audit_context(agent, None);
+
+            let interactive = build_audit_setup(&ctx, false);
+            assert_eq!(
+                interactive.entrypoint,
+                audit_entrypoint(agent),
+                "interactive entrypoint mismatch for agent '{}'",
+                agent
+            );
+
+            let non_interactive = build_audit_setup(&ctx, true);
+            assert_eq!(
+                non_interactive.entrypoint,
+                audit_entrypoint_non_interactive(agent),
+                "non-interactive entrypoint mismatch for agent '{}'",
+                agent
+            );
+        }
+    }
+
+    // ─── TrackingMockRuntime: records build_image_streaming calls ─────────────
+
+    struct TrackingMockRuntime {
+        image_exists: bool,
+        built_tags: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl TrackingMockRuntime {
+        fn new_with_image() -> Self {
+            Self {
+                image_exists: true,
+                built_tags: std::sync::Mutex::new(vec![]),
+            }
+        }
+
+        fn built_tags(&self) -> Vec<String> {
+            self.built_tags.lock().unwrap().clone()
+        }
+    }
+
+    impl AgentRuntime for TrackingMockRuntime {
+        fn is_available(&self) -> bool { true }
+        fn check_socket(&self) -> anyhow::Result<std::path::PathBuf> {
+            Ok(std::path::PathBuf::from("/var/run/mock.sock"))
+        }
+        fn image_exists(&self, _tag: &str) -> bool { self.image_exists }
+        fn name(&self) -> &'static str { "mock" }
+        fn cli_binary(&self) -> &'static str { "mock" }
+
+        fn build_image_streaming(
+            &self,
+            tag: &str,
+            _dockerfile: &std::path::Path,
+            _context: &std::path::Path,
+            _no_cache: bool,
+            _on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<String> {
+            self.built_tags.lock().unwrap().push(tag.to_string());
+            Ok(String::new())
+        }
+
+        fn run_container(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> anyhow::Result<()> { unreachable!("run_container should not be called") }
+
+        fn run_container_captured(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> anyhow::Result<(String, String)> { unreachable!("run_container_captured should not be called") }
+
+        fn run_container_at_path(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _entrypoint: &[&str], _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>, _allow_docker: bool,
+            _container_name: Option<&str>,
+        ) -> anyhow::Result<()> { unreachable!("run_container_at_path should not be called") }
+
+        fn run_container_captured_at_path(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _entrypoint: &[&str], _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>, _allow_docker: bool,
+        ) -> anyhow::Result<(String, String)> { unreachable!("run_container_captured_at_path should not be called") }
+
+        fn run_container_detached(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _container_name: Option<&str>, _env_vars: Vec<(String, String)>, _allow_docker: bool,
+            _host_settings: Option<&crate::runtime::HostSettings>,
+        ) -> anyhow::Result<String> { unreachable!("run_container_detached should not be called") }
+
+        fn start_container(&self, _id: &str) -> anyhow::Result<()> { unreachable!() }
+        fn stop_container(&self, _id: &str) -> anyhow::Result<()> { unreachable!() }
+        fn remove_container(&self, _id: &str) -> anyhow::Result<()> { unreachable!() }
+        fn is_container_running(&self, _id: &str) -> bool { unreachable!() }
+
+        fn find_stopped_container(
+            &self, _name: &str, _image: &str,
+        ) -> Option<crate::runtime::StoppedContainerInfo> { unreachable!() }
+
+        fn list_running_containers_by_prefix(&self, _prefix: &str) -> Vec<String> { unreachable!() }
+
+        fn list_running_containers_with_ids_by_prefix(
+            &self, _prefix: &str,
+        ) -> Vec<(String, String)> { unreachable!() }
+
+        fn get_container_workspace_mount(&self, _name: &str) -> Option<String> { unreachable!() }
+
+        fn query_container_stats(
+            &self, _name: &str,
+        ) -> Option<crate::runtime::ContainerStats> { unreachable!() }
+
+        fn build_run_args_pty(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_run_args_pty_display(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_run_args_pty_at_path(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _entrypoint: &[&str], _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>, _allow_docker: bool,
+            _container_name: Option<&str>,
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_exec_args_pty(
+            &self, _container_id: &str, _working_dir: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_run_args_display(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> { unreachable!() }
+    }
+
+    // ─── integration test: migration forces project image rebuild ─────────────
+
+    /// After `perform_legacy_migration()` + `run_pre_audit()` with `opts.build = true`,
+    /// `build_image_streaming` must be called for the project image even when
+    /// `image_exists()` returns `true` (i.e., the cached image is not reused).
+    ///
+    /// This covers DIV-4: `needs_build = dockerfile_was_missing || opts.build || !image_exists`.
+    #[tokio::test]
+    async fn migration_rebuild_forces_project_image_rebuild_even_when_image_exists() {
+        let tmp = setup_bare_git_repo();
+        let root = tmp.path().to_path_buf();
+
+        // Migrate: backup legacy Dockerfile.dev, replace with project template.
+        let messages = perform_legacy_migration(&root)
+            .expect("migration should succeed when Dockerfile.dev exists");
+        assert!(!messages.is_empty(), "Migration should return at least one message");
+        assert!(root.join("Dockerfile.dev.bak").exists(), "Backup must exist after migration");
+
+        // Build the tracking runtime: image already "exists" so without opts.build=true,
+        // run_pre_audit would see image_exists()=true and skip the rebuild.
+        let runtime = TrackingMockRuntime::new_with_image();
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        // Set build=true and legacy_mode=true (skip agent dockerfile steps for isolation).
+        // opts.build=true mirrors what the CLI/TUI sets immediately after migration succeeds.
+        let opts = ReadyOptions {
+            build: true,
+            auto_create_dockerfile: true,
+            legacy_mode: true,
+            ..Default::default()
+        };
+        let mut summary = ReadySummary::default();
+        let result = run_pre_audit(&sink, root.clone(), vec![], &opts, &mut summary, &runtime).await;
+        assert!(
+            result.is_ok(),
+            "run_pre_audit should succeed after migration: {}",
+            result.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+
+        let built = runtime.built_tags();
+        assert!(
+            !built.is_empty(),
+            "build_image_streaming must be called when opts.build=true (migration path); \
+             no build calls recorded — the old cached image would have been used instead"
+        );
+    }
+
+    // ─── regression: no spurious rebuild when not on migration path ───────────
+
+    /// When a project image already exists and neither `opts.build` nor
+    /// `dockerfile_was_missing` is set, `run_pre_audit` must NOT rebuild the image.
+    /// This guards against regressions that would cause unnecessary image rebuilds
+    /// for users who are not on the legacy-migration path.
+    #[tokio::test]
+    async fn no_spurious_rebuild_when_image_exists_and_build_false() {
+        let tmp = setup_bare_git_repo();
+        let root = tmp.path().to_path_buf();
+
+        let runtime = TrackingMockRuntime::new_with_image();
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        let opts = ReadyOptions {
+            build: false,
+            auto_create_dockerfile: true,
+            legacy_mode: true,
+            ..Default::default()
+        };
+        let mut summary = ReadySummary::default();
+        let _ = run_pre_audit(&sink, root.clone(), vec![], &opts, &mut summary, &runtime).await;
+
+        let built = runtime.built_tags();
+        assert!(
+            built.is_empty(),
+            "build_image_streaming must NOT be called when image exists and build=false; \
+             unexpected build calls for tags: {:?}",
+            built
+        );
+    }
+
+    // ─── TUI summary continuity tests ────────────────────────────────────────
+
+    /// Pre-audit must set docker_daemon, dockerfile, and dev_image to non-Pending values,
+    /// and those values must survive unchanged through run_post_audit.
+    ///
+    /// This validates DIV-11: the ReadySummary from pre-audit is stored in
+    /// tab.ready_summary and consumed by launch_ready_post_audit, rather than
+    /// post-audit creating a fresh pre-populated default.
+    #[tokio::test]
+    async fn tui_pre_audit_summary_values_persist_unchanged_through_post_audit() {
+        let tmp = setup_bare_git_repo();
+        let root = tmp.path().to_path_buf();
+
+        let runtime = TrackingMockRuntime::new_with_image();
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        // Phase 1: run pre-audit; image exists so dev_image = Ok("exists"), not "checked".
+        let pre_opts = ReadyOptions {
+            build: false,
+            auto_create_dockerfile: true,
+            legacy_mode: true,
+            ..Default::default()
+        };
+        let mut summary = ReadySummary::default();
+        let ctx = run_pre_audit(&sink, root.clone(), vec![], &pre_opts, &mut summary, &runtime)
+            .await
+            .unwrap_or_else(|e| panic!("run_pre_audit should succeed: {e}"));
+
+        // Pre-audit must have set the three fields that DIV-11 is about.
+        assert!(
+            !matches!(summary.docker_daemon, StepStatus::Pending),
+            "docker_daemon must be set by pre-audit, got {:?}",
+            summary.docker_daemon
+        );
+        assert!(
+            !matches!(summary.dockerfile, StepStatus::Pending),
+            "dockerfile must be set by pre-audit, got {:?}",
+            summary.dockerfile
+        );
+        assert!(
+            !matches!(summary.dev_image, StepStatus::Pending),
+            "dev_image must be set by pre-audit, got {:?}",
+            summary.dev_image
+        );
+
+        // Capture the pre-audit values before post-audit mutates the summary.
+        let pre_docker_daemon = summary.docker_daemon.clone();
+        let pre_dockerfile = summary.dockerfile.clone();
+        let pre_dev_image = summary.dev_image.clone();
+
+        // Phase 3: run post-audit with the same summary (as the TUI does when
+        // ready_summary is Some — the DIV-11 fix).
+        let post_opts = ReadyOptions {
+            refresh: true,
+            auto_create_dockerfile: true,
+            legacy_mode: true,
+            ..Default::default()
+        };
+        run_post_audit(&sink, &ctx, &post_opts, &mut summary, &runtime)
+            .await
+            .unwrap_or_else(|e| panic!("run_post_audit should succeed: {e}"));
+
+        // Post-audit must have set image_rebuild.
+        assert!(
+            matches!(summary.image_rebuild, StepStatus::Ok(_)),
+            "image_rebuild must be Ok after post-audit, got {:?}",
+            summary.image_rebuild
+        );
+
+        // Pre-audit values for the three DIV-11 fields must be unchanged.
+        // run_post_audit only updates image_rebuild; every other field comes from pre-audit.
+        assert_eq!(
+            summary.docker_daemon, pre_docker_daemon,
+            "docker_daemon must retain the pre-audit value after post-audit"
+        );
+        assert_eq!(
+            summary.dockerfile, pre_dockerfile,
+            "dockerfile must retain the pre-audit value after post-audit"
+        );
+        assert_eq!(
+            summary.dev_image, pre_dev_image,
+            "dev_image must retain the pre-audit value after post-audit"
+        );
+    }
+
+    /// The dev_image status set by pre-audit when the image already exists must
+    /// be "exists", not the "checked" default used by the TUI fallback path
+    /// (launch_ready_post_audit when ready_summary is None).
+    ///
+    /// This distinguishes the real pre-audit summary from the synthetic fallback,
+    /// confirming that the stored summary carries genuine status information.
+    #[tokio::test]
+    async fn tui_pre_audit_dev_image_status_is_exists_not_checked_default() {
+        let tmp = setup_bare_git_repo();
+        let root = tmp.path().to_path_buf();
+
+        let runtime = TrackingMockRuntime::new_with_image();
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        let opts = ReadyOptions {
+            build: false,
+            auto_create_dockerfile: true,
+            legacy_mode: true,
+            ..Default::default()
+        };
+        let mut summary = ReadySummary::default();
+        let _ = run_pre_audit(&sink, root.clone(), vec![], &opts, &mut summary, &runtime).await;
+
+        // When the image pre-exists (image_exists=true, build=false), dev_image must be
+        // Ok("exists"), not Ok("checked") which is the TUI fallback sentinel.
+        assert_eq!(
+            summary.dev_image,
+            StepStatus::Ok("exists".into()),
+            "dev_image must be Ok(\"exists\") when the image was found, not Ok(\"checked\") fallback"
+        );
+    }
+
+    /// Regression guard: the fallback logic in launch_ready_post_audit (used when
+    /// ready_summary is None — i.e., pre-audit failed or was aborted) must still
+    /// produce sensible non-Pending values for the three DIV-11 fields.
+    #[test]
+    fn tui_summary_fallback_defaults_remain_sensible_when_pre_audit_missing() {
+        // Reproduce the unwrap_or_else fallback from launch_ready_post_audit in tui/mod.rs.
+        let stored: Option<ReadySummary> = None;
+        let summary = stored.unwrap_or_else(|| {
+            let mut s = ReadySummary::default();
+            s.docker_daemon = StepStatus::Ok("running".into());
+            s.dockerfile = StepStatus::Ok("checked".into());
+            s.dev_image = StepStatus::Ok("checked".into());
+            s.refresh = StepStatus::Ok("completed".into());
+            s
+        });
+
+        assert!(
+            matches!(summary.docker_daemon, StepStatus::Ok(_)),
+            "fallback docker_daemon must be Ok"
+        );
+        assert!(
+            matches!(summary.dockerfile, StepStatus::Ok(_)),
+            "fallback dockerfile must be Ok"
+        );
+        assert!(
+            matches!(summary.dev_image, StepStatus::Ok(_)),
+            "fallback dev_image must be Ok"
+        );
+        assert!(
+            matches!(summary.refresh, StepStatus::Ok(_)),
+            "fallback refresh must be Ok"
+        );
+        // image_rebuild is set by run_post_audit itself; the fallback leaves it Pending.
+        assert_eq!(
+            summary.image_rebuild,
+            StepStatus::Pending,
+            "fallback image_rebuild must be Pending before post-audit runs"
         );
     }
 }

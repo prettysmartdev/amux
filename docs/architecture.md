@@ -54,9 +54,19 @@ src/
                            find_template, next_work_item_number
                            Auto-downloads aspec/ if template is missing
     ready.rs               `amux ready` — run() + run_with_sink()
-                           ReadyOptions, ReadySummary, print_summary,
-                           print_interactive_notice,
+                           ReadyOptions, ReadyContext, ReadySummary, AuditSetup
+                           StepStatus, print_summary, print_interactive_notice,
                            audit_entrypoint, audit_entrypoint_non_interactive
+                           Engine functions (called identically from CLI and TUI):
+                             compute_ready_build_flag(refresh, build)
+                             is_legacy_layout(git_root, agent_name)
+                             perform_legacy_migration(git_root)
+                             gather_ready_env_vars(git_root, agent_name)
+                             create_ready_host_settings(agent_name)
+                             apply_ready_user_directive(host_settings, ctx)
+                             check_allow_docker(out, allow_docker, runtime)
+                             build_audit_setup(ctx, non_interactive)
+                           run_pre_audit(), run_post_audit()
     implement.rs           `amux implement` — run() + run_with_sink()
                            agent_entrypoint, agent_entrypoint_non_interactive
     chat.rs                `amux chat` — run() + run_with_sink()
@@ -80,7 +90,9 @@ src/
                            PendingCommand (Ready/Implement/Chat with flags);
                            ContainerWindowState, ContainerInfo,
                            LastContainerSummary; terminal selection state fields;
-                           terminal_scrollback_lines; container_inner_area
+                           terminal_scrollback_lines; container_inner_area;
+                           Tab.ready_summary: Option<ReadySummary> (stores
+                           pre-audit summary for handoff to post-audit phase)
     input.rs               handle_key(); Action enum (incl. CopyToClipboard);
                            autocomplete; key→bytes; Ctrl+Y copy keybinding
     render.rs              draw(); draw_exec_window/command_box/dialog etc.;
@@ -300,12 +312,22 @@ The `ready` command has two modes based on the `--refresh` flag:
 
 ```rust
 pub struct ReadyOptions {
-    pub refresh: bool,
-    pub non_interactive: bool,
+    pub refresh: bool,          // run the Dockerfile audit
+    pub build: bool,            // force rebuild the dev image
+    pub no_cache: bool,         // pass --no-cache to docker build
+    pub non_interactive: bool,  // launch agent in print mode
+    pub allow_docker: bool,     // mount Docker socket into audit container
+    pub auto_create_dockerfile: bool, // create Dockerfile.dev if missing (TUI: skip prompting)
+    pub legacy_mode: bool,      // use project image only; skip agent image steps
 }
 ```
 
-Shared between command mode and TUI mode. Defaults to `refresh: false, non_interactive: false`.
+Shared between command mode and TUI mode. All fields default to `false`.
+
+The `build` flag is set to `true` programmatically after a successful legacy
+layout migration, overriding the value computed by `compute_ready_build_flag()`.
+This ensures the project image is rebuilt from the new minimal `Dockerfile.dev`
+before the audit runs.
 
 ### `ReadySummary`
 
@@ -313,14 +335,23 @@ Shared between command mode and TUI mode. Defaults to `refresh: false, non_inter
 pub struct ReadySummary {
     pub docker_daemon: StepStatus,
     pub dockerfile: StepStatus,
+    pub aspec_folder: StepStatus,
+    pub work_items_config: StepStatus,
+    pub local_agent: StepStatus,
     pub dev_image: StepStatus,
     pub refresh: StepStatus,
     pub image_rebuild: StepStatus,
 }
 ```
 
-Each step status is one of `Pending`, `Ok(msg)`, `Skipped(msg)`, or `Failed(msg)`.
-The summary table is rendered via `print_summary()` at the end of every ready run.
+Each step status is one of `Pending`, `Ok(msg)`, `Skipped(msg)`, `Failed(msg)`,
+or `Warn(msg)`. The summary table is rendered via `print_summary()` at the end
+of every ready run.
+
+The `ReadySummary` produced by `run_pre_audit()` is passed to `run_post_audit()`
+so that post-audit can include the pre-audit results (docker_daemon, dockerfile,
+dev_image) in the final printed table. In TUI mode, the summary is stored in
+`Tab.ready_summary` between phases rather than being reconstructed from defaults.
 
 ### Interactive Notice
 
@@ -331,6 +362,51 @@ that:
 - They need to quit the agent when done
 
 This notice is suppressed when `--non-interactive` is used.
+
+### Ready Engine Functions
+
+All business logic for the `ready` command lives in `src/commands/ready.rs` (the
+engine). `src/tui/mod.rs` is the orchestrator: it sequences phases, manages I/O
+routing, and holds state — but contains no inline Docker or filesystem operations
+related to `ready`. Every such operation goes through a function in `ready.rs`.
+
+Both CLI (`run()` in `ready.rs`) and TUI (`execute_command`, `launch_ready*` in
+`mod.rs`) call the same engine functions. The only differences between CLI and TUI
+are:
+
+- **User Q&A mechanism**: stdin prompts (CLI) vs. dialogs/actions (TUI)
+- **Audit container execution**: inherited stdio (CLI) vs. PTY session (TUI)
+
+All other logic — detection, migration, flag computation, build sequencing,
+socket checks, entrypoint selection, image selection, host-settings application,
+summary accumulation — uses the shared engine functions.
+
+| Engine function | Description |
+|---|---|
+| `compute_ready_build_flag(refresh, build)` | Returns `build` unless `refresh` is set (refresh always rebuilds post-audit, so forcing a pre-audit build is redundant). Migration overrides this value afterward. |
+| `is_legacy_layout(git_root, agent_name)` | Returns `true` when `Dockerfile.dev` exists, the agent is a known amux agent, and `.amux/Dockerfile.{agent}` does not yet exist. |
+| `perform_legacy_migration(git_root)` | Backs up `Dockerfile.dev` to `Dockerfile.dev.bak` and overwrites it with the minimal project base template. Returns display messages. |
+| `gather_ready_env_vars(git_root, agent_name)` | Calls `resolve_auth()` (handles keychain, env-var, and file-based auth) then appends `effective_env_passthrough` vars not already present. |
+| `create_ready_host_settings(agent_name)` | Thin wrapper: calls `passthrough_for_agent(agent_name).prepare_host_settings()`. |
+| `apply_ready_user_directive(host_settings, ctx)` | Applies the USER directive from the agent dockerfile to host settings so files are mounted at the correct home directory inside the container. Called after `run_pre_audit()` returns, before the audit container launches. |
+| `check_allow_docker(out, allow_docker, runtime)` | Verifies the host Docker socket is accessible when `--allow-docker` is set. Returns `Ok(())` when not needed or when socket is found (with a warning); returns `Err` when socket is missing. |
+| `build_audit_setup(ctx, non_interactive)` | Returns an `AuditSetup` with the image tag (agent image when available, project image in legacy mode) and the correct entrypoint. |
+| `run_pre_audit(…)` | Phase 1: daemon check, Dockerfile init, aspec check, local agent check, image build. Returns `ReadyContext`. |
+| `run_post_audit(…)` | Phase 3: rebuilds both images after the audit agent updates `Dockerfile.dev`. |
+
+### `AuditSetup`
+
+```rust
+pub struct AuditSetup {
+    pub image_tag: String,
+    pub entrypoint: Vec<String>,
+}
+```
+
+Produced by `build_audit_setup()`. Carries the image and entrypoint for the audit
+container: uses the agent image (`amux-{project}-{agent}:latest`) when available,
+or the project base image in legacy mode. The entrypoint uses the interactive form
+unless `non_interactive` is `true`.
 
 ---
 
@@ -494,22 +570,39 @@ a `tokio::sync::oneshot` channel.
 The `ready --refresh` command runs a three-phase workflow:
 
 1. **Pre-audit** (text command via `OutputSink`): checks Docker daemon, ensures
-   `Dockerfile.dev` exists, builds the image (streaming). Returns a `ReadyContext`
-   with the image tag, mount path, agent name, and env vars.
+   `Dockerfile.dev` exists, checks aspec folder, checks local agent, builds the
+   image (streaming). Returns a `ReadyContext` with the image tag, mount path,
+   agent name, env vars, and agent image tag. Also returns a `ReadySummary` with
+   the status of each pre-audit step.
 2. **Audit** (interactive PTY or captured): launches the agent to scan the project
    and update `Dockerfile.dev`. In command mode with interactive: uses
-   `docker::run_container()` with inherited stdio. In command mode with
-   `--non-interactive`: uses `docker::run_container_captured()`. In TUI mode:
+   `runtime.run_container()` with inherited stdio. In command mode with
+   `--non-interactive`: uses `runtime.run_container_captured()`. In TUI mode:
    uses a PTY session (interactive) or captured command (non-interactive).
-3. **Post-audit** (text command): rebuilds the Docker image with streaming output.
+3. **Post-audit** (text command): rebuilds both the project base image and the
+   agent image with streaming output, then prints the final summary table.
 
 Without `--refresh`, only phase 1 runs, followed by the summary table.
 
 In TUI mode, `ReadyPhase` tracks which phase is active. When a phase completes,
 `check_ready_continuation()` automatically launches the next phase.
 
+**Summary continuity in TUI mode**: after phase 1 completes, `check_ready_continuation()`
+stores both the `ReadyContext` and the `ReadySummary` in `Tab.ready_ctx` and
+`Tab.ready_summary`. Phase 3 (`launch_ready_post_audit()`) retrieves this stored
+summary and passes it directly to `run_post_audit()`, so the final table includes
+the docker_daemon, dockerfile, and dev_image statuses from phase 1 — not
+reconstructed defaults.
+
 Image tags are project-specific (`amux-{projectname}:latest`) derived from the
-Git root folder name via `docker::project_image_tag()`.
+Git root folder name via `runtime::project_image_tag()`.
+
+**Migration and image rebuild**: when a legacy layout migration runs, `build`
+is set to `true` after `perform_legacy_migration()` succeeds. `run_pre_audit()`
+checks `opts.build` as part of its `needs_build` condition, so the project base
+image is rebuilt from the new minimal `Dockerfile.dev` before the agent image is
+built on top of it. Without this flag, the cached legacy image would be used and
+the audit would run inside the old environment.
 
 ### Host Settings Injection
 
