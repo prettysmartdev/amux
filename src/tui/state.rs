@@ -1,5 +1,4 @@
 use crate::commands::claws::ClawsAuditCtx;
-use crate::commands::ready::{ReadyContext, ReadyOptions, ReadySummary};
 use crate::commands::status::TuiTabInfo;
 use crate::config::{GlobalConfig, RepoConfig};
 use crate::runtime::{ContainerStats, HostSettings, parse_cpu_percent, parse_memory_mb};
@@ -250,6 +249,11 @@ pub enum PendingCommand {
         no_cache: bool,
         non_interactive: bool,
         allow_docker: bool,
+        /// Pre-collected answer to the legacy migration dialog.
+        /// `None` = no legacy layout detected (or dialog not yet shown).
+        /// `Some(true)` = user accepted migration.
+        /// `Some(false)` = user declined migration (keep legacy layout).
+        migrate_decision: Option<bool>,
     },
     Implement {
         work_item: u32,
@@ -367,18 +371,6 @@ pub fn format_duration(secs: u64) -> String {
     }
 }
 
-/// Which phase of the multi-step `ready` workflow is active.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ReadyPhase {
-    /// Not running a multi-phase ready workflow.
-    Inactive,
-    /// Pre-audit text command is running; audit PTY should launch next.
-    PreAudit,
-    /// Interactive audit PTY is running; post-audit should launch next.
-    Audit,
-    /// Post-audit text command is running; workflow is done when it finishes.
-    PostAudit,
-}
 
 /// Per-tab application state for the TUI event loop.
 pub struct TabState {
@@ -429,20 +421,6 @@ pub struct TabState {
     // --- Pending TUI state before launching a command (used by dialogs) ---
     pub pending_command: PendingCommand,
     pub pending_mount_path: Option<PathBuf>,
-
-    // --- Multi-phase ready command state ---
-    /// When Some, the ready command is mid-workflow; the audit or post-audit phase
-    /// should be launched when the current phase finishes.
-    pub ready_ctx: Option<ReadyContext>,
-    /// Receives the ReadyContext and summary from the pre-audit task when it completes.
-    pub ready_ctx_rx: Option<tokio::sync::oneshot::Receiver<(ReadyContext, ReadySummary)>>,
-    /// Which phase of the ready workflow just completed.
-    pub ready_phase: ReadyPhase,
-    /// Options for the current ready workflow.
-    pub ready_opts: ReadyOptions,
-    /// Summary produced by the pre-audit phase, stored so post-audit can use it
-    /// without pre-populating defaults.
-    pub ready_summary: Option<ReadySummary>,
 
     // --- Container window state ---
     /// Whether the container overlay window is visible (and in what state).
@@ -621,11 +599,6 @@ impl TabState {
             exit_rx: None,
             pending_command: PendingCommand::None,
             pending_mount_path: None,
-            ready_ctx: None,
-            ready_ctx_rx: None,
-            ready_phase: ReadyPhase::Inactive,
-            ready_opts: ReadyOptions::default(),
-            ready_summary: None,
             container_window: ContainerWindowState::Hidden,
             container_scroll_offset: 0,
             container_info: None,
@@ -771,13 +744,10 @@ impl TabState {
         self.exit_rx = None;
 
         // Drop host settings only if no multi-phase workflow is in progress.
-        // During ready --refresh, the pre-audit phase completes before the audit container
-        // launches — host_settings must survive across phases.
         // During claws setup, the text task completes before the PTY exec session starts —
         // host_settings must survive until the exec session ends.
         // Also preserve host_settings while a workflow step sequence is in progress.
-        if self.ready_phase == ReadyPhase::Inactive
-            && self.claws_phase == ClawsPhase::Inactive
+        if self.claws_phase == ClawsPhase::Inactive
             && self.workflow.is_none()
         {
             self.host_settings = None;
@@ -1258,14 +1228,6 @@ impl TabState {
                         had_error: code != 0,
                     };
                 }
-            }
-        }
-
-        // Check for ready context from pre-audit phase.
-        if let Some(ref mut rx) = self.ready_ctx_rx {
-            if let Ok((ctx, summary)) = rx.try_recv() {
-                self.ready_ctx = Some(ctx);
-                self.ready_summary = Some(summary);
             }
         }
 
