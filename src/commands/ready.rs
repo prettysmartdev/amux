@@ -1,9 +1,8 @@
 use crate::cli::Agent;
 use crate::commands::auth::resolve_auth;
 use crate::commands::implement::confirm_mount_scope_stdin;
-use crate::commands::init::ask_yes_no_stdin;
 use crate::commands::init_flow::{
-    find_git_root, find_git_root_from, project_dockerfile_embedded,
+    find_git_root_from, project_dockerfile_embedded,
     write_agent_dockerfile, write_project_dockerfile,
 };
 use crate::commands::output::OutputSink;
@@ -421,198 +420,30 @@ pub fn build_audit_setup(ctx: &ReadyContext, non_interactive: bool) -> AuditSetu
     AuditSetup { image_tag, entrypoint }
 }
 
-/// Command-mode entry point: prompts for mount scope and auth, then runs ready phases.
-/// The audit phase is only run when `--refresh` is passed.
-pub async fn run(refresh: bool, build: bool, no_cache: bool, non_interactive: bool, allow_docker: bool, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
-    // If --refresh is set, ignore --build (refresh always rebuilds after audit).
-    let mut effective_build = compute_ready_build_flag(refresh, build);
-    let git_root = find_git_root().context("Not inside a Git repository")?;
-    if migrate_legacy_repo_config(&git_root)? {
-        println!("Migrated config: aspec/.amux.json -> .amux/config.json");
-    }
+/// Command-mode entry point: gathers mount scope and delegates to the ready flow.
+pub async fn run(
+    refresh: bool,
+    build: bool,
+    no_cache: bool,
+    non_interactive: bool,
+    allow_docker: bool,
+    runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
+) -> Result<()> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let git_root = find_git_root_from(&cwd).context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
-    let config = load_repo_config(&git_root)?;
-    let agent_name = config.agent.as_deref().unwrap_or("claude");
-    let env_vars = gather_ready_env_vars(&git_root, agent_name)?;
-    let mut host_settings = create_ready_host_settings(agent_name);
-    let out = &OutputSink::Stdout;
-
-    // Determine whether to auto-create Dockerfile.dev or prompt the user.
-    let dockerfile_path = git_root.join("Dockerfile.dev");
-    let mut effective_refresh;
-    let auto_create_dockerfile;
-
-    if !dockerfile_path.exists() {
-        // No Dockerfile.dev: explain what it does and ask the user.
-        println!(
-            "\nNo Dockerfile.dev found in the project."
-        );
-        println!(
-            "Dockerfile.dev defines the container that runs your code agent securely."
-        );
-        println!(
-            "Without it, `amux ready` cannot build the dev container image."
-        );
-        if ask_yes_no_stdin("Create a Dockerfile.dev from the default template and run the agent audit?") {
-            auto_create_dockerfile = true;
-            // If user accepts, run audit automatically (unless --refresh already set).
-            effective_refresh = true;
-        } else {
-            // User declined: fail the ready command.
-            println!("Dockerfile.dev is required. Run `amux init` to set it up.");
-            // Still run to show the summary with the failure.
-            auto_create_dockerfile = false;
-            effective_refresh = refresh;
-        }
-    } else if !refresh {
-        // Dockerfile.dev exists, --refresh not set: check if content matches project template.
-        // If it matches, offer to run the audit.
-        let content = std::fs::read_to_string(&dockerfile_path).unwrap_or_default();
-        if dockerfile_matches_template(&content) {
-            println!(
-                "\nYour Dockerfile.dev matches the default project template — the agent audit can"
-            );
-            println!("scan your project and customize it for your specific toolchain.");
-            if ask_yes_no_stdin("Run the agent audit container now?") {
-                effective_refresh = true;
-            } else {
-                effective_refresh = false;
-            }
-        } else {
-            effective_refresh = false;
-        }
-        auto_create_dockerfile = true; // File exists, no creation needed.
-    } else {
-        // --refresh was explicitly set, Dockerfile.dev exists.
-        effective_refresh = true;
-        auto_create_dockerfile = true;
-    }
-
-    // Detect legacy layout and offer migration to the modular layout.
-    let legacy_mode = if is_legacy_layout(&git_root, agent_name) {
-        println!();
-        println!("Detected legacy single-file Dockerfile.dev layout.");
-        println!("Would you like to migrate to the modular layout? (agent tools move to .amux/Dockerfile.{})", agent_name);
-        println!();
-        println!("Migrating will:");
-        println!("  1. Back up Dockerfile.dev to Dockerfile.dev.bak");
-        println!("  2. Recreate Dockerfile.dev with a minimal debian:bookworm-slim base");
-        println!("  3. Write .amux/Dockerfile.{} using the agent template", agent_name);
-        println!("  4. Build both images");
-        println!("  5. Run the audit agent to restore project dependencies in Dockerfile.dev");
-        println!();
-        if ask_yes_no_stdin("Migrate to modular Dockerfile layout?") {
-            let messages = perform_legacy_migration(&git_root)?;
-            for msg in &messages {
-                println!("{}", msg);
-            }
-            // Force a project image rebuild from the new minimal Dockerfile.dev.
-            effective_build = true;
-            // Force refresh so the audit runs and restores project deps.
-            effective_refresh = true;
-            false // not legacy mode — proceed with new layout
-        } else {
-            println!("Keeping existing layout. Use the project image for this session.");
-            println!("DEPRECATION WARNING: Run `amux ready` to migrate to the modular layout.");
-            true // legacy mode
-        }
-    } else {
-        false // new layout or Dockerfile.dev missing (handled above)
-    };
-
-    let opts = ReadyOptions {
-        refresh: effective_refresh,
-        build: effective_build,
+    let sink = OutputSink::Stdout;
+    let mut qa = crate::commands::ready_flow::CliReadyQa::new(sink.clone());
+    let launcher = crate::commands::ready_flow::CliReadyAuditLauncher::new(runtime.clone());
+    let params = crate::commands::ready_flow::ReadyParams {
+        refresh,
+        build,
         no_cache,
         non_interactive,
         allow_docker,
-        auto_create_dockerfile,
-        legacy_mode,
     };
-
-    let mut summary = ReadySummary::default();
-    let ctx = run_pre_audit(out, mount_path, env_vars, &opts, &mut summary, &*runtime).await?;
-
-    if opts.refresh {
-        if let Some(msg) = apply_ready_user_directive(host_settings.as_mut(), &ctx) {
-            out.println(msg);
-        }
-
-        if !opts.non_interactive {
-            print_interactive_notice(out, &ctx.agent_name);
-        }
-
-        check_allow_docker(out, opts.allow_docker, &*runtime)?;
-
-        let audit = build_audit_setup(&ctx, opts.non_interactive);
-        let entrypoint_refs: Vec<&str> = audit.entrypoint.iter().map(String::as_str).collect();
-
-        if opts.non_interactive {
-            let (_cmd, audit_output) = runtime.run_container_captured(
-                &audit.image_tag,
-                &ctx.mount_path,
-                &entrypoint_refs,
-                &ctx.env_vars,
-                host_settings.as_ref(),
-                opts.allow_docker,
-                None,
-                None,
-            )
-            .context("Dockerfile audit container failed")?;
-            for line in audit_output.lines() {
-                out.println(line);
-            }
-        } else {
-            runtime.run_container(
-                &audit.image_tag,
-                &ctx.mount_path,
-                &entrypoint_refs,
-                &ctx.env_vars,
-                host_settings.as_ref(),
-                opts.allow_docker,
-                None,
-                None,
-            )
-            .context("Dockerfile audit container failed")?;
-        }
-
-        summary.refresh = StepStatus::Ok("completed".into());
-        run_post_audit(out, &ctx, &opts, &mut summary, &*runtime).await?;
-    } else {
-        out.println("Skipping Dockerfile audit (use --refresh to run it).");
-        summary.refresh = StepStatus::Skipped("use --refresh to run".into());
-        // When --build is set, force a rebuild even without --refresh.
-        if opts.build {
-            run_force_build(out, &ctx, &opts, &mut summary, &*runtime).await?;
-        } else {
-            summary.image_rebuild = StepStatus::Skipped("no refresh".into());
-        }
-    }
-
-    print_summary(out, runtime.name(), &summary);
-
-    if !opts.refresh {
-        out.println(String::new());
-        out.println("Tip: use `amux ready --refresh` to run the Dockerfile audit agent.");
-    }
-
-    // Note missing aspec if applicable.
-    if matches!(summary.aspec_folder, StepStatus::Failed(_)) {
-        out.println(String::new());
-        out.println("Tip: run `amux init --aspec` to add an aspec folder to this project.");
-    }
-
-    // Note missing work_items config if applicable.
-    if matches!(summary.work_items_config, StepStatus::Warn(_)) {
-        out.println(String::new());
-        out.println(
-            "Tip: run `amux config set work_items.dir <path>` to configure a work items directory.",
-        );
-    }
-
-    out.println(String::new());
-    out.println("amux is ready.");
-
+    crate::commands::ready_flow::execute(params, &mut qa, &launcher, &sink, mount_path, runtime)
+        .await?;
     Ok(())
 }
 
@@ -943,7 +774,7 @@ pub async fn run_post_audit(
 }
 
 /// Force-rebuild the project base image and all agent images (used when --build is passed without --refresh).
-async fn run_force_build(
+pub async fn run_force_build(
     out: &OutputSink,
     ctx: &ReadyContext,
     opts: &ReadyOptions,
@@ -959,78 +790,6 @@ async fn run_force_build(
     Ok(())
 }
 
-/// Runs ready without audit, with captured output.
-///
-/// Used by TUI mode and integration tests where an interactive PTY is not available.
-pub async fn run_with_sink(
-    out: &OutputSink,
-    mount_path: PathBuf,
-    env_vars: Vec<(String, String)>,
-    opts: &ReadyOptions,
-    host_settings: Option<&crate::runtime::HostSettings>,
-    runtime: &dyn crate::runtime::AgentRuntime,
-) -> Result<ReadySummary> {
-    let mut summary = ReadySummary::default();
-    let ctx = run_pre_audit(out, mount_path, env_vars, opts, &mut summary, runtime).await?;
-
-    if opts.refresh {
-        check_allow_docker(out, opts.allow_docker, runtime)?;
-
-        let audit = build_audit_setup(&ctx, opts.non_interactive);
-        let entrypoint_refs: Vec<&str> = audit.entrypoint.iter().map(String::as_str).collect();
-
-        let (_run_cmd, audit_output) = runtime.run_container_captured(
-            &audit.image_tag,
-            &ctx.mount_path,
-            &entrypoint_refs,
-            &ctx.env_vars,
-            host_settings,
-            opts.allow_docker,
-            None,
-            None,
-        )
-        .context("Dockerfile audit container failed")?;
-        for line in audit_output.lines() {
-            out.println(line);
-        }
-        summary.refresh = StepStatus::Ok("completed".into());
-
-        run_post_audit(out, &ctx, opts, &mut summary, runtime).await?;
-    } else {
-        out.println("Skipping Dockerfile audit (use --refresh to run it).");
-        summary.refresh = StepStatus::Skipped("use --refresh to run".into());
-        if opts.build {
-            run_force_build(out, &ctx, opts, &mut summary, runtime).await?;
-        } else {
-            summary.image_rebuild = StepStatus::Skipped("no refresh".into());
-        }
-    }
-
-    print_summary(out, runtime.name(), &summary);
-
-    if !opts.refresh {
-        out.println(String::new());
-        out.println("Tip: use `amux ready --refresh` to run the Dockerfile audit agent.");
-    }
-
-    // Note missing aspec if applicable.
-    if matches!(summary.aspec_folder, StepStatus::Failed(_)) {
-        out.println(String::new());
-        out.println("Tip: run `amux init --aspec` to add an aspec folder to this project.");
-    }
-
-    // Note missing work_items config if applicable.
-    if matches!(summary.work_items_config, StepStatus::Warn(_)) {
-        out.println(String::new());
-        out.println(
-            "Tip: run `amux config set work_items.dir <path>` to configure a work items directory.",
-        );
-    }
-
-    out.println(String::new());
-    out.println("amux is ready.");
-    Ok(summary)
-}
 
 /// Build the entrypoint command for the Dockerfile audit agent (interactive mode).
 pub fn audit_entrypoint(agent: &str) -> Vec<String> {
@@ -1081,69 +840,6 @@ mod tests {
     use super::*;
     use crate::runtime::AgentRuntime;
     use tokio::sync::mpsc::unbounded_channel;
-
-    #[tokio::test]
-    async fn run_with_sink_fails_gracefully_without_docker() {
-        let runtime = crate::runtime::DockerRuntime::new();
-        if runtime.is_available() {
-            return;
-        }
-        let (tx, mut rx) = unbounded_channel();
-        let sink = OutputSink::Channel(tx);
-        let mount_path = PathBuf::from("/tmp");
-        let opts = ReadyOptions { auto_create_dockerfile: true, ..Default::default() };
-        let result = run_with_sink(&sink, mount_path, vec![], &opts, None, &runtime).await;
-        assert!(result.is_err());
-        let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-        assert!(messages.iter().any(|m| m.contains("FAILED") || m.contains("Checking")));
-    }
-
-    /// When Docker is available, `run_with_sink` must route status messages
-    /// through the OutputSink (including Docker daemon check, local agent, etc.).
-    #[tokio::test]
-    async fn run_with_sink_routes_all_output_through_sink() {
-        let runtime = crate::runtime::DockerRuntime::new();
-        if !runtime.is_available() {
-            return;
-        }
-        let git_root = match find_git_root() {
-            Some(r) => r,
-            None => return,
-        };
-        if !git_root.join("Dockerfile.dev").exists() {
-            return;
-        }
-
-        let (tx, mut rx) = unbounded_channel();
-        let sink = OutputSink::Channel(tx);
-        let opts = ReadyOptions { auto_create_dockerfile: true, ..Default::default() };
-        let result = run_with_sink(&sink, git_root.clone(), vec![], &opts, None, &runtime).await;
-        let _ = result;
-
-        let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-
-        // Must include runtime check message (this is the first thing produced).
-        let has_checking = messages.iter().any(|m| m.contains("Checking") && m.contains("runtime"));
-        assert!(
-            has_checking,
-            "Expected runtime check in output. Got: {:?}",
-            messages
-        );
-
-        // Must include some ready-related status — either Dockerfile check, image check,
-        // or the local agent check. We accept a broad set because concurrent tests
-        // may cause the git root to vary; the key invariant is that output is routed through sink.
-        let has_ready_output = messages.iter().any(|m| {
-            m.contains("found") || m.contains("uilding") || m.contains("built")
-                || m.contains("rebuild") || m.contains("Dockerfile") || m.contains("Image")
-                || m.contains("agent")
-        });
-        assert!(
-            has_ready_output,
-            "Expected ready-related output in sink. Got: {:?}",
-            messages
-        );
-    }
 
     #[test]
     fn audit_entrypoint_claude() {

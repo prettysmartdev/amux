@@ -22,7 +22,7 @@ use amux::commands::ready::{
     ReadyOptions, ReadySummary, StepStatus,
     print_summary, print_interactive_notice,
 };
-use amux::commands::{init_flow, new, ready};
+use amux::commands::{init_flow, new, ready_flow};
 use amux::runtime::docker::DockerRuntime;
 use amux::tui::input::{autocomplete_suggestions, closest_subcommand};
 use std::path::PathBuf;
@@ -74,10 +74,25 @@ async fn ready_via_sink_emits_checking_message() {
     let (tx, mut rx) = unbounded_channel::<String>();
     let sink = OutputSink::Channel(tx);
 
-    let mount_path = PathBuf::from("/tmp");
-    let opts = ReadyOptions::default();
-    let runtime = DockerRuntime::new();
-    let _ = ready::run_with_sink(&sink, mount_path, vec![], &opts, None, &runtime).await;
+    let runtime = std::sync::Arc::new(DockerRuntime::new());
+    let params = ready_flow::ReadyParams {
+        refresh: false,
+        build: false,
+        no_cache: false,
+        non_interactive: false,
+        allow_docker: false,
+    };
+    let cwd = std::env::current_dir().unwrap();
+    let git_root = match amux::commands::init_flow::find_git_root_from(&cwd) {
+        Some(r) => r,
+        None => return, // skip if not in a git repo
+    };
+    if !git_root.join("Dockerfile.dev").exists() {
+        return; // skip if no Dockerfile.dev
+    }
+    let mut qa = ready_flow::CliReadyQa::new(sink.clone());
+    let launcher = ready_flow::CliReadyAuditLauncher::new(runtime.clone());
+    let _ = ready_flow::execute(params, &mut qa, &launcher, &sink, git_root, runtime).await;
 
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let has_checking = messages.iter().any(|m| m.contains("Checking"));
@@ -1246,6 +1261,7 @@ fn pending_command_ready_build_no_cache_fields() {
         no_cache: true,
         non_interactive: false,
         allow_docker: false,
+        migrate_decision: None,
     };
     assert_eq!(cmd, PendingCommand::Ready {
         refresh: false,
@@ -1253,6 +1269,7 @@ fn pending_command_ready_build_no_cache_fields() {
         no_cache: true,
         non_interactive: false,
         allow_docker: false,
+        migrate_decision: None,
     });
     // Different build flag should not match
     assert_ne!(cmd, PendingCommand::Ready {
@@ -1261,6 +1278,7 @@ fn pending_command_ready_build_no_cache_fields() {
         no_cache: true,
         non_interactive: false,
         allow_docker: false,
+        migrate_decision: None,
     });
 }
 
@@ -1738,9 +1756,9 @@ fn pending_command_implement_allow_docker_field() {
 fn pending_command_ready_allow_docker_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: true };
-    assert_eq!(cmd, PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: true });
-    assert_ne!(cmd, PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: false });
+    let cmd = PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: true, migrate_decision: None };
+    assert_eq!(cmd, PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: true, migrate_decision: None });
+    assert_ne!(cmd, PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: false, migrate_decision: None });
 }
 
 // ---------------------------------------------------------------------------

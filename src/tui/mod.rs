@@ -14,14 +14,14 @@ use crate::commands::implement::{
 use crate::commands::init_flow::find_git_root_from;
 use crate::commands::new::WorkItemKind;
 use crate::commands::specs::{amend_agent_entrypoint, interview_agent_entrypoint};
-use crate::commands::{claws, init_flow, new, ready, status};
-use crate::commands::ready::{ReadyOptions, apply_ready_user_directive, build_audit_setup, check_allow_docker, compute_ready_build_flag, gather_ready_env_vars, create_ready_host_settings, is_legacy_layout, perform_legacy_migration, print_interactive_notice, print_summary};
+use crate::commands::{claws, init_flow, new, ready, ready_flow, status};
+use crate::commands::ready::{compute_ready_build_flag, is_legacy_layout, print_interactive_notice};
 use crate::config::{effective_env_passthrough, effective_scrollback_lines, load_repo_config};
 use crate::runtime::{generate_container_name, ContainerStats};
 use crate::tui::input::Action;
 use crate::tui::pty::{spawn_text_command, PtySession};
 use crate::tui::render::{calculate_container_inner_size, workflow_strip_height};
-use crate::tui::state::{App, ClawsPhase, ContainerWindowState, Dialog, PendingCommand, ReadyPhase};
+use crate::tui::state::{App, ClawsPhase, ContainerWindowState, Dialog, PendingCommand};
 use crate::workflow::{self, StepStatus};
 use anyhow::Result;
 use crossterm::{
@@ -241,9 +241,7 @@ where
         app.tick_all();
         let now_done = !matches!(app.active_tab().phase, state::ExecutionPhase::Running { .. });
 
-        // Check if a ready workflow phase just completed and continue to the next phase.
         if was_running && now_done {
-            check_ready_continuation(&mut app).await;
             check_claws_continuation(&mut app).await;
             check_workflow_step_completion(&mut app).await;
         }
@@ -530,28 +528,14 @@ async fn handle_action(app: &mut App, action: Action) {
         }
 
         Action::ReadyLegacyMigrate => {
-            // Back up Dockerfile.dev and replace with the minimal project base template.
-            let tab_cwd = app.active_tab().cwd.clone();
-            if let Some(git_root) = find_git_root_from(&tab_cwd) {
-                match perform_legacy_migration(&git_root) {
-                    Ok(messages) => {
-                        for msg in messages {
-                            app.active_tab_mut().push_output(msg);
-                        }
-                    }
-                    Err(e) => {
-                        app.active_tab_mut().push_output(format!("Error during migration: {}", e));
-                        return;
-                    }
-                }
-            }
-            // Force refresh so the audit runs and restores project dependencies.
-            app.active_tab_mut().ready_opts.refresh = true;
-            app.active_tab_mut().ready_opts.legacy_mode = false;
-            // Force rebuild of the project base image from the new minimal Dockerfile.dev.
-            app.active_tab_mut().ready_opts.build = true;
-            // Also update the pending command flags so ready_opts stays consistent.
-            if let PendingCommand::Ready { ref mut refresh, ref mut build, .. } = app.active_tab_mut().pending_command {
+            // Record the migration decision in the pending command so that
+            // execute() can perform the file operations inside the flow.
+            if let PendingCommand::Ready { ref mut migrate_decision, ref mut refresh, ref mut build, .. } =
+                app.active_tab_mut().pending_command
+            {
+                *migrate_decision = Some(true);
+                // Force refresh + rebuild: migration requires a fresh base image from the
+                // new minimal Dockerfile.dev and an audit to restore project dependencies.
                 *refresh = true;
                 *build = true;
             }
@@ -559,9 +543,12 @@ async fn handle_action(app: &mut App, action: Action) {
         }
 
         Action::ReadyLegacyKeep => {
-            app.active_tab_mut().push_output("Keeping existing layout. Using project image for this session.".to_string());
-            app.active_tab_mut().push_output("DEPRECATION WARNING: Run `amux ready` again to migrate to the modular layout.".to_string());
-            app.active_tab_mut().ready_opts.legacy_mode = true;
+            // Record the keep decision; execute() will print the deprecation warning.
+            if let PendingCommand::Ready { ref mut migrate_decision, .. } =
+                app.active_tab_mut().pending_command
+            {
+                *migrate_decision = Some(false);
+            }
             show_pre_command_dialogs(app).await;
         }
 
@@ -947,11 +934,17 @@ async fn execute_command(app: &mut App, cmd: &str) {
         "ready" => {
             let (refresh, build, no_cache, non_interactive, allow_docker) = parse_ready_flags(&parts);
             let effective_build = compute_ready_build_flag(refresh, build);
-            app.active_tab_mut().pending_command = PendingCommand::Ready { refresh, build: effective_build, no_cache, non_interactive, allow_docker };
-            app.active_tab_mut().ready_opts = ReadyOptions { refresh, build: effective_build, no_cache, non_interactive, allow_docker, auto_create_dockerfile: true, legacy_mode: false };
+            app.active_tab_mut().pending_command = PendingCommand::Ready {
+                refresh,
+                build: effective_build,
+                no_cache,
+                non_interactive,
+                allow_docker,
+                migrate_decision: None,
+            };
 
             // Detect legacy layout: Dockerfile.dev exists but .amux/Dockerfile.{agent} does not.
-            // Show the migration dialog before proceeding to allow the user to migrate.
+            // Show the migration dialog to pre-collect the user's decision before launching.
             let tab_cwd = app.active_tab().cwd.clone();
             if let Some(git_root) = find_git_root_from(&tab_cwd) {
                 let config = load_repo_config(&git_root).unwrap_or_default();
@@ -1161,10 +1154,6 @@ async fn show_pre_command_dialogs(app: &mut App) {
 async fn launch_pending_command(app: &mut App) {
     match app.active_tab().pending_command.clone() {
         PendingCommand::Ready { .. } => {
-            // ready_opts was set in execute_command and may have been updated by dialogs
-            // (e.g. ReadyLegacyMigration sets legacy_mode). Preserve those values and
-            // only ensure auto_create_dockerfile is true for TUI mode.
-            app.active_tab_mut().ready_opts.auto_create_dockerfile = true;
             launch_ready(app).await;
         }
         PendingCommand::Implement { work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto } => {
@@ -1187,8 +1176,10 @@ async fn launch_pending_command(app: &mut App) {
     }
 }
 
-/// Launch the ready command — phase 1 (pre-audit) as a text command.
-/// The audit and post-audit phases are triggered automatically via `check_ready_continuation`.
+/// Launch the ready flow as a single background task calling `ready_flow::execute()`.
+///
+/// All phases (pre-audit, audit, post-audit) run sequentially inside the task;
+/// CLI and TUI differ only through their `ReadyQa` and `ReadyAuditLauncher` impls.
 async fn launch_ready(app: &mut App) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
@@ -1198,302 +1189,114 @@ async fn launch_ready(app: &mut App) {
             return;
         }
     };
+    let mount_path = app.active_tab_mut()
+        .pending_mount_path
+        .take()
+        .unwrap_or_else(|| git_root.clone());
 
-    let config = load_repo_config(&git_root).unwrap_or_default();
-    let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
-    let mount_path = app.active_tab_mut().pending_mount_path.take().unwrap_or_else(|| git_root.clone());
-
-    // Gather env vars (keychain credentials + env passthrough).
-    let env_vars = match gather_ready_env_vars(&git_root, &agent_name) {
-        Ok(vars) => vars,
-        Err(e) => {
-            app.active_tab_mut().input_error = Some(format!("Failed to gather credentials: {}", e));
+    let (refresh, build, no_cache, non_interactive, allow_docker, migrate_decision) =
+        if let PendingCommand::Ready {
+            refresh,
+            build,
+            no_cache,
+            non_interactive,
+            allow_docker,
+            migrate_decision,
+        } = app.active_tab().pending_command
+        {
+            (refresh, build, no_cache, non_interactive, allow_docker, migrate_decision)
+        } else {
             return;
-        }
+        };
+
+    let runtime = app.runtime.clone();
+    let params = ready_flow::ReadyParams {
+        refresh,
+        build,
+        no_cache,
+        non_interactive,
+        allow_docker,
     };
+    let answers = TuiReadyAnswers { migrate_decision };
 
-    // Prepare host settings (sanitized config files in a temp dir).
-    // apply_ready_user_directive is called after run_pre_audit() returns so that the
-    // agent dockerfile exists before we try to read the USER directive from it.
-    app.active_tab_mut().host_settings = create_ready_host_settings(&agent_name);
-
-    let opts = app.active_tab().ready_opts.clone();
-
-    app.active_tab_mut().ready_phase = ReadyPhase::PreAudit;
     app.active_tab_mut().start_command("ready".to_string());
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     app.active_tab_mut().exit_rx = Some(exit_rx);
-    let (ctx_tx, ctx_rx) = tokio::sync::oneshot::channel();
-    app.active_tab_mut().ready_ctx_rx = Some(ctx_rx);
     let tx = app.active_tab().output_tx.clone();
 
-    let ready_runtime = app.runtime.clone();
-    // If not refreshing, run the full sink-based workflow (no audit/post-audit).
-    if !opts.refresh {
-        app.active_tab_mut().ready_phase = ReadyPhase::Inactive; // No multi-phase needed.
-        spawn_text_command(tx, exit_tx, move |sink| async move {
-            let _ = ready::run_with_sink(&sink, mount_path, env_vars, &opts, None, &*ready_runtime).await?;
-            Ok(())
-        });
-    } else {
-        let opts_clone = opts.clone();
-        spawn_text_command(tx, exit_tx, move |sink| async move {
-            let mut summary = ready::ReadySummary::default();
-            let ctx = ready::run_pre_audit(&sink, mount_path, env_vars, &opts_clone, &mut summary, &*ready_runtime).await?;
-            let _ = ctx_tx.send((ctx, summary));
-            Ok(())
-        });
-    }
-}
-
-/// Check if a ready workflow phase just completed and automatically launch the next phase.
-async fn check_ready_continuation(app: &mut App) {
-    match app.active_tab().ready_phase {
-        ReadyPhase::PreAudit => {
-            // Pre-audit just finished. If it failed, abort the workflow.
-            if matches!(app.active_tab().phase, state::ExecutionPhase::Error { .. }) {
-                let tab = app.active_tab_mut();
-                tab.ready_phase = ReadyPhase::Inactive;
-                tab.ready_ctx = None;
-                tab.ready_ctx_rx = None;
-                tab.ready_summary = None;
-                tab.host_settings = None;
-                return;
-            }
-            // The context should have arrived via the channel by now.
-            if app.active_tab().ready_ctx.is_none() {
-                app.active_tab_mut().push_output("Internal error: pre-audit completed but no context received.");
-                app.active_tab_mut().ready_phase = ReadyPhase::Inactive;
-                return;
-            }
-
-            let opts = app.active_tab().ready_opts.clone();
-            if opts.refresh {
-                if !opts.non_interactive {
-                    // Print the interactive notice via output.
-                    let agent_name = app.active_tab().ready_ctx.as_ref()
-                        .map(|c| c.agent_name.clone())
-                        .unwrap_or_else(|| "agent".into());
-                    let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
-                    print_interactive_notice(&sink, &agent_name);
-                }
-                // Apply the agent dockerfile USER directive now that run_pre_audit() has
-                // written the agent dockerfile. This must happen before the audit launches.
-                let ctx_ref = app.active_tab().ready_ctx.clone();
-                if let Some(ctx) = ctx_ref {
-                    let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
-                    if let Some(msg) = apply_ready_user_directive(app.active_tab_mut().host_settings.as_mut(), &ctx) {
-                        sink.println(msg);
-                    }
-                }
-                // Launch the audit via PTY (or captured if non-interactive).
-                if opts.non_interactive {
-                    launch_ready_audit_captured(app);
-                } else {
-                    launch_ready_audit(app);
-                }
-            } else {
-                // No refresh — skip audit & post-audit, print summary.
-                // This branch is dead code in practice (launch_ready() sets ready_phase
-                // to Inactive immediately when !opts.refresh, so check_ready_continuation
-                // never enters ReadyPhase::PreAudit for a no-refresh run). Clear
-                // ready_summary defensively to match every other ready_ctx = None site.
-                let tab = app.active_tab_mut();
-                tab.ready_phase = ReadyPhase::Inactive;
-                tab.ready_ctx = None;
-                tab.ready_summary = None;
-            }
-        }
-        ReadyPhase::Audit => {
-            // Audit PTY just finished. If it failed, abort.
-            if matches!(app.active_tab().phase, state::ExecutionPhase::Error { .. }) {
-                let tab = app.active_tab_mut();
-                tab.ready_phase = ReadyPhase::Inactive;
-                tab.ready_ctx = None;
-                tab.ready_summary = None;
-                tab.host_settings = None;
-                return;
-            }
-            // Launch post-audit (image rebuild — no container, no settings needed).
-            app.active_tab_mut().host_settings = None;
-            launch_ready_post_audit(app);
-        }
-        ReadyPhase::PostAudit => {
-            // Post-audit done; workflow complete.
-            let tab = app.active_tab_mut();
-            tab.ready_phase = ReadyPhase::Inactive;
-            tab.ready_ctx = None;
-            tab.ready_summary = None;
-        }
-        ReadyPhase::Inactive => {}
-    }
-}
-
-/// Phase 2: Launch the interactive audit agent via PTY.
-fn launch_ready_audit(app: &mut App) {
-    let ctx = match app.active_tab().ready_ctx.clone() {
-        Some(ctx) => ctx,
-        None => {
-            app.active_tab_mut().push_output("Internal error: missing ready context for audit phase.");
-            app.active_tab_mut().ready_phase = ReadyPhase::Inactive;
-            return;
-        }
-    };
-
-    let allow_docker = app.active_tab().ready_opts.allow_docker;
-
-    // Check the Docker socket if --allow-docker is set.
-    {
-        let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
-        if let Err(e) = check_allow_docker(&sink, allow_docker, &*app.runtime) {
-            app.active_tab_mut().push_output(format!("Error: {}", e));
-            app.active_tab_mut().finish_command(1);
-            return;
-        }
-    }
-
-    let container_name = generate_container_name();
-    let audit = build_audit_setup(&ctx, false);
-    let entrypoint_refs: Vec<&str> = audit.entrypoint.iter().map(String::as_str).collect();
-    let audit_image_tag = audit.image_tag;
-
-    let pty_args = app.runtime.build_run_args_pty(
-        &audit_image_tag,
-        &ctx.mount_path,
-        &entrypoint_refs,
-        &ctx.env_vars,
-        app.active_tab().host_settings.as_ref(),
-        allow_docker,
-        Some(&container_name),
-        None,
-    );
-    let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
-
-    // Use actual terminal dimensions for the PTY.
-    let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let wf_strip_h = app.active_tab().workflow.as_ref().map(|wf| workflow_strip_height(wf)).unwrap_or(0);
-    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, wf_strip_h);
-    let size = PtySize {
-        rows: inner_rows,
-        cols: inner_cols,
-        pixel_width: 0,
-        pixel_height: 0,
-    };
-
-    app.active_tab_mut().ready_phase = ReadyPhase::Audit;
-    app.active_tab_mut().continue_command("ready (audit)".to_string());
-
-    // Activate the container window.
-    let display_name = state::agent_display_name(&ctx.agent_name).to_string();
-    app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(ctx.mount_path.as_ref());
-    app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
-
-    let cli_binary = app.runtime.cli_binary();
-    let stats_runtime = app.runtime.clone();
-    match PtySession::spawn(cli_binary, &pty_str_refs, size) {
-        Ok((session, pty_rx)) => {
-            app.active_tab_mut().pty = Some(session);
-            app.active_tab_mut().pty_rx = Some(pty_rx);
-            app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
-        }
-        Err(e) => {
-            app.active_tab_mut().push_output(format!("Failed to launch audit container: {}", e));
-            app.active_tab_mut().finish_command(1);
-        }
-    }
-}
-
-/// Phase 2 (non-interactive): Launch audit agent in captured mode.
-fn launch_ready_audit_captured(app: &mut App) {
-    let ctx = match app.active_tab().ready_ctx.clone() {
-        Some(ctx) => ctx,
-        None => {
-            app.active_tab_mut().push_output("Internal error: missing ready context for audit phase.");
-            app.active_tab_mut().ready_phase = ReadyPhase::Inactive;
-            return;
-        }
-    };
-
-    let allow_docker = app.active_tab().ready_opts.allow_docker;
-
-    // Check the Docker socket if --allow-docker is set.
-    {
-        let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
-        if let Err(e) = check_allow_docker(&sink, allow_docker, &*app.runtime) {
-            app.active_tab_mut().push_output(format!("Error: {}", e));
-            app.active_tab_mut().finish_command(1);
-            return;
-        }
-    }
-
-    // Move host_settings into the task so the temp dir lives until the container exits.
-    let host_settings = app.active_tab_mut().host_settings.take();
-
-    app.active_tab_mut().ready_phase = ReadyPhase::Audit;
-    app.active_tab_mut().continue_command("ready (audit - non-interactive)".to_string());
-
-    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
-    app.active_tab_mut().exit_rx = Some(exit_rx);
-    let tx = app.active_tab().output_tx.clone();
-
-    let audit = build_audit_setup(&ctx, true);
-    let audit_image_tag = audit.image_tag;
-
-    let audit_runtime = app.runtime.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
+        let mut qa = TuiReadyQa { answers };
+        let launcher = TuiReadyAuditLauncher { runtime: runtime.clone() };
+        ready_flow::execute(params, &mut qa, &launcher, &sink, mount_path, runtime).await?;
+        Ok(())
+    });
+}
+
+// ─── TUI ready adapters ───────────────────────────────────────────────────────
+
+/// Pre-collected answers from TUI modal dialogs, consumed by `TuiReadyQa`.
+struct TuiReadyAnswers {
+    /// `Some(true)` = user chose to migrate; `Some(false)` = keep legacy; `None` = no legacy layout.
+    migrate_decision: Option<bool>,
+}
+
+/// Q&A adapter for TUI mode: returns pre-collected dialog answers immediately
+/// without blocking on stdin.
+struct TuiReadyQa {
+    answers: TuiReadyAnswers,
+}
+
+impl ready_flow::ReadyQa for TuiReadyQa {
+    fn ask_create_dockerfile(&mut self) -> Result<bool> {
+        // TUI auto-accepts: the dialog has already been shown before this task runs.
+        Ok(true)
+    }
+
+    fn ask_run_audit_on_template(&mut self) -> Result<bool> {
+        // TUI auto-accepts audit when the user clicked "ready".
+        Ok(true)
+    }
+
+    fn ask_migrate_legacy(&mut self, _agent_name: &str) -> Result<bool> {
+        Ok(self.answers.migrate_decision.unwrap_or(false))
+    }
+}
+
+/// Container audit launcher for TUI mode: blocks inside the spawned background task
+/// using captured output streamed line-by-line through the `OutputSink`.
+struct TuiReadyAuditLauncher {
+    runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
+}
+
+impl ready_flow::ReadyAuditLauncher for TuiReadyAuditLauncher {
+    fn run_audit(
+        &self,
+        ctx: &crate::commands::ready::ReadyContext,
+        host_settings: Option<&crate::runtime::HostSettings>,
+        opts: &crate::commands::ready::ReadyOptions,
+        sink: &crate::commands::output::OutputSink,
+    ) -> Result<()> {
+        use crate::commands::ready::build_audit_setup;
+        let audit = build_audit_setup(ctx, true); // always captured in TUI
         let entrypoint_refs: Vec<&str> = audit.entrypoint.iter().map(String::as_str).collect();
-        let (_cmd, output) = audit_runtime.run_container_captured(
-            &audit_image_tag,
-            &ctx.mount_path,
-            &entrypoint_refs,
-            &ctx.env_vars,
-            host_settings.as_ref(),
-            allow_docker,
-            None,
-            None,
-        )?;
+        let (_cmd, output) = self
+            .runtime
+            .run_container_captured(
+                &audit.image_tag,
+                &ctx.mount_path,
+                &entrypoint_refs,
+                &ctx.env_vars,
+                host_settings,
+                opts.allow_docker,
+                None,
+                None,
+            )
+            .map_err(|e| anyhow::anyhow!("Dockerfile audit container failed: {}", e))?;
         for line in output.lines() {
             sink.println(line);
         }
         Ok(())
-    });
-}
-
-/// Phase 3: Rebuild the Docker image after the audit agent has updated Dockerfile.dev.
-fn launch_ready_post_audit(app: &mut App) {
-    let ctx = match app.active_tab().ready_ctx.clone() {
-        Some(ctx) => ctx,
-        None => {
-            app.active_tab_mut().push_output("Internal error: missing ready context for post-audit phase.");
-            app.active_tab_mut().ready_phase = ReadyPhase::Inactive;
-            return;
-        }
-    };
-
-    let opts = app.active_tab().ready_opts.clone();
-    let post_audit_runtime = app.runtime.clone();
-    app.active_tab_mut().ready_phase = ReadyPhase::PostAudit;
-    app.active_tab_mut().continue_command("ready (rebuild)".to_string());
-    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
-    app.active_tab_mut().exit_rx = Some(exit_rx);
-    let tx = app.active_tab().output_tx.clone();
-    let summary_init = app.active_tab_mut().ready_summary.take()
-        .unwrap_or_else(|| {
-            let mut s = ready::ReadySummary::default();
-            s.docker_daemon = ready::StepStatus::Ok("running".into());
-            s.dockerfile = ready::StepStatus::Ok("checked".into());
-            s.dev_image = ready::StepStatus::Ok("checked".into());
-            s.refresh = ready::StepStatus::Ok("completed".into());
-            s
-        });
-    spawn_text_command(tx, exit_tx, move |sink| async move {
-        let mut summary = summary_init;
-        ready::run_post_audit(&sink, &ctx, &opts, &mut summary, &*post_audit_runtime).await?;
-        print_summary(&sink, post_audit_runtime.name(), &summary);
-        sink.println(String::new());
-        sink.println("amux is ready.");
-        Ok(())
-    });
+    }
 }
 
 // ─── TUI init adapters ────────────────────────────────────────────────────────
