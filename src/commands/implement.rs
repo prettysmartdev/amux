@@ -1,6 +1,6 @@
 use crate::commands::agent::{append_autonomous_flags, run_agent_with_sink};
 use crate::commands::auth::resolve_auth;
-use crate::commands::init::find_git_root;
+use crate::commands::init_flow::find_git_root;
 use crate::commands::output::OutputSink;
 use crate::config::{effective_env_passthrough, effective_yolo_disallowed_tools, load_repo_config};
 use crate::runtime::{generate_container_name, HostSettings};

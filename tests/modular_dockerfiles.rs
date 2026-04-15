@@ -6,7 +6,7 @@
 //! - End-to-end tests: invoke the compiled `amux` binary with a temporary git repo;
 //!   require a running Docker daemon and are skipped when Docker is unavailable.
 use amux::cli::Agent;
-use amux::commands::init::{
+use amux::commands::init_flow::{
     dockerfile_for_agent_embedded, project_dockerfile_embedded, write_agent_dockerfile,
     write_project_dockerfile,
 };
@@ -92,7 +92,7 @@ async fn write_agent_dockerfile_creates_file_at_expected_path() {
 /// without a network call so the assertion is not affected by the remote template version.
 #[test]
 fn embedded_agent_template_substitution_produces_correct_from_line() {
-    use amux::runtime::docker::project_image_tag;
+    use amux::runtime::project_image_tag;
     use std::path::Path;
 
     let base_tag = project_image_tag(Path::new("/repos/testproject"));

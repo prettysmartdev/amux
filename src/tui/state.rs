@@ -214,6 +214,30 @@ pub enum Dialog {
     InitReplaceAspec {
         agent: crate::cli::Agent,
     },
+    /// Init: ask whether to configure a work items directory.
+    InitWorkItemsConfirm {
+        agent: crate::cli::Agent,
+        aspec: bool,
+        replace_aspec: bool,
+        run_audit: bool,
+    },
+    /// Init: collect the work items directory path (text input).
+    InitWorkItemsDirInput {
+        agent: crate::cli::Agent,
+        aspec: bool,
+        replace_aspec: bool,
+        run_audit: bool,
+        input: String,
+    },
+    /// Init: collect the work item template path (optional text input).
+    InitWorkItemsTemplateInput {
+        agent: crate::cli::Agent,
+        aspec: bool,
+        replace_aspec: bool,
+        run_audit: bool,
+        dir: String,
+        input: String,
+    },
 }
 
 /// Tracks which command is waiting for dialog answers (mount scope, auth).
@@ -565,10 +589,6 @@ pub struct TabState {
     /// detection while the user is actively engaged with the active tab.
     pub last_user_activity_time: Option<Instant>,
 
-    /// Set after a TUI `init` command if the user requested the agent audit.
-    /// Checked after the init text command completes to trigger a `ready --refresh` flow.
-    pub pending_init_run_audit: bool,
-
     /// Single authoritative timestamp for the yolo countdown timer.
     /// Set by `tick_all()` when a tab (active or background) first becomes stuck in yolo
     /// mode. Cleared when the countdown expires, when new output arrives, or when the
@@ -652,7 +672,6 @@ impl TabState {
             yolo_countdown_expired: false,
             last_user_activity_time: None,
             yolo_countdown_started_at: None,
-            pending_init_run_audit: false,
         }
     }
 

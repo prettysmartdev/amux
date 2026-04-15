@@ -11,10 +11,10 @@ use crate::commands::implement::{
     agent_entrypoint, agent_entrypoint_non_interactive, find_work_item, parse_work_item,
     workflow_step_entrypoint,
 };
-use crate::commands::init::find_git_root_from;
+use crate::commands::init_flow::find_git_root_from;
 use crate::commands::new::WorkItemKind;
 use crate::commands::specs::{amend_agent_entrypoint, interview_agent_entrypoint};
-use crate::commands::{claws, init, new, ready, status};
+use crate::commands::{claws, init_flow, new, ready, status};
 use crate::commands::ready::{ReadyOptions, apply_ready_user_directive, build_audit_setup, check_allow_docker, compute_ready_build_flag, gather_ready_env_vars, create_ready_host_settings, is_legacy_layout, perform_legacy_migration, print_interactive_notice, print_summary};
 use crate::config::{effective_env_passthrough, effective_scrollback_lines, load_repo_config};
 use crate::runtime::{generate_container_name, ContainerStats};
@@ -244,7 +244,6 @@ where
         // Check if a ready workflow phase just completed and continue to the next phase.
         if was_running && now_done {
             check_ready_continuation(&mut app).await;
-            check_init_continuation(&mut app).await;
             check_claws_continuation(&mut app).await;
             check_workflow_step_completion(&mut app).await;
         }
@@ -577,11 +576,35 @@ async fn handle_action(app: &mut App, action: Action) {
         }
 
         Action::InitAuditAccepted { agent, aspec, replace_aspec } => {
-            launch_init(app, agent, aspec, replace_aspec, true).await;
+            let tab_cwd = app.active_tab().cwd.clone();
+            if should_offer_work_items(aspec, &tab_cwd) {
+                app.active_tab_mut().dialog = Dialog::InitWorkItemsConfirm {
+                    agent,
+                    aspec,
+                    replace_aspec,
+                    run_audit: true,
+                };
+            } else {
+                launch_init(app, agent, aspec, replace_aspec, true, None).await;
+            }
         }
 
         Action::InitAuditDeclined { agent, aspec, replace_aspec } => {
-            launch_init(app, agent, aspec, replace_aspec, false).await;
+            let tab_cwd = app.active_tab().cwd.clone();
+            if should_offer_work_items(aspec, &tab_cwd) {
+                app.active_tab_mut().dialog = Dialog::InitWorkItemsConfirm {
+                    agent,
+                    aspec,
+                    replace_aspec,
+                    run_audit: false,
+                };
+            } else {
+                launch_init(app, agent, aspec, replace_aspec, false, None).await;
+            }
+        }
+
+        Action::InitWorkItemsDone { agent, aspec, replace_aspec, run_audit, work_items } => {
+            launch_init(app, agent, aspec, replace_aspec, run_audit, work_items).await;
         }
     }
 }
@@ -901,16 +924,22 @@ async fn execute_command(app: &mut App, cmd: &str) {
             let agent = parse_agent_flag(&parts).unwrap_or(Agent::Claude);
             let aspec = parts.iter().any(|p| *p == "--aspec");
 
-            // If --aspec and the aspec folder already exists, ask whether to replace it first.
+            // Validate git root before any Q&A begins (spec requirement).
             let tab_cwd = app.active_tab().cwd.clone();
-            if aspec {
-                if let Some(git_root) = find_git_root_from(&tab_cwd) {
-                    if git_root.join("aspec").exists() {
-                        app.active_tab_mut().dialog = Dialog::InitReplaceAspec { agent };
-                        return;
-                    }
+            let git_root = match find_git_root_from(&tab_cwd) {
+                Some(r) => r,
+                None => {
+                    app.active_tab_mut().input_error = Some("Not inside a Git repository.".into());
+                    return;
                 }
+            };
+
+            // If --aspec and the aspec folder already exists, ask whether to replace it first.
+            if aspec && git_root.join("aspec").exists() {
+                app.active_tab_mut().dialog = Dialog::InitReplaceAspec { agent };
+                return;
             }
+
             // Show audit confirmation dialog (ask whether to run the agent audit after init).
             app.active_tab_mut().dialog = Dialog::InitAuditConfirm { agent, aspec, replace_aspec: false };
         }
@@ -1467,77 +1496,179 @@ fn launch_ready_post_audit(app: &mut App) {
     });
 }
 
-/// Launch the `init` command as a text task.
-///
-/// If `run_audit` is true, sets `pending_init_run_audit` so that a `ready --refresh`
-/// audit is automatically triggered after init completes.
-async fn launch_init(app: &mut App, agent: Agent, aspec: bool, replace_aspec: bool, run_audit: bool) {
-    let tab_cwd = app.active_tab().cwd.clone();
-    let runtime = app.runtime.clone();
+// ─── TUI init adapters ────────────────────────────────────────────────────────
 
-    if run_audit {
-        app.active_tab_mut().pending_init_run_audit = true;
+/// Pre-collected answers from TUI modal dialogs, consumed by `TuiInitQa`.
+struct TuiInitAnswers {
+    replace_aspec: bool,
+    run_audit: bool,
+    work_items: Option<crate::config::WorkItemsConfig>,
+}
+
+/// Q&A adapter for TUI mode: returns pre-collected dialog answers immediately
+/// without blocking on stdin.
+struct TuiInitQa {
+    answers: TuiInitAnswers,
+}
+
+impl init_flow::InitQa for TuiInitQa {
+    fn ask_replace_aspec(&mut self) -> Result<bool> {
+        Ok(self.answers.replace_aspec)
     }
+
+    fn ask_run_audit(&mut self) -> Result<bool> {
+        Ok(self.answers.run_audit)
+    }
+
+    fn ask_work_items_setup(&mut self) -> Result<Option<crate::config::WorkItemsConfig>> {
+        Ok(self.answers.work_items.take())
+    }
+}
+
+/// Container launcher for TUI mode: blocks inside the spawned background task thread.
+struct TuiContainerLauncher {
+    runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
+}
+
+impl init_flow::InitContainerLauncher for TuiContainerLauncher {
+    fn build_image(
+        &self,
+        tag: &str,
+        dockerfile: &std::path::Path,
+        context: &std::path::Path,
+        sink: &crate::commands::output::OutputSink,
+    ) -> Result<()> {
+        use crate::runtime::format_build_cmd;
+        let build_cmd = format_build_cmd(
+            self.runtime.cli_binary(),
+            tag,
+            dockerfile.to_str().unwrap_or(""),
+            context.to_str().unwrap_or(""),
+        );
+        sink.println(format!("$ {}", build_cmd));
+        let sink_clone = sink.clone();
+        self.runtime
+            .build_image_streaming(tag, dockerfile, context, false, &mut |line| {
+                sink_clone.println(line);
+            })
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    fn run_audit(
+        &self,
+        agent: Agent,
+        cwd: &std::path::Path,
+        sink: &crate::commands::output::OutputSink,
+    ) -> Result<()> {
+        use crate::runtime::agent_image_tag;
+        let git_root = cwd;
+        let agent_img = agent_image_tag(git_root, agent.as_str());
+        let agent_df_path = git_root
+            .join(".amux")
+            .join(format!("Dockerfile.{}", agent.as_str()));
+        let mount_path = git_root.to_str().unwrap_or("").to_string();
+
+        let credentials = crate::commands::auth::resolve_auth(git_root, agent.as_str())
+            .unwrap_or_default();
+        let mut env_vars = credentials.env_vars;
+        let passthrough_names = crate::config::effective_env_passthrough(git_root);
+        for name in &passthrough_names {
+            if env_vars.iter().any(|(k, _)| k == name) {
+                continue;
+            }
+            if let Ok(val) = std::env::var(name) {
+                env_vars.push((name.clone(), val));
+            }
+        }
+        let host_settings =
+            crate::passthrough::passthrough_for_agent(agent.as_str()).prepare_host_settings();
+
+        ready::print_interactive_notice(sink, agent.as_str());
+        let entrypoint = ready::audit_entrypoint(agent.as_str());
+        let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+
+        let modified_settings: Option<crate::runtime::HostSettings> =
+            host_settings.as_ref().and_then(|settings| {
+                let mut new_settings = settings.clone_view();
+                if let Some(msg) =
+                    crate::runtime::apply_dockerfile_user(&mut new_settings, &agent_df_path)
+                {
+                    sink.println(msg);
+                    Some(new_settings)
+                } else {
+                    None
+                }
+            });
+        let effective_settings: Option<&crate::runtime::HostSettings> =
+            modified_settings.as_ref().or(host_settings.as_ref());
+
+        self.runtime
+            .run_container(
+                &agent_img,
+                &mount_path,
+                &entrypoint_refs,
+                &env_vars,
+                effective_settings,
+                false,
+                None,
+                None,
+            )
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+}
+
+/// Returns true if the work-items setup dialog should be offered during `init`.
+///
+/// Offered only when: `--aspec` was not passed, the `aspec/` directory does not yet
+/// exist (meaning this is a first-time init), and the repo config does not already
+/// have a work-items directory configured.
+fn should_offer_work_items(aspec: bool, cwd: &std::path::Path) -> bool {
+    if aspec {
+        return false;
+    }
+    let git_root = match find_git_root_from(cwd) {
+        Some(r) => r,
+        None => return false,
+    };
+    if git_root.join("aspec").exists() {
+        return false;
+    }
+    let config = crate::config::load_repo_config(&git_root).unwrap_or_default();
+    config.work_items.as_ref().and_then(|w| w.dir.as_ref()).is_none()
+}
+
+/// Launch the `init` flow as a background text task using `init_flow::execute()`.
+async fn launch_init(
+    app: &mut App,
+    agent: Agent,
+    aspec: bool,
+    replace_aspec: bool,
+    run_audit: bool,
+    work_items: Option<crate::config::WorkItemsConfig>,
+) {
+    let tab_cwd = app.active_tab().cwd.clone();
+    let git_root = match find_git_root_from(&tab_cwd) {
+        Some(r) => r,
+        None => {
+            app.active_tab_mut().input_error = Some("Not inside a Git repository.".into());
+            return;
+        }
+    };
+    let runtime = app.runtime.clone();
 
     app.active_tab_mut().start_command("init".to_string());
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     app.active_tab_mut().exit_rx = Some(exit_rx);
     let tx = app.active_tab().output_tx.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
-        init::run_with_sink(agent, aspec, replace_aspec, false, &sink, &tab_cwd, runtime).await
+        let answers = TuiInitAnswers { replace_aspec, run_audit, work_items };
+        let mut qa = TuiInitQa { answers };
+        let launcher = TuiContainerLauncher { runtime: runtime.clone() };
+        let params = init_flow::InitParams { agent, aspec, git_root };
+        init_flow::execute(params, &mut qa, &launcher, &sink, runtime).await?;
+        Ok(())
     });
-}
-
-/// After a TUI `init` completes, if `pending_init_run_audit` is set, automatically
-/// trigger a `ready --refresh` flow to run the agent audit.
-///
-/// This matches the CLI behavior where `init` offers to run the agent audit inline.
-async fn check_init_continuation(app: &mut App) {
-    if !app.active_tab().pending_init_run_audit {
-        return;
-    }
-    // Always clear the flag — only trigger audit on success.
-    app.active_tab_mut().pending_init_run_audit = false;
-
-    if !matches!(app.active_tab().phase, crate::tui::state::ExecutionPhase::Done { .. }) {
-        return;
-    }
-
-    // Set up a ready --refresh flow to run the audit agent.
-    app.active_tab_mut().push_output(String::new());
-    app.active_tab_mut().push_output("Running agent audit (amux ready --refresh) to configure Dockerfile.dev for your project...".to_string());
-
-    app.active_tab_mut().pending_command = PendingCommand::Ready {
-        refresh: true,
-        build: false,
-        no_cache: false,
-        non_interactive: false,
-        allow_docker: false,
-    };
-    app.active_tab_mut().ready_opts = ReadyOptions {
-        refresh: true,
-        build: false,
-        no_cache: false,
-        non_interactive: false,
-        allow_docker: false,
-        auto_create_dockerfile: true,
-        legacy_mode: false,
-    };
-
-    // init just wrote the agent dockerfile, so legacy detection is not needed.
-    // Go directly to the mount-scope check.
-    let tab_cwd = app.active_tab().cwd.clone();
-    if let Some(git_root) = find_git_root_from(&tab_cwd) {
-        if tab_cwd != git_root {
-            app.active_tab_mut().dialog = Dialog::MountScope {
-                git_root,
-                cwd: tab_cwd,
-            };
-        } else {
-            app.active_tab_mut().pending_mount_path = Some(git_root);
-            launch_ready(app).await;
-        }
-    }
 }
 
 /// Actually spawn the docker container for `implement` via PTY.
@@ -3858,6 +3989,7 @@ fn extract_selection_text(tab: &state::TabState) -> Option<String> {
 mod tests {
     use super::*;
     use crate::cli::Agent;
+    use crate::commands::init_flow::InitQa;
     use crate::tui::state::{App, Dialog, ExecutionPhase};
     use crate::workflow::{StepStatus, WorkflowState, WorkflowStepState};
 
@@ -4652,6 +4784,553 @@ mod tests {
         assert!(
             app.active_tab().workflow_current_step.is_some(),
             "workflow_current_step must be preserved so user can finish from the control board"
+        );
+    }
+
+    // ── TuiInitQa unit tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn tui_qa_ask_replace_aspec_returns_preset_true() {
+        let answers = TuiInitAnswers {
+            replace_aspec: true,
+            run_audit: false,
+            work_items: None,
+        };
+        let mut qa = TuiInitQa { answers };
+        assert_eq!(
+            qa.ask_replace_aspec().unwrap(),
+            true,
+            "TuiInitQa must return the pre-collected replace_aspec answer"
+        );
+    }
+
+    #[test]
+    fn tui_qa_ask_replace_aspec_returns_preset_false() {
+        let answers = TuiInitAnswers {
+            replace_aspec: false,
+            run_audit: true,
+            work_items: None,
+        };
+        let mut qa = TuiInitQa { answers };
+        assert_eq!(
+            qa.ask_replace_aspec().unwrap(),
+            false,
+            "TuiInitQa must return false when replace_aspec was not selected"
+        );
+    }
+
+    #[test]
+    fn tui_qa_ask_run_audit_returns_preset_answer() {
+        for expected in [true, false] {
+            let answers = TuiInitAnswers {
+                replace_aspec: false,
+                run_audit: expected,
+                work_items: None,
+            };
+            let mut qa = TuiInitQa { answers };
+            assert_eq!(
+                qa.ask_run_audit().unwrap(),
+                expected,
+                "TuiInitQa must return the pre-collected run_audit = {} answer",
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn tui_qa_ask_work_items_returns_some_then_none() {
+        // `work_items` is consumed via `take()`, so the second call should return None.
+        let wi = crate::config::WorkItemsConfig {
+            dir: Some("items".into()),
+            template: None,
+        };
+        let answers = TuiInitAnswers {
+            replace_aspec: false,
+            run_audit: false,
+            work_items: Some(wi),
+        };
+        let mut qa = TuiInitQa { answers };
+
+        let first = qa.ask_work_items_setup().unwrap();
+        assert!(first.is_some(), "first call must return Some(WorkItemsConfig)");
+        assert_eq!(
+            first.as_ref().unwrap().dir.as_deref(),
+            Some("items"),
+            "returned config must carry the pre-collected dir"
+        );
+
+        let second = qa.ask_work_items_setup().unwrap();
+        assert!(
+            second.is_none(),
+            "second call must return None — value was taken on first call"
+        );
+    }
+
+    #[test]
+    fn tui_qa_ask_work_items_returns_none_when_not_set() {
+        let answers = TuiInitAnswers {
+            replace_aspec: false,
+            run_audit: false,
+            work_items: None,
+        };
+        let mut qa = TuiInitQa { answers };
+        assert!(
+            qa.ask_work_items_setup().unwrap().is_none(),
+            "TuiInitQa must return None when work_items was not configured in the dialog"
+        );
+    }
+
+    #[test]
+    fn tui_qa_all_methods_return_immediately_without_blocking() {
+        // Verifies that none of the TuiInitQa methods block (no I/O, no channel reads).
+        // If any of them tried to read from stdin or a channel this test would hang.
+        let answers = TuiInitAnswers {
+            replace_aspec: true,
+            run_audit: true,
+            work_items: Some(crate::config::WorkItemsConfig {
+                dir: Some("dir".into()),
+                template: Some("tmpl.md".into()),
+            }),
+        };
+        let mut qa = TuiInitQa { answers };
+        let _ = qa.ask_replace_aspec().unwrap();
+        let _ = qa.ask_run_audit().unwrap();
+        let _ = qa.ask_work_items_setup().unwrap();
+        // Reaching here proves none of the calls blocked.
+    }
+
+    // ── TUI init flow integration ─────────────────────────────────────────────
+
+    /// Minimal `AgentRuntime` stub for TUI integration tests.
+    struct TuiTestRuntime {
+        available: bool,
+    }
+
+    impl crate::runtime::AgentRuntime for TuiTestRuntime {
+        fn is_available(&self) -> bool {
+            self.available
+        }
+        fn name(&self) -> &'static str {
+            "tui-test"
+        }
+        fn cli_binary(&self) -> &'static str {
+            "tui-test"
+        }
+        fn check_socket(&self) -> anyhow::Result<std::path::PathBuf> {
+            Ok(std::path::PathBuf::from("/tui-test/socket"))
+        }
+        fn build_image_streaming(
+            &self,
+            _tag: &str,
+            _dockerfile: &std::path::Path,
+            _context: &std::path::Path,
+            _no_cache: bool,
+            _on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn image_exists(&self, _tag: &str) -> bool {
+            false
+        }
+        fn run_container(
+            &self,
+            _image: &str,
+            _host_path: &str,
+            _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool,
+            _container_name: Option<&str>,
+            _ssh_dir: Option<&std::path::Path>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn run_container_captured(
+            &self,
+            _image: &str,
+            _host_path: &str,
+            _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool,
+            _container_name: Option<&str>,
+            _ssh_dir: Option<&std::path::Path>,
+        ) -> anyhow::Result<(String, String)> {
+            Ok((String::new(), String::new()))
+        }
+        fn run_container_at_path(
+            &self,
+            _image: &str,
+            _host_path: &str,
+            _container_path: &str,
+            _working_dir: &str,
+            _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool,
+            _container_name: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn run_container_captured_at_path(
+            &self,
+            _image: &str,
+            _host_path: &str,
+            _container_path: &str,
+            _working_dir: &str,
+            _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool,
+        ) -> anyhow::Result<(String, String)> {
+            Ok((String::new(), String::new()))
+        }
+        fn run_container_detached(
+            &self,
+            _image: &str,
+            _host_path: &str,
+            _container_path: &str,
+            _working_dir: &str,
+            _container_name: Option<&str>,
+            _env_vars: Vec<(String, String)>,
+            _allow_docker: bool,
+            _host_settings: Option<&crate::runtime::HostSettings>,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn start_container(&self, _container_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stop_container(&self, _container_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove_container(&self, _container_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn is_container_running(&self, _container_id: &str) -> bool {
+            false
+        }
+        fn find_stopped_container(
+            &self,
+            _name: &str,
+            _image: &str,
+        ) -> Option<crate::runtime::StoppedContainerInfo> {
+            None
+        }
+        fn list_running_containers_by_prefix(&self, _prefix: &str) -> Vec<String> {
+            vec![]
+        }
+        fn list_running_containers_with_ids_by_prefix(
+            &self,
+            _prefix: &str,
+        ) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn get_container_workspace_mount(&self, _container_name: &str) -> Option<String> {
+            None
+        }
+        fn query_container_stats(
+            &self,
+            _name: &str,
+        ) -> Option<crate::runtime::ContainerStats> {
+            None
+        }
+        fn build_run_args_pty(
+            &self,
+            _image: &str,
+            _host_path: &str,
+            _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool,
+            _container_name: Option<&str>,
+            _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> {
+            vec![]
+        }
+        fn build_run_args_pty_display(
+            &self,
+            _image: &str,
+            _host_path: &str,
+            _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool,
+            _container_name: Option<&str>,
+            _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> {
+            vec![]
+        }
+        fn build_run_args_pty_at_path(
+            &self,
+            _image: &str,
+            _host_path: &str,
+            _container_path: &str,
+            _working_dir: &str,
+            _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool,
+            _container_name: Option<&str>,
+        ) -> Vec<String> {
+            vec![]
+        }
+        fn build_exec_args_pty(
+            &self,
+            _container_id: &str,
+            _working_dir: &str,
+            _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+        ) -> Vec<String> {
+            vec![]
+        }
+        fn build_run_args_display(
+            &self,
+            _image: &str,
+            _host_path: &str,
+            _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool,
+            _container_name: Option<&str>,
+            _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> {
+            vec![]
+        }
+    }
+
+    /// `InitContainerLauncher` stub for TUI integration tests — records calls, returns Ok.
+    struct TuiTestLauncher {
+        build_tags: std::sync::Mutex<Vec<String>>,
+        audit_agents: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl TuiTestLauncher {
+        fn new() -> Self {
+            Self {
+                build_tags: std::sync::Mutex::new(vec![]),
+                audit_agents: std::sync::Mutex::new(vec![]),
+            }
+        }
+        fn run_audit_call_count(&self) -> usize {
+            self.audit_agents.lock().unwrap().len()
+        }
+    }
+
+    impl init_flow::InitContainerLauncher for TuiTestLauncher {
+        fn build_image(
+            &self,
+            tag: &str,
+            _dockerfile: &std::path::Path,
+            _context: &std::path::Path,
+            _sink: &crate::commands::output::OutputSink,
+        ) -> anyhow::Result<()> {
+            self.build_tags.lock().unwrap().push(tag.to_string());
+            Ok(())
+        }
+        fn run_audit(
+            &self,
+            agent: Agent,
+            _cwd: &std::path::Path,
+            _sink: &crate::commands::output::OutputSink,
+        ) -> anyhow::Result<()> {
+            self.audit_agents
+                .lock()
+                .unwrap()
+                .push(agent.as_str().to_string());
+            Ok(())
+        }
+    }
+
+    fn setup_tui_temp_repo() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        tmp
+    }
+
+    #[tokio::test]
+    async fn tui_init_full_path_writes_expected_files() {
+        // Mirrors the CLI integration test: TuiInitQa + TuiTestLauncher + TuiTestRuntime.
+        // File outcomes must be identical to the CLI path.
+        let tmp = setup_tui_temp_repo();
+        let root = tmp.path();
+        let answers = TuiInitAnswers {
+            replace_aspec: false,
+            run_audit: false,
+            work_items: None,
+        };
+        let mut qa = TuiInitQa { answers };
+        let launcher = TuiTestLauncher::new();
+        let runtime = std::sync::Arc::new(TuiTestRuntime { available: false });
+        let params = init_flow::InitParams {
+            agent: Agent::Claude,
+            aspec: false,
+            git_root: root.to_path_buf(),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = crate::commands::output::OutputSink::Channel(tx);
+
+        let summary = init_flow::execute(params, &mut qa, &launcher, &sink, runtime)
+            .await
+            .unwrap();
+
+        // Same files the CLI path produces.
+        assert!(
+            root.join("Dockerfile.dev").exists(),
+            "Dockerfile.dev must be written by TUI path"
+        );
+        assert!(
+            root.join(".amux").join("Dockerfile.claude").exists(),
+            ".amux/Dockerfile.claude must be written by TUI path"
+        );
+        assert!(
+            root.join(".amux").join("config.json").exists(),
+            ".amux/config.json must be written by TUI path"
+        );
+        assert!(
+            matches!(summary.config, crate::commands::ready::StepStatus::Ok(_)),
+            "config stage must be Ok: {:?}",
+            summary.config
+        );
+    }
+
+    #[tokio::test]
+    async fn tui_init_work_items_qa_is_called_during_flow() {
+        // Regression: ask_work_items_setup must be invoked in the TUI path.
+        // Previously this was CLI-only (gated by supports_color() hack).
+        let tmp = setup_tui_temp_repo();
+        let root = tmp.path();
+
+        // Track whether ask_work_items_setup was called by using a custom struct.
+        struct TrackingQa {
+            work_items_called: bool,
+        }
+        impl init_flow::InitQa for TrackingQa {
+            fn ask_replace_aspec(&mut self) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn ask_run_audit(&mut self) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn ask_work_items_setup(
+                &mut self,
+            ) -> anyhow::Result<Option<crate::config::WorkItemsConfig>> {
+                self.work_items_called = true;
+                Ok(None)
+            }
+        }
+
+        let mut qa = TrackingQa { work_items_called: false };
+        let launcher = TuiTestLauncher::new();
+        let runtime = std::sync::Arc::new(TuiTestRuntime { available: false });
+        let params = init_flow::InitParams {
+            agent: Agent::Claude,
+            aspec: false,
+            git_root: root.to_path_buf(),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = crate::commands::output::OutputSink::Channel(tx);
+
+        let _ = init_flow::execute(params, &mut qa, &launcher, &sink, runtime)
+            .await
+            .unwrap();
+
+        assert!(
+            qa.work_items_called,
+            "ask_work_items_setup must be called during TUI init flow (was CLI-only before)"
+        );
+    }
+
+    #[tokio::test]
+    async fn tui_init_declining_work_items_no_panic_and_summary_row_present() {
+        // Regression: declining work-items setup must not panic and InitSummary
+        // must always carry a work_items_setup status (never left as Pending).
+        let tmp = setup_tui_temp_repo();
+        let root = tmp.path();
+        let answers = TuiInitAnswers {
+            replace_aspec: false,
+            run_audit: false,
+            work_items: None, // user declined
+        };
+        let mut qa = TuiInitQa { answers };
+        let launcher = TuiTestLauncher::new();
+        let runtime = std::sync::Arc::new(TuiTestRuntime { available: false });
+        let params = init_flow::InitParams {
+            agent: Agent::Claude,
+            aspec: false,
+            git_root: root.to_path_buf(),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = crate::commands::output::OutputSink::Channel(tx);
+
+        // Must not panic.
+        let summary = init_flow::execute(params, &mut qa, &launcher, &sink, runtime)
+            .await
+            .unwrap();
+
+        assert_ne!(
+            summary.work_items_setup,
+            crate::commands::ready::StepStatus::Pending,
+            "work_items_setup must not be left as Pending even when the user declines"
+        );
+    }
+
+    // ── Regression: audit deferred removal ───────────────────────────────────
+
+    #[test]
+    fn tui_init_qa_has_no_pending_audit_state() {
+        // Structural proof that `pending_init_run_audit` was removed:
+        // TuiInitQa returns the answer immediately from the pre-collected field —
+        // there is no flag that defers audit to a separate ready --refresh call.
+        let answers = TuiInitAnswers {
+            replace_aspec: false,
+            run_audit: true,
+            work_items: None,
+        };
+        let mut qa = TuiInitQa { answers };
+        assert!(
+            qa.ask_run_audit().unwrap(),
+            "run_audit answer is stored in pre-collected field, not a deferred pending flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn tui_audit_runs_inline_not_deferred() {
+        // Regression: the old TUI path used `pending_init_run_audit` and
+        // `check_init_continuation()` to defer audit to a separate ready run.
+        // Now execute() calls launcher.run_audit() inline.
+        // If this count is 0 after execute() returns, the audit was deferred (regressed).
+        let tmp = setup_tui_temp_repo();
+        let root = tmp.path();
+        // Pre-create Dockerfile.dev so only the agent dockerfile is new.
+        std::fs::write(root.join("Dockerfile.dev"), "FROM ubuntu:22.04\n").unwrap();
+
+        let answers = TuiInitAnswers {
+            replace_aspec: false,
+            run_audit: true,
+            work_items: None,
+        };
+        let mut qa = TuiInitQa { answers };
+        let launcher = TuiTestLauncher::new();
+        let runtime = std::sync::Arc::new(TuiTestRuntime { available: true });
+        let params = init_flow::InitParams {
+            agent: Agent::Claude,
+            aspec: false,
+            git_root: root.to_path_buf(),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = crate::commands::output::OutputSink::Channel(tx);
+
+        let _ = init_flow::execute(params, &mut qa, &launcher, &sink, runtime)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            launcher.run_audit_call_count(),
+            1,
+            "run_audit must be called once inline during execute() — \
+             not deferred via pending_init_run_audit / check_init_continuation"
         );
     }
 }

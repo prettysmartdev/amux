@@ -1,5 +1,5 @@
 use crate::cli::{Agent, ConfigAction};
-use crate::commands::init::find_git_root;
+use crate::commands::init_flow::find_git_root;
 use crate::config::{
     load_global_config, load_repo_config, migrate_legacy_repo_config, save_global_config,
     save_repo_config, GlobalConfig, RepoConfig, WorkItemsConfig, DEFAULT_SCROLLBACK_LINES,

@@ -1,4 +1,4 @@
-use crate::commands::init::find_git_root;
+use crate::commands::init_flow::find_git_root;
 use crate::commands::output::OutputSink;
 use crate::config::load_repo_config;
 use crate::runtime::{agent_image_tag, project_image_tag, HostSettings};
@@ -103,51 +103,15 @@ pub async fn run_agent_with_sink(
         None
     };
 
-    // Determine which image to use:
-    // - New layout: .amux/Dockerfile.{agent} exists → use agent_image_tag()
-    // - Legacy layout: no agent dockerfile → fall back to project_image_tag() with warning
+    // Determine which image to use and the dockerfile for USER detection.
+    // Layout selection is based on file existence; image availability is checked below.
     let agent_dockerfile = git_root.join(".amux").join(format!("Dockerfile.{}", agent));
-    let (image_tag, dockerfile_for_user) = if agent_dockerfile.exists() {
-        // New layout: ensure agent image exists, build if needed
+    let (image_tag, dockerfile_for_user, is_legacy) = if agent_dockerfile.exists() {
         let agent_tag = agent_image_tag(&git_root, &agent);
-        if !runtime.image_exists(&agent_tag) {
-            // Agent dockerfile exists but image doesn't — build it (first-run case)
-            let project_tag = project_image_tag(&git_root);
-            if !runtime.image_exists(&project_tag) {
-                anyhow::bail!(
-                    "Agent image {} not found and project base image {} is not built. \
-                     Run `amux ready` first to build both images.",
-                    agent_tag, project_tag
-                );
-            }
-            out.println(format!("Agent image {} not found. Building from {}...", agent_tag, agent_dockerfile.display()));
-            let git_root_str = git_root.to_str().unwrap().to_string();
-            let out_clone = out.clone();
-            runtime.build_image_streaming(
-                &agent_tag,
-                &agent_dockerfile,
-                std::path::Path::new(&git_root_str),
-                false,
-                &mut |line| { out_clone.println(line); },
-            ).context("Failed to build agent image")?;
-            out.println(format!("Agent image {} built successfully.", agent_tag));
-        }
-        (agent_tag, agent_dockerfile.clone())
+        (agent_tag, agent_dockerfile.clone(), false)
     } else {
-        // Legacy layout: use project image with deprecation warning
         let project_tag = project_image_tag(&git_root);
-        if !runtime.image_exists(&project_tag) {
-            anyhow::bail!(
-                "No agent image and no project base image found. \
-                 Run `amux ready` to build the images.",
-            );
-        }
-        out.println(format!(
-            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
-             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
-            agent
-        ));
-        (project_tag, git_root.join("Dockerfile.dev"))
+        (project_tag, git_root.join("Dockerfile.dev"), true)
     };
 
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
@@ -178,6 +142,45 @@ pub async fn run_agent_with_sink(
         ssh_dir.as_deref(),
     );
     out.println(format!("$ {} {}", runtime.cli_binary(), display_args.join(" ")));
+
+    // Ensure the required image is available, building it if needed.
+    if !is_legacy {
+        if !runtime.image_exists(&image_tag) {
+            // Agent dockerfile exists but image doesn't — build it (first-run case).
+            let project_tag = project_image_tag(&git_root);
+            if !runtime.image_exists(&project_tag) {
+                anyhow::bail!(
+                    "Agent image {} not found and project base image {} is not built. \
+                     Run `amux ready` first to build both images.",
+                    image_tag, project_tag
+                );
+            }
+            out.println(format!("Agent image {} not found. Building from {}...", image_tag, agent_dockerfile.display()));
+            let git_root_str = git_root.to_str().unwrap().to_string();
+            let out_clone = out.clone();
+            runtime.build_image_streaming(
+                &image_tag,
+                &agent_dockerfile,
+                std::path::Path::new(&git_root_str),
+                false,
+                &mut |line| { out_clone.println(line); },
+            ).context("Failed to build agent image")?;
+            out.println(format!("Agent image {} built successfully.", image_tag));
+        }
+    } else {
+        // Legacy layout: project image must already be built.
+        if !runtime.image_exists(&image_tag) {
+            anyhow::bail!(
+                "No agent image and no project base image found. \
+                 Run `amux ready` to build the images.",
+            );
+        }
+        out.println(format!(
+            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
+             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
+            agent
+        ));
+    }
 
     if !non_interactive {
         crate::commands::ready::print_interactive_notice(out, &agent);

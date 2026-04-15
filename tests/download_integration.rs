@@ -5,7 +5,7 @@
 /// Tests that require network access are skipped when offline.
 use amux::cli::Agent;
 use amux::commands::download;
-use amux::commands::init;
+use amux::commands::init_flow::{self, CliContainerLauncher, CliInitQa, InitParams};
 use amux::commands::output::OutputSink;
 use tempfile::TempDir;
 use tokio::sync::mpsc::unbounded_channel;
@@ -179,7 +179,11 @@ async fn init_downloads_aspec_folder_when_missing() {
 
     // Pass aspec=true so the aspec folder is downloaded.
     let runtime = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
-    let result = init::run_with_sink(Agent::Claude, true, false, false, &out, tmp.path(), runtime).await;
+    let git_root = tmp.path().to_path_buf();
+    let mut qa = CliInitQa::new(&git_root, out.clone());
+    let launcher = CliContainerLauncher::new(runtime.clone());
+    let params = InitParams { agent: Agent::Claude, aspec: true, git_root };
+    let result = init_flow::execute(params, &mut qa, &launcher, &out, runtime).await;
 
     assert!(result.is_ok(), "Init failed: {:?}", result.err());
 
@@ -219,7 +223,11 @@ async fn init_skips_aspec_download_when_folder_exists() {
 
     // Pass aspec=true so init tries to download, but the folder already exists.
     let runtime = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
-    let result = init::run_with_sink(Agent::Claude, true, false, false, &out, tmp.path(), runtime).await;
+    let git_root = tmp.path().to_path_buf();
+    let mut qa = CliInitQa::new(&git_root, out.clone());
+    let launcher = CliContainerLauncher::new(runtime.clone());
+    let params = InitParams { agent: Agent::Claude, aspec: true, git_root };
+    let result = init_flow::execute(params, &mut qa, &launcher, &out, runtime).await;
 
     assert!(result.is_ok(), "Init failed: {:?}", result.err());
 
@@ -242,7 +250,7 @@ async fn write_project_dockerfile_creates_with_embedded_template() {
     let (tx, _rx) = unbounded_channel();
     let out = OutputSink::Channel(tx);
 
-    let result = init::write_project_dockerfile(tmp.path(), &out).await;
+    let result = init_flow::write_project_dockerfile(tmp.path(), &out).await;
     assert!(result.is_ok(), "write_project_dockerfile failed: {:?}", result.err());
     assert!(result.unwrap(), "Should return true when creating new file");
 
@@ -261,7 +269,7 @@ async fn write_project_dockerfile_preserves_existing_file() {
     let (tx, _rx) = unbounded_channel();
     let out = OutputSink::Channel(tx);
 
-    let result = init::write_project_dockerfile(tmp.path(), &out).await;
+    let result = init_flow::write_project_dockerfile(tmp.path(), &out).await;
     assert!(result.is_ok());
     assert!(!result.unwrap(), "Should return false when file exists");
 

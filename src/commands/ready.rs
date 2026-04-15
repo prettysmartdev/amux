@@ -1,9 +1,10 @@
 use crate::cli::Agent;
 use crate::commands::auth::resolve_auth;
 use crate::commands::implement::confirm_mount_scope_stdin;
-use crate::commands::init::{
-    ask_yes_no_stdin, find_git_root, find_git_root_from,
-    project_dockerfile_embedded, write_agent_dockerfile, write_project_dockerfile,
+use crate::commands::init::ask_yes_no_stdin;
+use crate::commands::init_flow::{
+    find_git_root, find_git_root_from, project_dockerfile_embedded,
+    write_agent_dockerfile, write_project_dockerfile,
 };
 use crate::commands::output::OutputSink;
 use crate::config::{load_repo_config, migrate_legacy_repo_config};
@@ -313,7 +314,7 @@ pub fn perform_legacy_migration(git_root: &std::path::Path) -> Result<Vec<String
     let backup_path = dockerfile_path.with_extension("dev.bak");
     std::fs::copy(&dockerfile_path, &backup_path)
         .context("Failed to back up Dockerfile.dev")?;
-    let content = crate::commands::init::project_dockerfile_embedded();
+    let content = crate::commands::init_flow::project_dockerfile_embedded();
     std::fs::write(&dockerfile_path, content)
         .context("Failed to overwrite Dockerfile.dev with project template")?;
     Ok(vec![
@@ -1227,7 +1228,7 @@ mod tests {
 
     #[test]
     fn dockerfile_matches_template_gemini_agent_returns_false() {
-        use crate::commands::init::dockerfile_for_agent_embedded;
+        use crate::commands::init_flow::dockerfile_for_agent_embedded;
         let content = dockerfile_for_agent_embedded(&Agent::Gemini);
         assert!(
             !dockerfile_matches_template(&content),
@@ -1237,7 +1238,7 @@ mod tests {
 
     #[test]
     fn dockerfile_matches_template_maki_agent_returns_false() {
-        use crate::commands::init::dockerfile_for_agent_embedded;
+        use crate::commands::init_flow::dockerfile_for_agent_embedded;
         let content = dockerfile_for_agent_embedded(&Agent::Maki);
         assert!(
             !dockerfile_matches_template(&content),
@@ -1367,7 +1368,7 @@ mod tests {
 
     #[test]
     fn dockerfile_matches_template_claude_agent_returns_false() {
-        use crate::commands::init::dockerfile_for_agent_embedded;
+        use crate::commands::init_flow::dockerfile_for_agent_embedded;
         let content = dockerfile_for_agent_embedded(&Agent::Claude);
         assert!(
             !dockerfile_matches_template(&content),
@@ -1377,7 +1378,7 @@ mod tests {
 
     #[test]
     fn dockerfile_matches_template_codex_agent_returns_false() {
-        use crate::commands::init::dockerfile_for_agent_embedded;
+        use crate::commands::init_flow::dockerfile_for_agent_embedded;
         let content = dockerfile_for_agent_embedded(&Agent::Codex);
         assert!(
             !dockerfile_matches_template(&content),
@@ -1821,7 +1822,7 @@ mod tests {
         );
 
         // Dockerfile.dev must be overwritten with the project base template.
-        let template = crate::commands::init::project_dockerfile_embedded();
+        let template = crate::commands::init_flow::project_dockerfile_embedded();
         let new_content = std::fs::read_to_string(root.join("Dockerfile.dev")).unwrap();
         assert_eq!(
             new_content.trim(),

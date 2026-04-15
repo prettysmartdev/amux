@@ -1,7 +1,7 @@
 use crate::commands::agent::run_agent_with_sink;
 use crate::commands::auth::resolve_auth;
 use crate::commands::implement::{confirm_mount_scope_stdin, find_work_item, parse_work_item};
-use crate::commands::init::{find_git_root, find_git_root_from};
+use crate::commands::init_flow::{find_git_root, find_git_root_from};
 #[cfg(not(test))]
 use crate::commands::new::{is_vscode_terminal, open_in_vscode};
 use crate::commands::new::{create_file_return_number, prompt_kind, prompt_title, WorkItemKind};

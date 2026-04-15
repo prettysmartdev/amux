@@ -1032,6 +1032,34 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
              \n\
              Replace existing aspec folder with fresh templates? [y=yes / n=keep existing]  ".to_string(),
         ),
+        Dialog::InitWorkItemsConfirm { .. } => (
+            " Init — Work Items ",
+            "  Would you like to configure a work items directory?\n\
+             \n\
+             [y=yes / n=skip]  ".to_string(),
+        ),
+        Dialog::InitWorkItemsDirInput { input, .. } => (
+            " Init — Work Items Directory ",
+            format!(
+                "  Work items directory path (relative to repo root):\n\
+                 \n\
+                 > {}\n\
+                 \n\
+                 [Enter=confirm / Esc=skip]  ",
+                input
+            ),
+        ),
+        Dialog::InitWorkItemsTemplateInput { input, .. } => (
+            " Init — Work Item Template (optional) ",
+            format!(
+                "  Work item template path (leave blank to skip):\n\
+                 \n\
+                 > {}\n\
+                 \n\
+                 [Enter=confirm / Esc=skip template]  ",
+                input
+            ),
+        ),
         Dialog::None => return,
         // NewInterviewSummary is handled by the early return above — this arm is unreachable.
         Dialog::NewInterviewSummary { .. } => return,

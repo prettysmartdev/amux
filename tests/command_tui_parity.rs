@@ -22,7 +22,7 @@ use amux::commands::ready::{
     ReadyOptions, ReadySummary, StepStatus,
     print_summary, print_interactive_notice,
 };
-use amux::commands::{init, new, ready};
+use amux::commands::{init_flow, new, ready};
 use amux::runtime::docker::DockerRuntime;
 use amux::tui::input::{autocomplete_suggestions, closest_subcommand};
 use std::path::PathBuf;
@@ -46,11 +46,15 @@ async fn init_via_sink_produces_output_lines() {
     let (tx, mut rx) = unbounded_channel::<String>();
     let sink = OutputSink::Channel(tx);
 
-    // run_with_sink from inside a git repo (the amux repo itself)
-    // aspec=false to avoid downloading; run_audit=false to skip Docker.
+    // execute from inside a git repo (the amux repo itself)
+    // aspec=false to avoid downloading; run_audit=false to skip Docker (Channel sink defaults Q&A to "no").
     let cwd = std::env::current_dir().unwrap();
+    let git_root = init_flow::find_git_root_from(&cwd).unwrap_or(cwd);
     let runtime = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
-    let result = init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink, &cwd, runtime).await;
+    let mut qa = init_flow::CliInitQa::new(&git_root, sink.clone());
+    let launcher = init_flow::CliContainerLauncher::new(runtime.clone());
+    let params = init_flow::InitParams { agent: amux::cli::Agent::Claude, aspec: false, git_root };
+    let result = init_flow::execute(params, &mut qa, &launcher, &sink, runtime).await;
     drop(result); // may succeed or fail; we only care that the sink was used.
 
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -124,7 +128,7 @@ fn ready_audit_entrypoint_for_each_agent() {
 
 #[test]
 fn ready_uses_project_specific_image_tag() {
-    let tag = amux::runtime::docker::project_image_tag(std::path::Path::new("/home/user/myproject"));
+    let tag = amux::runtime::project_image_tag(std::path::Path::new("/home/user/myproject"));
     assert_eq!(tag, "amux-myproject:latest");
 }
 
@@ -235,10 +239,17 @@ fn init_via_sink_includes_whats_next() {
     let sink = OutputSink::Channel(tx);
 
     // Run init without aspec, without audit (no Docker needed).
+    // Channel sink defaults Q&A to "no", so audit and work-items are skipped.
     let rt = tokio::runtime::Runtime::new().unwrap();
     let cwd = std::env::current_dir().unwrap();
+    let git_root = init_flow::find_git_root_from(&cwd).unwrap_or(cwd);
     let runtime = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
-    let _ = rt.block_on(init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink, &cwd, runtime));
+    let _ = rt.block_on(async {
+        let mut qa = init_flow::CliInitQa::new(&git_root, sink.clone());
+        let launcher = init_flow::CliContainerLauncher::new(runtime.clone());
+        let params = init_flow::InitParams { agent: amux::cli::Agent::Claude, aspec: false, git_root };
+        init_flow::execute(params, &mut qa, &launcher, &sink, runtime).await
+    });
 
     let messages: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let all = messages.join("\n");
@@ -266,7 +277,7 @@ fn ready_greetings_all_valid() {
 
 #[test]
 fn ready_dockerfile_matches_template_for_project() {
-    use amux::commands::init::{dockerfile_for_agent_embedded, project_dockerfile_embedded};
+    use amux::commands::init_flow::{dockerfile_for_agent_embedded, project_dockerfile_embedded};
     use amux::commands::ready::dockerfile_matches_template;
     use amux::cli::Agent;
     // Project template matches itself.
@@ -809,9 +820,9 @@ fn container_pty_output_routing() {
 
 #[test]
 fn docker_stats_parsing() {
-    assert!((amux::runtime::docker::parse_cpu_percent("5.23%") - 5.23).abs() < 0.001);
-    assert!((amux::runtime::docker::parse_memory_mb("200MiB") - 200.0).abs() < 0.1);
-    assert!((amux::runtime::docker::parse_memory_mb("1.5GiB") - 1536.0).abs() < 0.1);
+    assert!((amux::runtime::parse_cpu_percent("5.23%") - 5.23).abs() < 0.001);
+    assert!((amux::runtime::parse_memory_mb("200MiB") - 200.0).abs() < 0.1);
+    assert!((amux::runtime::parse_memory_mb("1.5GiB") - 1536.0).abs() < 0.1);
 }
 
 // ---------------------------------------------------------------------------
@@ -820,7 +831,7 @@ fn docker_stats_parsing() {
 
 #[test]
 fn container_name_generation() {
-    let name = amux::runtime::docker::generate_container_name();
+    let name = amux::runtime::generate_container_name();
     assert!(name.starts_with("amux-"));
 }
 
@@ -1259,7 +1270,7 @@ fn pending_command_ready_build_no_cache_fields() {
 
 #[test]
 fn docker_format_build_cmd_no_cache() {
-    let cmd = amux::runtime::docker::format_build_cmd_no_cache("docker", "img:latest", "Dockerfile.dev", "/repo");
+    let cmd = amux::runtime::format_build_cmd_no_cache("docker", "img:latest", "Dockerfile.dev", "/repo");
     assert!(cmd.contains("--no-cache"), "Should contain --no-cache flag");
     assert!(cmd.contains("img:latest"), "Should contain image tag");
     assert!(cmd.contains("Dockerfile.dev"), "Should contain dockerfile");
@@ -1831,10 +1842,10 @@ fn autocomplete_ready_shows_allow_docker_hint() {
 // Tab working directory: init and new use the explicit cwd, not process CWD
 // ---------------------------------------------------------------------------
 
-/// init::run_with_sink uses the provided `cwd` to find the git root.
-/// It should succeed when `cwd` points at a git repo and fail (or report
-/// "Not inside a Git repository") when `cwd` does NOT — regardless of where
-/// the process was launched.
+/// init_flow::execute uses the explicit git_root from InitParams.
+/// It should succeed when given a valid git repo root and, when given a path
+/// without a .git directory, find_git_root_from returns None — simulating
+/// "Not inside a Git repository" — regardless of where the process was launched.
 #[tokio::test]
 async fn init_uses_explicit_cwd_not_process_cwd() {
     // Create two temp directories: one is a valid git repo, one is not.
@@ -1847,10 +1858,15 @@ async fn init_uses_explicit_cwd_not_process_cwd() {
     let sink1 = OutputSink::Channel(tx1);
 
     // Run init pointing at the git repo — should succeed.
+    // Channel sink defaults Q&A to "no", so audit and work-items are skipped.
     let runtime1 = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
-    let result_ok =
-        init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink1, git_repo.path(), runtime1)
-            .await;
+    let git_root1 = git_repo.path().to_path_buf();
+    let result_ok = {
+        let mut qa = init_flow::CliInitQa::new(&git_root1, sink1.clone());
+        let launcher = init_flow::CliContainerLauncher::new(runtime1.clone());
+        let params = init_flow::InitParams { agent: amux::cli::Agent::Claude, aspec: false, git_root: git_root1 };
+        init_flow::execute(params, &mut qa, &launcher, &sink1, runtime1).await
+    };
     assert!(
         result_ok.is_ok(),
         "init should succeed when cwd is inside a git repo, got: {:?}",
@@ -1867,14 +1883,12 @@ async fn init_uses_explicit_cwd_not_process_cwd() {
         all
     );
 
-    let (tx2, _rx2) = unbounded_channel::<String>();
-    let sink2 = OutputSink::Channel(tx2);
-
     // Run init pointing at a directory without a git repo — should fail.
-    let runtime2 = std::sync::Arc::new(amux::runtime::DockerRuntime::new());
-    let result_err =
-        init::run_with_sink(amux::cli::Agent::Claude, false, false, false, &sink2, no_repo.path(), runtime2)
-            .await;
+    // We simulate the "not inside git" check that tui/mod.rs and init::run() do:
+    // find_git_root_from returns None, so we produce an error directly.
+    let result_err: anyhow::Result<()> = init_flow::find_git_root_from(no_repo.path())
+        .map(|_| ())
+        .ok_or_else(|| anyhow::anyhow!("Not inside a Git repository"));
     assert!(
         result_err.is_err(),
         "init should fail when cwd is not inside a git repo"
@@ -2312,7 +2326,7 @@ fn print_claws_summary_outputs_all_rows() {
 #[test]
 fn audit_container_name_has_amux_prefix() {
     // The audit container must have an amux- name so it is identifiable in docker ps.
-    let name = amux::runtime::docker::generate_container_name();
+    let name = amux::runtime::generate_container_name();
     assert!(
         name.starts_with("amux-"),
         "Audit container name must have amux- prefix, got: {}",
@@ -2327,7 +2341,7 @@ fn build_run_args_pty_at_path_includes_name_and_prompt() {
 
     let nanoclaw_str = "/home/user/.nanoclaw";
     let agent_name = "claude";
-    let container_name = amux::runtime::docker::generate_container_name();
+    let container_name = amux::runtime::generate_container_name();
     let entrypoint = audit_entrypoint(agent_name);
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
@@ -2756,6 +2770,7 @@ async fn run_agent_with_sink_mount_ssh_missing_ssh_dir_errors() {
 
 #[test]
 fn worktree_path_structure() {
+    let _lock = HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let path = amux::git::worktree_path(std::path::Path::new("/projects/myrepo"), 30).unwrap();
     let home = dirs::home_dir().unwrap();
     let expected = home

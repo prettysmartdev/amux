@@ -115,6 +115,14 @@ pub enum Action {
     InitReplaceAspecAccepted { agent: crate::cli::Agent },
     /// Init: user declined replacing the existing aspec folder.
     InitReplaceAspecDeclined { agent: crate::cli::Agent },
+    /// Init: all work-items Q&A is complete; launch the init flow.
+    InitWorkItemsDone {
+        agent: crate::cli::Agent,
+        aspec: bool,
+        replace_aspec: bool,
+        run_audit: bool,
+        work_items: Option<crate::config::WorkItemsConfig>,
+    },
 }
 
 /// Dispatch a key press to the correct handler based on application state.
@@ -218,6 +226,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         Dialog::InitReplaceAspec { agent } => {
             return handle_init_replace_aspec(app.active_tab_mut(), key, agent)
+        }
+        Dialog::InitWorkItemsConfirm { agent, aspec, replace_aspec, run_audit } => {
+            return handle_init_work_items_confirm(app.active_tab_mut(), key, agent, aspec, replace_aspec, run_audit)
+        }
+        Dialog::InitWorkItemsDirInput { agent, aspec, replace_aspec, run_audit, input } => {
+            return handle_init_work_items_dir_input(app.active_tab_mut(), key, agent, aspec, replace_aspec, run_audit, input)
+        }
+        Dialog::InitWorkItemsTemplateInput { agent, aspec, replace_aspec, run_audit, dir, input } => {
+            return handle_init_work_items_template_input(app.active_tab_mut(), key, agent, aspec, replace_aspec, run_audit, dir, input)
         }
         Dialog::None => {}
     }
@@ -1791,6 +1808,169 @@ fn handle_init_replace_aspec(tab: &mut TabState, key: KeyEvent, agent: crate::cl
         KeyCode::Char('n') | KeyCode::Char('2') | KeyCode::Esc => {
             tab.dialog = Dialog::None;
             Action::InitReplaceAspecDeclined { agent }
+        }
+        _ => Action::None,
+    }
+}
+
+// ── Init work-items dialogs ───────────────────────────────────────────────────
+
+fn handle_init_work_items_confirm(
+    tab: &mut TabState,
+    key: KeyEvent,
+    agent: crate::cli::Agent,
+    aspec: bool,
+    replace_aspec: bool,
+    run_audit: bool,
+) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('1') => {
+            // Advance to dir-input dialog.
+            tab.dialog = Dialog::InitWorkItemsDirInput {
+                agent,
+                aspec,
+                replace_aspec,
+                run_audit,
+                input: String::new(),
+            };
+            Action::None
+        }
+        KeyCode::Char('n') | KeyCode::Char('2') | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::InitWorkItemsDone {
+                agent,
+                aspec,
+                replace_aspec,
+                run_audit,
+                work_items: None,
+            }
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_init_work_items_dir_input(
+    tab: &mut TabState,
+    key: KeyEvent,
+    agent: crate::cli::Agent,
+    aspec: bool,
+    replace_aspec: bool,
+    run_audit: bool,
+    mut input: String,
+) -> Action {
+    match key.code {
+        KeyCode::Enter => {
+            let trimmed = input.trim().to_string();
+            if trimmed.is_empty() {
+                // Empty input — treat as declined.
+                tab.dialog = Dialog::None;
+                return Action::InitWorkItemsDone {
+                    agent,
+                    aspec,
+                    replace_aspec,
+                    run_audit,
+                    work_items: None,
+                };
+            }
+            // Advance to template-input dialog.
+            tab.dialog = Dialog::InitWorkItemsTemplateInput {
+                agent,
+                aspec,
+                replace_aspec,
+                run_audit,
+                dir: trimmed,
+                input: String::new(),
+            };
+            Action::None
+        }
+        KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::InitWorkItemsDone {
+                agent,
+                aspec,
+                replace_aspec,
+                run_audit,
+                work_items: None,
+            }
+        }
+        KeyCode::Backspace => {
+            input.pop();
+            tab.dialog = Dialog::InitWorkItemsDirInput {
+                agent,
+                aspec,
+                replace_aspec,
+                run_audit,
+                input,
+            };
+            Action::None
+        }
+        KeyCode::Char(c) => {
+            input.push(c);
+            tab.dialog = Dialog::InitWorkItemsDirInput {
+                agent,
+                aspec,
+                replace_aspec,
+                run_audit,
+                input,
+            };
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_init_work_items_template_input(
+    tab: &mut TabState,
+    key: KeyEvent,
+    agent: crate::cli::Agent,
+    aspec: bool,
+    replace_aspec: bool,
+    run_audit: bool,
+    dir: String,
+    mut input: String,
+) -> Action {
+    match key.code {
+        KeyCode::Enter | KeyCode::Esc => {
+            let template = if input.trim().is_empty() {
+                None
+            } else {
+                Some(input.trim().to_string())
+            };
+            tab.dialog = Dialog::None;
+            Action::InitWorkItemsDone {
+                agent,
+                aspec,
+                replace_aspec,
+                run_audit,
+                work_items: Some(crate::config::WorkItemsConfig {
+                    dir: Some(dir),
+                    template,
+                }),
+            }
+        }
+        KeyCode::Backspace => {
+            input.pop();
+            tab.dialog = Dialog::InitWorkItemsTemplateInput {
+                agent,
+                aspec,
+                replace_aspec,
+                run_audit,
+                dir,
+                input,
+            };
+            Action::None
+        }
+        KeyCode::Char(c) => {
+            input.push(c);
+            tab.dialog = Dialog::InitWorkItemsTemplateInput {
+                agent,
+                aspec,
+                replace_aspec,
+                run_audit,
+                dir,
+                input,
+            };
+            Action::None
         }
         _ => Action::None,
     }

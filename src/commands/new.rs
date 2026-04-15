@@ -1,5 +1,5 @@
 use crate::commands::download;
-use crate::commands::init::find_git_root_from;
+use crate::commands::init_flow::find_git_root_from;
 use crate::commands::output::OutputSink;
 use crate::config::{load_repo_config, save_repo_config, RepoConfig};
 use anyhow::{bail, Context, Result};

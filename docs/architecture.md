@@ -41,14 +41,16 @@ src/
                            Used by both implement and chat
     download.rs            GitHub downloads: Dockerfile templates (raw files)
                            and aspec folder (tarball extraction)
-    init.rs                `amux init` — run() + run_with_sink()
-                           write_project_dockerfile(): writes Dockerfile.dev (project base template)
-                           write_agent_dockerfile(): writes .amux/Dockerfile.{agent} (agent template;
-                             substitutes {{AMUX_BASE_IMAGE}} with the project base tag)
-                           project_dockerfile_embedded(): returns the project base template bytes
-                           dockerfile_for_agent_embedded(): returns agent template bytes
-                           download_or_fallback_dockerfile(): downloads template from GitHub,
-                             falls back to embedded; aspec/ folder download
+    init_flow.rs           Canonical `init` engine (mode-agnostic). Owns all business logic:
+                           InitFlow::execute(): sequential stage runner
+                           InitQa trait: ask_replace_aspec(), ask_run_audit(), ask_work_items_setup()
+                           InitContainerLauncher trait: build_image(), run_audit()
+                           InitParams, InitSummary, and per-stage StepStatus
+                           All helpers: write_project_dockerfile(), write_agent_dockerfile(),
+                             download_or_fallback_dockerfile(), print_init_summary(), print_whats_next()
+    init.rs                Thin CLI shim: constructs CliInitQa (stdin-backed) and
+                           CliContainerLauncher (synchronous blocking), then delegates to
+                           init_flow::execute(). Contains no business logic.
     new.rs                 `amux new` — run() + run_with_sink()
                            WorkItemKind, slugify, apply_template,
                            find_template, next_work_item_number
@@ -88,6 +90,7 @@ src/
                            capture_vt100_snapshot(); extract_selection_text()
     state.rs               App struct; Focus/ExecutionPhase/Dialog enums;
                            PendingCommand (Ready/Implement/Chat with flags);
+                           TuiInitAnswers: pre-collected init Q&A answers for TuiInitQa;
                            ContainerWindowState, ContainerInfo,
                            LastContainerSummary; terminal selection state fields;
                            terminal_scrollback_lines; container_inner_area;
@@ -276,12 +279,16 @@ and capturing keyboard input.
 ### `Dialog`
 
 ```
-None ──[q / Ctrl+C]──────────────────────────► QuitConfirm ──[y]──► quit
-     ──[ready|implement|chat, cwd ≠ root]──► MountScope   ──[r/c]──► resume
-     ──[new]───────────────────────────────► NewKindSelect ──[1/2/3]──► NewTitleInput ──[Enter]──► create
+None ──[q / Ctrl+C]──────────────────────────► QuitConfirm      ──[y]──► quit
+     ──[ready|implement|chat, cwd ≠ root]──► MountScope        ──[r/c]──► resume
+     ──[new]───────────────────────────────► NewKindSelect      ──[1/2/3]──► NewTitleInput ──[Enter]──► create
+     ──[init, --aspec + aspec/ exists]─────► InitReplaceAspec   ──[y/n]─┐
+     ──[init, all other cases]────────────────────────────────────────►  InitAuditConfirm ──[y/n]──► InitWorkItemsSetup ──[y/n]──► launch_init()
 ```
 
-Dialogs intercept all key events until dismissed. A `PendingCommand` enum
+Dialogs intercept all key events until dismissed. For the `init` flow, dialogs
+collect answers into a `TuiInitAnswers` struct; `launch_init()` reads those answers
+via `TuiInitQa` and delegates to `init_flow::execute()`. A `PendingCommand` enum
 (`Ready { refresh, non_interactive }`, `Implement { work_item, non_interactive, plan }`,
 or `Chat { non_interactive, plan }`)
 and the mount path are preserved in `App` fields while a dialog is active, so
@@ -510,6 +517,152 @@ The `new` command creates a new work item from the `0000-template.md` template.
 In **command mode**, kind and title are collected via stdin prompts.
 In **TUI mode**, two dialog overlays (`NewKindSelect` → `NewTitleInput`) collect
 the information, then `run_with_sink` is called with the pre-supplied values.
+
+---
+
+## Init Command
+
+The `init` command sets up a new project for use with amux. All business logic
+lives in `src/commands/init_flow.rs`, which is called identically from both the
+CLI and TUI adapters. The two surfaces differ only in how they collect user input
+(`InitQa` trait) and how they launch containers (`InitContainerLauncher` trait).
+It is structurally impossible for the two surfaces to diverge in stage coverage
+or file output.
+
+### Unified Engine (`src/commands/init_flow.rs`)
+
+`InitFlow::execute()` is the single entry point for everything `init` does:
+
+```rust
+pub async fn execute<Q: InitQa, L: InitContainerLauncher>(
+    params: InitParams,
+    qa: &mut Q,
+    launcher: &L,
+    sink: &OutputSink,
+    runtime: &dyn AgentRuntime,
+) -> anyhow::Result<InitSummary>
+```
+
+Stages run in order, each updating `InitSummary`. If an early stage fails, later
+stages set their status to `Skipped` rather than running against broken
+preconditions.
+
+| # | Stage | Description |
+|---|-------|-------------|
+| 1 | Collect Q&A | Calls `qa.ask_replace_aspec()` and `qa.ask_run_audit()` |
+| 2 | Repo config | Reads or creates `aspec/.amux.json` with the chosen agent |
+| 3 | aspec folder | Downloads or skips `aspec/` based on `params.aspec` flag |
+| 4 | Dockerfile.dev | Writes project base template if absent |
+| 5 | Agent dockerfile | Writes `.amux/Dockerfile.{agent}` template if absent |
+| 6 | Runtime check | Verifies container runtime is available; exits early on error |
+| 7a | With audit | Build project image → build agent image → run audit → rebuild both |
+| 7b | Without audit (new files only) | Build project image → build agent image |
+| 8 | Work items setup | Calls `qa.ask_work_items_setup()`; writes result to repo config |
+| 9 | Summary | Prints `InitSummary` table and "What's Next?" guide |
+
+Stage 7a rebuilds both images after the audit because the audit agent may rewrite
+`Dockerfile.dev`. This rebuild is non-optional and is always performed by the
+launcher, not gated by a flag.
+
+### `InitQa` Trait
+
+Handles all user question-and-answer interactions during the flow:
+
+```rust
+pub trait InitQa {
+    fn ask_replace_aspec(&mut self) -> anyhow::Result<bool>;
+    fn ask_run_audit(&mut self) -> anyhow::Result<bool>;
+    fn ask_work_items_setup(&mut self) -> anyhow::Result<Option<WorkItemsConfig>>;
+}
+```
+
+| Implementation | Backing mechanism |
+|---|---|
+| `CliInitQa` | `ask_yes_no_stdin()` and `read_line()` — blocks on stdin |
+| `TuiInitQa` | Holds a pre-collected `TuiInitAnswers` struct; returns answers immediately without blocking |
+
+`TuiInitQa` can accurately represent "the user was never asked this question"
+(e.g. `ask_replace_aspec` is skipped when `--aspec` was not passed or `aspec/`
+does not exist) — this is encoded as `replace_aspec = false`, never as an error.
+
+### `InitContainerLauncher` Trait
+
+Decouples the flow from any specific blocking vs. async container strategy:
+
+```rust
+pub trait InitContainerLauncher {
+    fn build_image(&self, tag: &str, dockerfile: &Path, context: &Path, sink: &OutputSink) -> anyhow::Result<()>;
+    fn run_audit(&self, agent: Agent, cwd: &Path, sink: &OutputSink) -> anyhow::Result<()>;
+}
+```
+
+| Implementation | Behavior |
+|---|---|
+| `CliContainerLauncher` | Delegates to `AgentRuntime`; blocks synchronously (inherited stdio) |
+| `TuiContainerLauncher` | Runs inside the background task spawned by `launch_init()`; blocking there is safe since the task has its own thread |
+
+Both implementations delegate to `AgentRuntime` rather than calling Docker
+directly — `InitContainerLauncher` is an orchestration boundary, not a
+runtime abstraction.
+
+### CLI Adapter (`src/commands/init.rs`)
+
+A thin shim with no business logic:
+
+```rust
+pub async fn run(agent: Agent, aspec: bool, cwd: PathBuf, runtime: &dyn AgentRuntime) -> anyhow::Result<()> {
+    let git_root = find_git_root_from(&cwd)?;
+    let mut qa = CliInitQa::new(&git_root);
+    let launcher = CliContainerLauncher::new(runtime);
+    let sink = OutputSink::Stdout;
+    let params = InitParams { agent, aspec, git_root };
+    init_flow::execute(params, &mut qa, &launcher, &sink, runtime).await?;
+    Ok(())
+}
+```
+
+All Q&A (including `ask_replace_aspec` and `ask_run_audit`) happens inside
+`execute()` at the correct stage — there is no upfront pre-flight Q&A outside the
+flow.
+
+### TUI Adapter (`src/tui/mod.rs`)
+
+The TUI collects answers through three dialog states before calling `launch_init()`:
+
+| Dialog | Purpose | Condition |
+|--------|---------|-----------|
+| `InitReplaceAspec` | Ask whether to overwrite existing `aspec/` | Only when `--aspec` was passed and `aspec/` already exists |
+| `InitAuditConfirm` | Ask whether to run the Dockerfile audit | Always |
+| `InitWorkItemsSetup` | Ask for work items directory / template paths | When `aspec/` will not be downloaded and no work items dir is configured |
+
+All three dialogs populate a `TuiInitAnswers` struct. When the final dialog is
+dismissed, `launch_init()` constructs `TuiInitQa { answers }` and
+`TuiContainerLauncher` and calls `init_flow::execute()` inside a background task
+— identical in shape to how `launch_ready()` drives `ready.rs`.
+
+The `pending_init_run_audit` flag and `check_init_continuation()` that
+previously deferred the audit to a separate `ready --refresh` invocation no longer
+exist. The audit is now run inline inside `execute()` via `TuiContainerLauncher`.
+
+### `InitSummary`
+
+```rust
+pub struct InitSummary {
+    pub config:           StepStatus,
+    pub aspec_folder:     StepStatus,
+    pub dockerfile_dev:   StepStatus,
+    pub agent_dockerfile: StepStatus,
+    pub agent_audit:      StepStatus,
+    pub base_image:       StepStatus,
+    pub agent_image:      StepStatus,
+    pub work_items:       StepStatus,
+}
+```
+
+Each `StepStatus` is one of `Pending`, `Ok(msg)`, `Skipped(msg)`, `Failed(msg)`,
+or `Warn(msg)`. `print_init_summary()` renders the table shown at the end of
+every `init` run. `InitSummary` lives in `init_flow.rs` — it is part of the
+shared flow, not the CLI or TUI presentation layer.
 
 ---
 
@@ -1045,6 +1198,11 @@ Inactive tabs are rendered only as a tab bar entry — the full render path runs
 | Unit — chat | `commands::chat::tests` | Entrypoints, no-prompt verification |
 | Unit — agent | `commands::agent::tests` | Shared agent launching |
 | Unit — new | `commands::new::tests` | Slugify, numbering, template, find_template, kind parsing, run_with_sink |
+| Unit — init flow | `commands::init_flow::tests` | Each stage independently via mock `InitQa` + `InitContainerLauncher`; `InitSummary` correctness; no filesystem or Docker access |
+| Unit — CliInitQa | `commands::init_flow::tests` | Parses stdin responses (yes/no/empty/EOF) via byte cursor; edge cases for `ask_work_items_setup` |
+| Unit — TuiInitQa | `commands::init_flow::tests` | Pre-collected answers returned without blocking; "never asked" represented as `false` not error |
+| Integration — init CLI | `commands::init_flow::tests` | Temp git repo + mock launchers; asserts expected files written and `InitSummary` reports Ok per stage |
+| Integration — init TUI parity | `commands::init_flow::tests` | Same scenario with `TuiInitQa`/`TuiContainerLauncher`; asserts identical file outcomes to CLI — structural guarantee surfaces cannot diverge |
 | Integration — CLI | `tests/cli_integration.rs` | Binary-level: help, version, flags, work items |
 | Integration — parity | `tests/command_tui_parity.rs` | Shared logic between command/TUI modes, container lifecycle, tab-cwd correctness |
 | Unit — download | `commands::download::tests` | Tarball extraction, file counting, empty tarball error |
