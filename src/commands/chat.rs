@@ -131,7 +131,7 @@ pub fn chat_entrypoint(agent: &str, plan: bool) -> Vec<String> {
 pub fn chat_entrypoint_non_interactive(agent: &str, plan: bool) -> Vec<String> {
     let mut args = match agent {
         "claude" => vec!["claude".to_string(), "-p".to_string()],
-        "codex" => vec!["codex".to_string(), "--quiet".to_string()],
+        "codex" => vec!["codex".to_string()],
         "opencode" => vec!["opencode".to_string()],
         "maki" => vec!["maki".to_string(), "--print".to_string()],
         // Gemini supports -p / --prompt for headless/non-interactive output.
@@ -216,9 +216,8 @@ mod tests {
     #[test]
     fn chat_entrypoint_non_interactive_codex() {
         let args = chat_entrypoint_non_interactive("codex", false);
-        assert_eq!(args.len(), 2);
+        assert_eq!(args.len(), 1);
         assert_eq!(args[0], "codex");
-        assert_eq!(args[1], "--quiet");
     }
 
     #[test]
@@ -296,7 +295,7 @@ mod tests {
     #[test]
     fn chat_entrypoint_non_interactive_plan_codex() {
         let args = chat_entrypoint_non_interactive("codex", true);
-        assert_eq!(args, vec!["codex", "--quiet", "--approval-mode", "plan"]);
+        assert_eq!(args, vec!["codex", "--approval-mode", "plan"]);
     }
 
     #[test]

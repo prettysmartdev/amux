@@ -15,13 +15,13 @@ use crate::commands::init_flow::find_git_root_from;
 use crate::commands::new::WorkItemKind;
 use crate::commands::specs::{amend_agent_entrypoint, interview_agent_entrypoint};
 use crate::commands::{claws, init_flow, new, ready, ready_flow, status};
-use crate::commands::ready::{compute_ready_build_flag, is_legacy_layout, print_interactive_notice};
+use crate::commands::ready::{compute_ready_build_flag, dockerfile_matches_template, is_legacy_layout, print_interactive_notice};
 use crate::config::{effective_env_passthrough, effective_scrollback_lines, load_repo_config};
 use crate::runtime::{generate_container_name, ContainerStats};
 use crate::tui::input::Action;
 use crate::tui::pty::{spawn_text_command, PtySession};
 use crate::tui::render::{calculate_container_inner_size, workflow_strip_height};
-use crate::tui::state::{App, ClawsPhase, ContainerWindowState, Dialog, PendingCommand};
+use crate::tui::state::{App, AuditPhase, ClawsPhase, ContainerWindowState, Dialog, PendingCommand};
 use crate::workflow::{self, StepStatus};
 use anyhow::Result;
 use crossterm::{
@@ -242,6 +242,7 @@ where
         let now_done = !matches!(app.active_tab().phase, state::ExecutionPhase::Running { .. });
 
         if was_running && now_done {
+            check_audit_continuation(&mut app).await;
             check_claws_continuation(&mut app).await;
             check_workflow_step_completion(&mut app).await;
         }
@@ -539,6 +540,7 @@ async fn handle_action(app: &mut App, action: Action) {
                 *refresh = true;
                 *build = true;
             }
+            // Migration forces refresh=true, so the template audit question is moot.
             show_pre_command_dialogs(app).await;
         }
 
@@ -548,6 +550,43 @@ async fn handle_action(app: &mut App, action: Action) {
                 app.active_tab_mut().pending_command
             {
                 *migrate_decision = Some(false);
+            }
+            // After keeping the legacy layout, check whether the Dockerfile.dev still
+            // matches the default template and ask the user about the audit.
+            let tab_cwd = app.active_tab().cwd.clone();
+            let needs_confirm = if let Some(git_root) = find_git_root_from(&tab_cwd) {
+                let refresh = matches!(
+                    app.active_tab().pending_command,
+                    PendingCommand::Ready { refresh: true, .. }
+                );
+                !refresh && ready_needs_template_audit_confirm(&git_root)
+            } else {
+                false
+            };
+            if needs_confirm {
+                app.active_tab_mut().dialog = Dialog::ReadyTemplateAuditConfirm;
+            } else {
+                show_pre_command_dialogs(app).await;
+            }
+        }
+
+        Action::ReadyTemplateAuditAccept => {
+            // User wants to run the audit; set refresh=true so execute_pre_audit launches it.
+            if let PendingCommand::Ready { ref mut template_audit_decision, ref mut refresh, .. } =
+                app.active_tab_mut().pending_command
+            {
+                *template_audit_decision = Some(true);
+                *refresh = true;
+            }
+            show_pre_command_dialogs(app).await;
+        }
+
+        Action::ReadyTemplateAuditDecline => {
+            // User declined the audit; record decision and continue normally.
+            if let PendingCommand::Ready { ref mut template_audit_decision, .. } =
+                app.active_tab_mut().pending_command
+            {
+                *template_audit_decision = Some(false);
             }
             show_pre_command_dialogs(app).await;
         }
@@ -850,6 +889,19 @@ async fn execute_tab_command(app: &mut App, _tab_idx: usize, cmd: &str) {
 }
 
 /// Parse flags from the command parts, returning (refresh, build, no_cache, non_interactive, allow_docker).
+/// Returns `true` when the ready command should show the template-audit confirm dialog.
+///
+/// Conditions: `Dockerfile.dev` exists in the git root and its content is identical
+/// to the default project template (i.e. it has never been customised).
+fn ready_needs_template_audit_confirm(git_root: &std::path::Path) -> bool {
+    let dockerfile_path = git_root.join("Dockerfile.dev");
+    if !dockerfile_path.exists() {
+        return false;
+    }
+    let content = std::fs::read_to_string(&dockerfile_path).unwrap_or_default();
+    dockerfile_matches_template(&content)
+}
+
 fn parse_ready_flags(parts: &[&str]) -> (bool, bool, bool, bool, bool) {
     let refresh = parts.iter().any(|p| *p == "--refresh");
     let build = parts.iter().any(|p| *p == "--build");
@@ -941,16 +993,25 @@ async fn execute_command(app: &mut App, cmd: &str) {
                 non_interactive,
                 allow_docker,
                 migrate_decision: None,
+                template_audit_decision: None,
             };
 
-            // Detect legacy layout: Dockerfile.dev exists but .amux/Dockerfile.{agent} does not.
-            // Show the migration dialog to pre-collect the user's decision before launching.
             let tab_cwd = app.active_tab().cwd.clone();
             if let Some(git_root) = find_git_root_from(&tab_cwd) {
                 let config = load_repo_config(&git_root).unwrap_or_default();
                 let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
+
+                // Detect legacy layout: Dockerfile.dev exists but .amux/Dockerfile.{agent} does not.
+                // Show the migration dialog to pre-collect the user's decision before launching.
                 if is_legacy_layout(&git_root, &agent_name) {
                     app.active_tab_mut().dialog = Dialog::ReadyLegacyMigration { agent_name };
+                    return;
+                }
+
+                // Detect unmodified template: Dockerfile.dev exists and matches the default template.
+                // Ask whether to launch the audit container (only when --refresh not already set).
+                if !refresh && ready_needs_template_audit_confirm(&git_root) {
+                    app.active_tab_mut().dialog = Dialog::ReadyTemplateAuditConfirm;
                     return;
                 }
             }
@@ -1178,8 +1239,11 @@ async fn launch_pending_command(app: &mut App) {
 
 /// Launch the ready flow as a single background task calling `ready_flow::execute()`.
 ///
-/// All phases (pre-audit, audit, post-audit) run sequentially inside the task;
-/// CLI and TUI differ only through their `ReadyQa` and `ReadyAuditLauncher` impls.
+/// Phase 1 (pre-audit text task) runs first. When it completes,
+/// `check_audit_continuation` detects `AuditPhase::ReadyPreAudit` and launches
+/// the audit as a foreground PTY container window. When the PTY exits,
+/// `check_audit_continuation` detects `AuditPhase::ReadyAuditPty` and launches
+/// the post-audit text task.
 async fn launch_ready(app: &mut App) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
@@ -1194,7 +1258,7 @@ async fn launch_ready(app: &mut App) {
         .take()
         .unwrap_or_else(|| git_root.clone());
 
-    let (refresh, build, no_cache, non_interactive, allow_docker, migrate_decision) =
+    let (refresh, build, no_cache, non_interactive, allow_docker, migrate_decision, template_audit_decision) =
         if let PendingCommand::Ready {
             refresh,
             build,
@@ -1202,9 +1266,10 @@ async fn launch_ready(app: &mut App) {
             non_interactive,
             allow_docker,
             migrate_decision,
+            template_audit_decision,
         } = app.active_tab().pending_command
         {
-            (refresh, build, no_cache, non_interactive, allow_docker, migrate_decision)
+            (refresh, build, no_cache, non_interactive, allow_docker, migrate_decision, template_audit_decision)
         } else {
             return;
         };
@@ -1217,17 +1282,30 @@ async fn launch_ready(app: &mut App) {
         non_interactive,
         allow_docker,
     };
-    let answers = TuiReadyAnswers { migrate_decision };
+    let answers = TuiReadyAnswers { migrate_decision, template_audit_decision };
 
     app.active_tab_mut().start_command("ready".to_string());
+    app.active_tab_mut().audit_phase = AuditPhase::ReadyPreAudit;
+
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     app.active_tab_mut().exit_rx = Some(exit_rx);
     let tx = app.active_tab().output_tx.clone();
 
+    // Channel for the pre-audit handoff (sent only when an audit is needed).
+    let (handoff_tx, handoff_rx) = tokio::sync::oneshot::channel::<ready_flow::ReadyAuditHandoff>();
+    app.active_tab_mut().ready_audit_handoff_rx = Some(handoff_rx);
+
     spawn_text_command(tx, exit_tx, move |sink| async move {
         let mut qa = TuiReadyQa { answers };
-        let launcher = TuiReadyAuditLauncher { runtime: runtime.clone() };
-        ready_flow::execute(params, &mut qa, &launcher, &sink, mount_path, runtime).await?;
+        match ready_flow::execute_pre_audit(params, &mut qa, &sink, mount_path, runtime).await? {
+            ready_flow::ReadyPreAuditResult::NeedsAudit(handoff) => {
+                // Send handoff before returning so tick() can drain it before the exit fires.
+                let _ = handoff_tx.send(handoff);
+            }
+            ready_flow::ReadyPreAuditResult::Done { .. } => {
+                // No audit needed — summary already printed. handoff_tx is dropped here.
+            }
+        }
         Ok(())
     });
 }
@@ -1238,6 +1316,8 @@ async fn launch_ready(app: &mut App) {
 struct TuiReadyAnswers {
     /// `Some(true)` = user chose to migrate; `Some(false)` = keep legacy; `None` = no legacy layout.
     migrate_decision: Option<bool>,
+    /// `Some(true)` = user accepted the audit; `Some(false)` = declined; `None` = not shown.
+    template_audit_decision: Option<bool>,
 }
 
 /// Q&A adapter for TUI mode: returns pre-collected dialog answers immediately
@@ -1253,8 +1333,9 @@ impl ready_flow::ReadyQa for TuiReadyQa {
     }
 
     fn ask_run_audit_on_template(&mut self) -> Result<bool> {
-        // TUI auto-accepts audit when the user clicked "ready".
-        Ok(true)
+        // Return the pre-collected answer from the ReadyTemplateAuditConfirm dialog.
+        // Defaults to false (skip) when the dialog was not shown.
+        Ok(self.answers.template_audit_decision.unwrap_or(false))
     }
 
     fn ask_migrate_legacy(&mut self, _agent_name: &str) -> Result<bool> {
@@ -1262,71 +1343,7 @@ impl ready_flow::ReadyQa for TuiReadyQa {
     }
 }
 
-/// Container audit launcher for TUI mode: blocks inside the spawned background task
-/// using captured output streamed line-by-line through the `OutputSink`.
-struct TuiReadyAuditLauncher {
-    runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
-}
-
-impl ready_flow::ReadyAuditLauncher for TuiReadyAuditLauncher {
-    fn run_audit(
-        &self,
-        ctx: &crate::commands::ready::ReadyContext,
-        host_settings: Option<&crate::runtime::HostSettings>,
-        opts: &crate::commands::ready::ReadyOptions,
-        sink: &crate::commands::output::OutputSink,
-    ) -> Result<()> {
-        use crate::commands::ready::build_audit_setup;
-        let audit = build_audit_setup(ctx, true); // always captured in TUI
-        let entrypoint_refs: Vec<&str> = audit.entrypoint.iter().map(String::as_str).collect();
-        let (_cmd, output) = self
-            .runtime
-            .run_container_captured(
-                &audit.image_tag,
-                &ctx.mount_path,
-                &entrypoint_refs,
-                &ctx.env_vars,
-                host_settings,
-                opts.allow_docker,
-                None,
-                None,
-            )
-            .map_err(|e| anyhow::anyhow!("Dockerfile audit container failed: {}", e))?;
-        for line in output.lines() {
-            sink.println(line);
-        }
-        Ok(())
-    }
-}
-
 // ─── TUI init adapters ────────────────────────────────────────────────────────
-
-/// Pre-collected answers from TUI modal dialogs, consumed by `TuiInitQa`.
-struct TuiInitAnswers {
-    replace_aspec: bool,
-    run_audit: bool,
-    work_items: Option<crate::config::WorkItemsConfig>,
-}
-
-/// Q&A adapter for TUI mode: returns pre-collected dialog answers immediately
-/// without blocking on stdin.
-struct TuiInitQa {
-    answers: TuiInitAnswers,
-}
-
-impl init_flow::InitQa for TuiInitQa {
-    fn ask_replace_aspec(&mut self) -> Result<bool> {
-        Ok(self.answers.replace_aspec)
-    }
-
-    fn ask_run_audit(&mut self) -> Result<bool> {
-        Ok(self.answers.run_audit)
-    }
-
-    fn ask_work_items_setup(&mut self) -> Result<Option<crate::config::WorkItemsConfig>> {
-        Ok(self.answers.work_items.take())
-    }
-}
 
 /// Container launcher for TUI mode: blocks inside the spawned background task thread.
 struct TuiContainerLauncher {
@@ -1387,8 +1404,10 @@ impl init_flow::InitContainerLauncher for TuiContainerLauncher {
         let host_settings =
             crate::passthrough::passthrough_for_agent(agent.as_str()).prepare_host_settings();
 
-        ready::print_interactive_notice(sink, agent.as_str());
-        let entrypoint = ready::audit_entrypoint(agent.as_str());
+        // TUI owns the terminal; run_container (Stdio::inherit + -it) would conflict
+        // with the TUI renderer.  Use captured mode with the non-interactive entrypoint
+        // and stream the output line-by-line through the sink instead.
+        let entrypoint = ready::audit_entrypoint_non_interactive(agent.as_str());
         let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
         let modified_settings: Option<crate::runtime::HostSettings> =
@@ -1406,8 +1425,9 @@ impl init_flow::InitContainerLauncher for TuiContainerLauncher {
         let effective_settings: Option<&crate::runtime::HostSettings> =
             modified_settings.as_ref().or(host_settings.as_ref());
 
-        self.runtime
-            .run_container(
+        let (_cmd, output) = self
+            .runtime
+            .run_container_captured(
                 &agent_img,
                 &mount_path,
                 &entrypoint_refs,
@@ -1417,7 +1437,11 @@ impl init_flow::InitContainerLauncher for TuiContainerLauncher {
                 None,
                 None,
             )
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        for line in output.lines() {
+            sink.println(line);
+        }
+        Ok(())
     }
 }
 
@@ -1441,7 +1465,13 @@ fn should_offer_work_items(aspec: bool, cwd: &std::path::Path) -> bool {
     config.work_items.as_ref().and_then(|w| w.dir.as_ref()).is_none()
 }
 
-/// Launch the `init` flow as a background text task using `init_flow::execute()`.
+/// Launch the `init` flow.
+///
+/// Phase 1 (pre-audit text task) runs first. When it completes,
+/// `check_audit_continuation` detects `AuditPhase::InitPreAudit` and launches
+/// the audit as a foreground PTY container window. When the PTY exits,
+/// `check_audit_continuation` detects `AuditPhase::InitAuditPty` and launches
+/// the post-audit text task.
 async fn launch_init(
     app: &mut App,
     agent: Agent,
@@ -1461,15 +1491,38 @@ async fn launch_init(
     let runtime = app.runtime.clone();
 
     app.active_tab_mut().start_command("init".to_string());
+    app.active_tab_mut().audit_phase = AuditPhase::InitPreAudit;
+
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     app.active_tab_mut().exit_rx = Some(exit_rx);
     let tx = app.active_tab().output_tx.clone();
+
+    // Channel for the pre-audit handoff (sent only when an audit is needed).
+    let (handoff_tx, handoff_rx) =
+        tokio::sync::oneshot::channel::<init_flow::InitAuditHandoff>();
+    app.active_tab_mut().init_audit_handoff_rx = Some(handoff_rx);
+
     spawn_text_command(tx, exit_tx, move |sink| async move {
-        let answers = TuiInitAnswers { replace_aspec, run_audit, work_items };
-        let mut qa = TuiInitQa { answers };
         let launcher = TuiContainerLauncher { runtime: runtime.clone() };
         let params = init_flow::InitParams { agent, aspec, git_root };
-        init_flow::execute(params, &mut qa, &launcher, &sink, runtime).await?;
+        match init_flow::execute_init_pre_audit(
+            params,
+            replace_aspec,
+            run_audit,
+            work_items,
+            &sink,
+            &launcher,
+            runtime,
+        )
+        .await?
+        {
+            init_flow::InitPreAuditResult::NeedsAudit(handoff) => {
+                let _ = handoff_tx.send(handoff);
+            }
+            init_flow::InitPreAuditResult::Done { .. } => {
+                // No audit needed — summary already printed.
+            }
+        }
         Ok(())
     });
 }
@@ -2581,6 +2634,347 @@ async fn launch_claws_delete_and_start_fresh(app: &mut App, container_id: String
         claws::save_nanoclaw_config(&config)?;
 
         let _ = container_tx.send(new_container_id);
+        Ok(())
+    });
+}
+
+// ─── Ready / init audit phase continuation ────────────────────────────────────
+
+/// Check if a `ready` or `init` audit phase just completed and advance to the
+/// next phase. Called from the `was_running && now_done` block in the event loop.
+async fn check_audit_continuation(app: &mut App) {
+    let phase = app.active_tab().audit_phase.clone();
+    match phase {
+        AuditPhase::Inactive => {}
+
+        // ── ready flow ──────────────────────────────────────────────────────
+        AuditPhase::ReadyPreAudit => {
+            if matches!(app.active_tab().phase, state::ExecutionPhase::Error { .. }) {
+                // Pre-audit failed — reset.
+                let tab = app.active_tab_mut();
+                tab.audit_phase = AuditPhase::Inactive;
+                tab.ready_audit_handoff = None;
+                tab.ready_audit_handoff_rx = None;
+                return;
+            }
+            if let Some(handoff) = app.active_tab_mut().ready_audit_handoff.take() {
+                // Pre-audit produced a handoff — launch the PTY audit container.
+                app.active_tab_mut().audit_phase = AuditPhase::ReadyAuditPty;
+                // Re-store handoff so launch_ready_audit_pty can consume the parts it needs
+                // and retain the rest for post-audit.
+                app.active_tab_mut().ready_audit_handoff = Some(handoff);
+                launch_ready_audit_pty(app).await;
+            } else {
+                // Pre-audit completed without needing an audit (Done path) — all done.
+                app.active_tab_mut().audit_phase = AuditPhase::Inactive;
+            }
+        }
+
+        AuditPhase::ReadyAuditPty => {
+            // PTY audit container just exited — launch post-audit text task.
+            let audit_exit_code = match &app.active_tab().phase {
+                state::ExecutionPhase::Done { .. } => 0,
+                state::ExecutionPhase::Error { exit_code, .. } => *exit_code,
+                _ => 0,
+            };
+            launch_ready_post_audit(app, audit_exit_code).await;
+        }
+
+        AuditPhase::ReadyPostAudit => {
+            // Post-audit text task completed — workflow is fully done.
+            app.active_tab_mut().audit_phase = AuditPhase::Inactive;
+        }
+
+        // ── init flow ───────────────────────────────────────────────────────
+        AuditPhase::InitPreAudit => {
+            if matches!(app.active_tab().phase, state::ExecutionPhase::Error { .. }) {
+                let tab = app.active_tab_mut();
+                tab.audit_phase = AuditPhase::Inactive;
+                tab.init_audit_handoff = None;
+                tab.init_audit_handoff_rx = None;
+                return;
+            }
+            if let Some(handoff) = app.active_tab_mut().init_audit_handoff.take() {
+                app.active_tab_mut().audit_phase = AuditPhase::InitAuditPty;
+                app.active_tab_mut().init_audit_handoff = Some(handoff);
+                launch_init_audit_pty(app).await;
+            } else {
+                app.active_tab_mut().audit_phase = AuditPhase::Inactive;
+            }
+        }
+
+        AuditPhase::InitAuditPty => {
+            let audit_exit_code = match &app.active_tab().phase {
+                state::ExecutionPhase::Done { .. } => 0,
+                state::ExecutionPhase::Error { exit_code, .. } => *exit_code,
+                _ => 0,
+            };
+            launch_init_post_audit(app, audit_exit_code).await;
+        }
+
+        AuditPhase::InitPostAudit => {
+            app.active_tab_mut().audit_phase = AuditPhase::Inactive;
+        }
+    }
+}
+
+/// Launch the PTY audit container for the `ready` flow.
+///
+/// Takes the handoff from `TabState.ready_audit_handoff`, moves `host_settings`
+/// into `TabState.host_settings` (so the TempDir lives until the container exits),
+/// re-stores the rest of the handoff for post-audit use, then spawns the PTY.
+async fn launch_ready_audit_pty(app: &mut App) {
+    use crate::commands::ready::{build_audit_setup, print_interactive_notice};
+
+    let handoff = match app.active_tab_mut().ready_audit_handoff.take() {
+        Some(h) => h,
+        None => {
+            app.active_tab_mut().audit_phase = AuditPhase::Inactive;
+            return;
+        }
+    };
+
+    let ready_flow::ReadyAuditHandoff { ctx, opts, summary, host_settings, runtime } = handoff;
+
+    // Always use the interactive entrypoint for the TUI PTY session.
+    let audit = build_audit_setup(&ctx, false);
+    let image_tag = audit.image_tag.clone();
+    let entrypoint = audit.entrypoint.clone();
+    let mount_path_str = ctx.mount_path.clone();
+    let env_vars = ctx.env_vars.clone();
+    let allow_docker = opts.allow_docker;
+    let agent_name = ctx.agent_name.clone();
+
+    // Print the INTERACTIVE MODE notice to the outer execution window.
+    {
+        let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+        print_interactive_notice(&sink, &agent_name);
+    }
+
+    // Move host_settings into TabState so the TempDir persists until finish_command.
+    app.active_tab_mut().host_settings = host_settings;
+
+    // Re-store the rest of the handoff (without host_settings) for the post-audit phase.
+    app.active_tab_mut().ready_audit_handoff = Some(ready_flow::ReadyAuditHandoff {
+        ctx,
+        opts,
+        summary,
+        host_settings: None, // now owned by TabState.host_settings
+        runtime: runtime.clone(),
+    });
+
+    let container_name = crate::runtime::generate_container_name();
+    let agent_display = state::agent_display_name(&agent_name).to_string();
+
+    let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+    let pty_args = app.runtime.build_run_args_pty(
+        &image_tag,
+        &mount_path_str,
+        &entrypoint_refs,
+        &env_vars,
+        app.active_tab().host_settings.as_ref(),
+        allow_docker,
+        Some(&container_name),
+        None,
+    );
+    let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
+
+    let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let wf_strip_h = app
+        .active_tab()
+        .workflow
+        .as_ref()
+        .map(|wf| workflow_strip_height(wf))
+        .unwrap_or(0);
+    let (inner_cols, inner_rows) =
+        calculate_container_inner_size(term_cols, term_rows, wf_strip_h);
+    let size = PtySize {
+        rows: inner_rows,
+        cols: inner_cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+
+    let git_root_for_config = find_git_root_from(&app.active_tab().cwd)
+        .unwrap_or_else(|| app.active_tab().cwd.clone());
+    app.active_tab_mut().terminal_scrollback_lines =
+        effective_scrollback_lines(&git_root_for_config);
+    app.active_tab_mut()
+        .continue_command(format!("ready [audit: {}]", agent_name));
+    app.active_tab_mut()
+        .start_container(container_name.clone(), agent_display, inner_cols, inner_rows);
+
+    let cli_bin = app.runtime.cli_binary();
+    let stats_runtime = app.runtime.clone();
+    match PtySession::spawn(cli_bin, &pty_str_refs, size) {
+        Ok((session, pty_rx)) => {
+            app.active_tab_mut().pty = Some(session);
+            app.active_tab_mut().pty_rx = Some(pty_rx);
+            app.active_tab_mut().stats_rx =
+                Some(spawn_stats_poller(container_name, stats_runtime));
+        }
+        Err(e) => {
+            app.active_tab_mut()
+                .push_output(format!("Failed to launch audit container: {}", e));
+            app.active_tab_mut().finish_command(1);
+            app.active_tab_mut().audit_phase = AuditPhase::Inactive;
+            app.active_tab_mut().ready_audit_handoff = None;
+        }
+    }
+}
+
+/// Launch the post-audit text task for the `ready` flow.
+async fn launch_ready_post_audit(app: &mut App, audit_exit_code: i32) {
+    let handoff = match app.active_tab_mut().ready_audit_handoff.take() {
+        Some(h) => h,
+        None => {
+            app.active_tab_mut().audit_phase = AuditPhase::Inactive;
+            return;
+        }
+    };
+
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+    app.active_tab_mut().exit_rx = Some(exit_rx);
+    let tx = app.active_tab().output_tx.clone();
+
+    app.active_tab_mut()
+        .continue_command("ready [post-audit]".into());
+    app.active_tab_mut().audit_phase = AuditPhase::ReadyPostAudit;
+
+    spawn_text_command(tx, exit_tx, move |sink| async move {
+        ready_flow::execute_post_audit(&sink, handoff, audit_exit_code).await?;
+        Ok(())
+    });
+}
+
+/// Launch the PTY audit container for the `init` flow.
+async fn launch_init_audit_pty(app: &mut App) {
+    use crate::commands::ready::{audit_entrypoint, print_interactive_notice};
+
+    let handoff = match app.active_tab_mut().init_audit_handoff.take() {
+        Some(h) => h,
+        None => {
+            app.active_tab_mut().audit_phase = AuditPhase::Inactive;
+            return;
+        }
+    };
+
+    let init_flow::InitAuditHandoff {
+        agent,
+        git_root,
+        image_tag,
+        agent_image_tag,
+        aspec,
+        summary,
+        env_vars,
+        host_settings,
+        runtime,
+        work_items,
+    } = handoff;
+
+    let agent_name = agent.as_str().to_string();
+
+    // Print the INTERACTIVE MODE notice to the outer execution window.
+    {
+        let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+        print_interactive_notice(&sink, &agent_name);
+    }
+
+    // Move host_settings into TabState so the TempDir persists until finish_command.
+    app.active_tab_mut().host_settings = host_settings;
+
+    // Re-store the handoff (without host_settings) for the post-audit phase.
+    app.active_tab_mut().init_audit_handoff = Some(init_flow::InitAuditHandoff {
+        agent: agent.clone(),
+        git_root: git_root.clone(),
+        image_tag: image_tag.clone(),
+        agent_image_tag: agent_image_tag.clone(),
+        aspec,
+        summary,
+        env_vars: env_vars.clone(),
+        host_settings: None, // now owned by TabState.host_settings
+        runtime: runtime.clone(),
+        work_items,
+    });
+
+    let entrypoint = audit_entrypoint(&agent_name);
+    let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+    let mount_path_str = git_root.to_str().unwrap_or("").to_string();
+
+    let container_name = crate::runtime::generate_container_name();
+    let agent_display = state::agent_display_name(&agent_name).to_string();
+
+    let pty_args = app.runtime.build_run_args_pty(
+        &image_tag,
+        &mount_path_str,
+        &entrypoint_refs,
+        &env_vars,
+        app.active_tab().host_settings.as_ref(),
+        false, // init audit never uses --allow-docker
+        Some(&container_name),
+        None,
+    );
+    let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
+
+    let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, 0);
+    let size = PtySize {
+        rows: inner_rows,
+        cols: inner_cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+
+    app.active_tab_mut().terminal_scrollback_lines =
+        effective_scrollback_lines(&git_root);
+    app.active_tab_mut()
+        .continue_command(format!("init [audit: {}]", agent_name));
+    app.active_tab_mut()
+        .start_container(container_name.clone(), agent_display, inner_cols, inner_rows);
+
+    let cli_bin = app.runtime.cli_binary();
+    let stats_runtime = app.runtime.clone();
+    match PtySession::spawn(cli_bin, &pty_str_refs, size) {
+        Ok((session, pty_rx)) => {
+            app.active_tab_mut().pty = Some(session);
+            app.active_tab_mut().pty_rx = Some(pty_rx);
+            app.active_tab_mut().stats_rx =
+                Some(spawn_stats_poller(container_name, stats_runtime));
+        }
+        Err(e) => {
+            app.active_tab_mut()
+                .push_output(format!("Failed to launch audit container: {}", e));
+            app.active_tab_mut().finish_command(1);
+            app.active_tab_mut().audit_phase = AuditPhase::Inactive;
+            app.active_tab_mut().init_audit_handoff = None;
+        }
+    }
+}
+
+/// Launch the post-audit text task for the `init` flow.
+async fn launch_init_post_audit(app: &mut App, audit_exit_code: i32) {
+    let handoff = match app.active_tab_mut().init_audit_handoff.take() {
+        Some(h) => h,
+        None => {
+            app.active_tab_mut().audit_phase = AuditPhase::Inactive;
+            return;
+        }
+    };
+
+    let runtime = handoff.runtime.clone();
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+    app.active_tab_mut().exit_rx = Some(exit_rx);
+    let tx = app.active_tab().output_tx.clone();
+
+    app.active_tab_mut()
+        .continue_command("init [post-audit]".into());
+    app.active_tab_mut().audit_phase = AuditPhase::InitPostAudit;
+
+    spawn_text_command(tx, exit_tx, move |sink| async move {
+        let launcher = TuiContainerLauncher {
+            runtime: runtime.clone(),
+        };
+        init_flow::execute_init_post_audit(&sink, handoff, audit_exit_code, &launcher).await?;
         Ok(())
     });
 }
@@ -3791,6 +4185,36 @@ fn extract_selection_text(tab: &state::TabState) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::ready_flow::ReadyQa;
+
+    // ── Test-only TUI init adapters ───────────────────────────────────────────
+
+    /// Pre-collected answers from TUI modal dialogs, consumed by `TuiInitQa` in tests.
+    struct TuiInitAnswers {
+        replace_aspec: bool,
+        run_audit: bool,
+        work_items: Option<crate::config::WorkItemsConfig>,
+    }
+
+    struct TuiInitQa {
+        answers: TuiInitAnswers,
+    }
+
+    impl init_flow::InitQa for TuiInitQa {
+        fn ask_replace_aspec(&mut self) -> Result<bool> {
+            Ok(self.answers.replace_aspec)
+        }
+
+        fn ask_run_audit(&mut self) -> Result<bool> {
+            Ok(self.answers.run_audit)
+        }
+
+        fn ask_work_items_setup(
+            &mut self,
+        ) -> Result<Option<crate::config::WorkItemsConfig>> {
+            Ok(self.answers.work_items.take())
+        }
+    }
     use crate::cli::Agent;
     use crate::commands::init_flow::InitQa;
     use crate::tui::state::{App, Dialog, ExecutionPhase};
@@ -4700,6 +5124,48 @@ mod tests {
         let _ = qa.ask_run_audit().unwrap();
         let _ = qa.ask_work_items_setup().unwrap();
         // Reaching here proves none of the calls blocked.
+    }
+
+    // ── TuiReadyQa unit tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn tui_ready_qa_ask_run_audit_on_template_returns_preset_true() {
+        let answers = TuiReadyAnswers {
+            migrate_decision: None,
+            template_audit_decision: Some(true),
+        };
+        let mut qa = TuiReadyQa { answers };
+        assert!(
+            qa.ask_run_audit_on_template().unwrap(),
+            "TuiReadyQa must return true when template_audit_decision = Some(true)"
+        );
+    }
+
+    #[test]
+    fn tui_ready_qa_ask_run_audit_on_template_returns_preset_false() {
+        let answers = TuiReadyAnswers {
+            migrate_decision: None,
+            template_audit_decision: Some(false),
+        };
+        let mut qa = TuiReadyQa { answers };
+        assert!(
+            !qa.ask_run_audit_on_template().unwrap(),
+            "TuiReadyQa must return false when template_audit_decision = Some(false)"
+        );
+    }
+
+    #[test]
+    fn tui_ready_qa_ask_run_audit_on_template_defaults_to_false_when_none() {
+        // When the dialog was not shown (None), the default must be false (skip audit).
+        let answers = TuiReadyAnswers {
+            migrate_decision: None,
+            template_audit_decision: None,
+        };
+        let mut qa = TuiReadyQa { answers };
+        assert!(
+            !qa.ask_run_audit_on_template().unwrap(),
+            "TuiReadyQa must default to false when template_audit_decision is None"
+        );
     }
 
     // ── TUI init flow integration ─────────────────────────────────────────────

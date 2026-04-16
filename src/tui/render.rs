@@ -1019,6 +1019,15 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
                 agent_name
             ),
         ),
+        Dialog::ReadyTemplateAuditConfirm => (
+            " Ready — Run Audit? ",
+            "  Dockerfile.dev matches the default project template and has not been customised.\n\
+             \n\
+             The audit agent will scan your project and update Dockerfile.dev to install\n\
+             all tools needed to build, run, and test it.\n\
+             \n\
+             Launch the audit container now? [y=yes / n=skip]  ".to_string(),
+        ),
         Dialog::InitAuditConfirm { .. } => (
             " Init — Agent Audit ",
             "  The agent audit container will scan your project and update Dockerfile.dev\n\

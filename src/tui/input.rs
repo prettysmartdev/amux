@@ -107,6 +107,10 @@ pub enum Action {
     ReadyLegacyMigrate,
     /// Ready: user chose to keep the legacy single-file Dockerfile layout.
     ReadyLegacyKeep,
+    /// Ready: user accepted launching the audit container when Dockerfile.dev matches the template.
+    ReadyTemplateAuditAccept,
+    /// Ready: user declined launching the audit container when Dockerfile.dev matches the template.
+    ReadyTemplateAuditDecline,
     /// Init: user confirmed running the agent audit after init (with agent/aspec/replace_aspec state).
     InitAuditAccepted { agent: crate::cli::Agent, aspec: bool, replace_aspec: bool },
     /// Init: user declined the audit after init.
@@ -220,6 +224,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         Dialog::ReadyLegacyMigration { agent_name } => {
             return handle_ready_legacy_migration(app.active_tab_mut(), key, agent_name)
+        }
+        Dialog::ReadyTemplateAuditConfirm => {
+            return handle_ready_template_audit_confirm(app.active_tab_mut(), key)
         }
         Dialog::InitAuditConfirm { agent, aspec, replace_aspec } => {
             return handle_init_audit_confirm(app.active_tab_mut(), key, agent, aspec, replace_aspec)
@@ -1772,6 +1779,22 @@ fn handle_ready_legacy_migration(tab: &mut TabState, key: KeyEvent, _agent_name:
         KeyCode::Char('n') | KeyCode::Char('2') | KeyCode::Esc => {
             tab.dialog = Dialog::None;
             Action::ReadyLegacyKeep
+        }
+        _ => Action::None,
+    }
+}
+
+// ── Ready template-audit confirm dialog ──────────────────────────────────────
+
+fn handle_ready_template_audit_confirm(tab: &mut TabState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('1') => {
+            tab.dialog = Dialog::None;
+            Action::ReadyTemplateAuditAccept
+        }
+        KeyCode::Char('n') | KeyCode::Char('2') | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::ReadyTemplateAuditDecline
         }
         _ => Action::None,
     }

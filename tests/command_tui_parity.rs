@@ -161,7 +161,7 @@ fn ready_audit_entrypoint_non_interactive_for_each_agent() {
 
     let codex = audit_entrypoint_non_interactive("codex");
     assert_eq!(codex[0], "codex");
-    assert_eq!(codex[1], "--quiet");
+    assert_eq!(codex[1], "exec");
     assert!(codex[2].contains("scan this project"));
 
     let opencode = audit_entrypoint_non_interactive("opencode");
@@ -476,7 +476,7 @@ fn implement_entrypoint_non_interactive_for_each_agent() {
 
     let codex = agent_entrypoint_non_interactive("codex", 2, false);
     assert_eq!(codex[0], "codex");
-    assert_eq!(codex[1], "--quiet");
+    assert_eq!(codex[1], "exec");
     assert!(codex[2].contains("work item 0002"));
 
     let opencode = agent_entrypoint_non_interactive("opencode", 3, false);
@@ -1096,7 +1096,7 @@ fn chat_entrypoint_non_interactive_for_each_agent() {
 
     let codex = chat_entrypoint_non_interactive("codex", false);
     assert_eq!(codex[0], "codex");
-    assert_eq!(codex[1], "--quiet");
+    assert_eq!(codex.len(), 1);
 
     let opencode = chat_entrypoint_non_interactive("opencode", false);
     assert_eq!(opencode.len(), 1);
