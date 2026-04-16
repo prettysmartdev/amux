@@ -1,4 +1,4 @@
-use crate::commands::agent::{append_autonomous_flags, run_agent_with_sink};
+use crate::commands::agent::{append_autonomous_flags, prepare_agent_cli, run_agent_with_sink};
 use crate::commands::auth::resolve_auth;
 use crate::commands::implement::confirm_mount_scope_stdin;
 use crate::commands::init_flow::find_git_root;
@@ -13,11 +13,10 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
     let config = load_repo_config(&git_root)?;
-    let effective_agent = agent_override.as_deref().unwrap_or(
-        config.agent.as_deref().unwrap_or("claude")
-    );
-    let credentials = resolve_auth(&git_root, effective_agent)?;
-    let host_settings = crate::passthrough::passthrough_for_agent(effective_agent).prepare_host_settings();
+    let config_agent = config.agent.as_deref().unwrap_or("claude").to_string();
+    let agent = agent_override.as_deref().unwrap_or(&config_agent).to_string();
+    let credentials = resolve_auth(&git_root, &agent)?;
+    let host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
 
     // Suppress the dangerous-mode permission dialog when running with --yolo.
     if yolo {
@@ -38,18 +37,35 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
         }
     }
 
+    // Ensure the requested agent is available; offer fallback to default if setup is declined.
+    let effective_agent = prepare_agent_cli(&git_root, &agent, &config_agent, &*runtime).await?;
+
+    // Recompute credentials and env_vars if fallback changed the agent.
+    let (final_env_vars, final_host_settings) = if effective_agent != agent {
+        let new_creds = resolve_auth(&git_root, &effective_agent)?;
+        let new_hs = crate::passthrough::passthrough_for_agent(&effective_agent).prepare_host_settings();
+        let mut new_ev = new_creds.env_vars.clone();
+        for name in &passthrough_names {
+            if new_ev.iter().any(|(k, _)| k == name) { continue; }
+            if let Ok(val) = std::env::var(name) { new_ev.push((name.clone(), val)); }
+        }
+        (new_ev, new_hs)
+    } else {
+        (env_vars, host_settings)
+    };
+
     run_with_sink(
         &OutputSink::Stdout,
         Some(mount_path),
-        env_vars,
+        final_env_vars,
         non_interactive,
         plan,
-        host_settings.as_ref(),
+        final_host_settings.as_ref(),
         allow_docker,
         mount_ssh,
         yolo,
         auto,
-        agent_override,
+        Some(effective_agent),
         &*runtime,
     )
     .await

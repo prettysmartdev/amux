@@ -103,6 +103,12 @@ pub enum Action {
     WorktreePreCommitCommit { message: String },
     /// Copy the current terminal text selection to the system clipboard.
     CopyToClipboard,
+    /// Agent setup dialog: user accepted downloading and building the missing agent Dockerfile.
+    AgentSetupAccepted { agent: String },
+    /// Agent setup dialog: user declined setup but accepted falling back to the default agent.
+    AgentSetupFallbackAccepted { declined_agent: String, default_agent: String },
+    /// Agent setup dialog: user declined downloading and building the missing agent Dockerfile.
+    AgentSetupDeclined { agent: String },
     /// Ready: user chose to migrate from legacy single-file to modular Dockerfile layout.
     ReadyLegacyMigrate,
     /// Ready: user chose to keep the legacy single-file Dockerfile layout.
@@ -183,6 +189,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         Dialog::ClawsReadySudoConfirm { password } => {
             return handle_claws_sudo_confirm(app.active_tab_mut(), key, password)
+        }
+        Dialog::AgentSetupConfirm { agent, default_agent } => {
+            return handle_agent_setup_confirm(app.active_tab_mut(), key, agent, default_agent)
         }
         Dialog::WorkflowStepConfirm { completed_step, next_steps } => {
             return handle_workflow_step_confirm(app.active_tab_mut(), key, completed_step, next_steps)
@@ -1020,6 +1029,30 @@ fn handle_claws_sudo_confirm(tab: &mut TabState, key: KeyEvent, mut password: St
     Action::None
 }
 
+// --- Agent setup dialog handler ---
+
+fn handle_agent_setup_confirm(tab: &mut TabState, key: KeyEvent, agent: String, default_agent: String) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            tab.dialog = Dialog::None;
+            Action::AgentSetupAccepted { agent }
+        }
+        KeyCode::Char('f') | KeyCode::Char('F') if agent != default_agent => {
+            // Offer fallback to the default agent without attempting download.
+            tab.dialog = Dialog::None;
+            Action::AgentSetupFallbackAccepted {
+                declined_agent: agent,
+                default_agent,
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::AgentSetupDeclined { agent }
+        }
+        _ => Action::None,
+    }
+}
+
 // --- Workflow dialog handlers ---
 
 fn handle_workflow_step_confirm(
@@ -1064,6 +1097,8 @@ fn handle_workflow_step_error(
 
 fn handle_workflow_control_board(tab: &mut TabState, key: KeyEvent) -> Action {
     let last_step = tab.is_last_workflow_step();
+    // "Continue in same container" is only valid when the next step uses the same agent.
+    let same_container_blocked = !last_step && tab.next_step_different_agent().is_some();
     match key.code {
         KeyCode::Up => {
             tab.dialog = Dialog::None;
@@ -1081,8 +1116,8 @@ fn handle_workflow_control_board(tab: &mut TabState, key: KeyEvent) -> Action {
             Action::WorkflowNextInNewContainer
         }
         KeyCode::Down => {
-            if last_step {
-                return Action::None; // disabled on last step
+            if last_step || same_container_blocked {
+                return Action::None; // disabled on last step or when agents differ
             }
             tab.dialog = Dialog::None;
             Action::WorkflowNextInCurrentContainer
@@ -2323,6 +2358,7 @@ mod tests {
                 name: "step-one".to_string(),
                 depends_on: vec![],
                 prompt_template: "do step one".to_string(),
+                agent: None,
             }],
             "hash".to_string(),
             1,

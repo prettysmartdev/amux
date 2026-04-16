@@ -287,12 +287,52 @@ Verifies your environment is ready for agent sessions.
 | Flag | Description |
 |------|-------------|
 | `--refresh` | Run the Dockerfile agent audit, update `Dockerfile.dev`, and rebuild both images |
-| `--build` | Force-rebuild the project base image and all agent images in `.amux/` |
-| `--no-cache` | Pass `--no-cache` to all `docker build` invocations |
+| `--build` | Rebuild the project base image and agent images in `.amux/`. When multiple agent Dockerfiles exist, amux asks which to build |
+| `--no-cache` | Pass `--no-cache` to every `docker build` invocation, including the project base image and all agent images |
 | `--non-interactive` | Run the audit agent in print mode |
 | `--allow-docker` | Give the audit container access to the host Docker socket |
 
 Use `--refresh` after your project's toolchain changes to update `Dockerfile.dev` (the project base) and rebuild both images. The agent dockerfile is not touched by the audit.
+
+### Rebuilding multiple agent images
+
+If your `.amux/` directory contains Dockerfiles for more than one agent (for example, `.amux/Dockerfile.claude` and `.amux/Dockerfile.codex`), running `amux ready --build` prompts before starting any builds:
+
+```
+Found 2 agent Dockerfiles:
+  claude  (default)
+  codex   (extra)
+
+Build all agent images, or only the default (claude)? [all/default]:
+```
+
+- **all** — builds the project base image, then all agent images in `.amux/`, in sequence.
+- **default** — builds the project base image and only the default agent image from config.
+
+The `--no-cache` flag applies to every image built in this sequence.
+
+### Build output
+
+Each image build — project base or agent — is framed with prominent start and end markers so you can track progress across a multi-image sequence:
+
+```
+══════════════════════════════════════════════════
+  Building project base image: amux-myproject:latest
+══════════════════════════════════════════════════
+[build output...]
+
+══════════════════════════════════════════════════
+  ✓ Built amux-myproject:latest
+══════════════════════════════════════════════════
+
+
+══════════════════════════════════════════════════
+  Building agent image: amux-myproject-codex:latest
+══════════════════════════════════════════════════
+[build output...]
+```
+
+This applies whenever `ready` starts a build — `--build`, `--refresh`, or the initial `amux init` sequence.
 
 ### Migration from single-file layout
 

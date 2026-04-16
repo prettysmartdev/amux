@@ -632,6 +632,24 @@ async fn handle_action(app: &mut App, action: Action) {
         Action::InitWorkItemsDone { agent, aspec, replace_aspec, run_audit, work_items } => {
             launch_init(app, agent, aspec, replace_aspec, run_audit, work_items).await;
         }
+
+        Action::AgentSetupAccepted { agent } => {
+            handle_agent_setup_accepted(app, agent).await;
+        }
+
+        Action::AgentSetupFallbackAccepted { declined_agent, default_agent } => {
+            // User declined setting up `declined_agent` but accepted falling back to `default_agent`.
+            // Record the fallback decision so the next pre-flight pass substitutes the default.
+            app.active_tab_mut().workflow_agent_fallbacks.insert(declined_agent, default_agent);
+            launch_pending_command(app).await;
+        }
+
+        Action::AgentSetupDeclined { agent: _ } => {
+            app.active_tab_mut().push_output(
+                "Agent setup declined. Workflow cannot continue without the required agent.".to_string(),
+            );
+            app.active_tab_mut().pending_command = PendingCommand::None;
+        }
     }
 }
 
@@ -729,6 +747,47 @@ fn run_git_interactive(app: &mut App, cwd: &std::path::Path, args: &[&str]) -> b
             false
         }
     }
+}
+
+/// Download and build the Dockerfile for a missing agent, then re-trigger the pending command.
+///
+/// Called when the user accepts the `AgentSetupConfirm` dialog.  The agent Dockerfile is
+/// fetched from GitHub and the agent image is built as a foreground text task; when that
+/// task completes `check_audit_continuation` detects `AuditPhase::AgentSetupBuild` and
+/// re-calls `launch_pending_command`, which re-enters `launch_implement` and finds the
+/// Dockerfile now present.
+async fn handle_agent_setup_accepted(app: &mut App, agent: String) {
+    let tab_cwd = app.active_tab().cwd.clone();
+    let git_root = match find_git_root_from(&tab_cwd) {
+        Some(r) => r,
+        None => {
+            app.active_tab_mut().push_output("Not inside a Git repository.".to_string());
+            app.active_tab_mut().pending_command = PendingCommand::None;
+            return;
+        }
+    };
+
+    app.active_tab_mut().audit_phase = AuditPhase::AgentSetupBuild;
+    app.active_tab_mut().start_command(format!("Building agent '{}'", agent));
+    let runtime = app.runtime.clone();
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+    app.active_tab_mut().exit_rx = Some(exit_rx);
+    let tx = app.active_tab().output_tx.clone();
+
+    spawn_text_command(tx, exit_tx, move |sink| async move {
+        let available = crate::commands::agent::ensure_agent_available(
+            &git_root,
+            &agent,
+            &sink,
+            runtime.as_ref(),
+            |_| Ok(true), // user already confirmed via dialog
+        )
+        .await?;
+        if !available {
+            anyhow::bail!("Agent '{}' setup failed.", agent);
+        }
+        Ok(())
+    });
 }
 
 /// Check for uncommitted files in the worktree and either show the commit-prompt dialog
@@ -1660,21 +1719,39 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         }
     }
 
-    // Resolve which image and dockerfile to use (new modular layout vs legacy).
-    let (image_tag, agent_dockerfile_path, is_legacy_layout) =
+    // Resolve which image and dockerfile to use.
+    // For workflow runs these are re-resolved per-step if the step uses a different agent.
+    let (mut image_tag, mut agent_dockerfile_path) =
         crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
-    if is_legacy_layout {
-        app.active_tab_mut().push_output(format!(
-            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
-             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
-            agent_name
-        ));
-    } else if !app.runtime.image_exists(&image_tag) {
-        app.active_tab_mut().push_output(format!(
-            "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
-        ));
-        app.active_tab_mut().finish_command(1);
-        return;
+    // For non-workflow runs, validate the default agent image now.
+    // For workflow runs, image validation is done per-step inside the workflow block below.
+    if workflow_path.is_none() {
+        if !agent_dockerfile_path.exists() {
+            // Dockerfile missing — prompt to download and build, then re-launch.
+            let config_default = agent_name.clone();
+            app.active_tab_mut().pending_command = PendingCommand::Implement {
+                work_item,
+                non_interactive,
+                plan,
+                allow_docker,
+                workflow: workflow_path.clone(),
+                worktree,
+                mount_ssh,
+                yolo,
+                auto,
+            };
+            app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
+                agent: agent_name.clone(),
+                default_agent: config_default,
+            };
+            return;
+        } else if !app.runtime.image_exists(&image_tag) {
+            app.active_tab_mut().push_output(format!(
+                "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
+            ));
+            app.active_tab_mut().finish_command(1);
+            return;
+        }
     }
 
     // Prepare host settings (sanitized config files in a temp dir).
@@ -1709,6 +1786,9 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
     app.active_tab_mut().auto_mode = auto;
     app.active_tab_mut().yolo_disallowed_tools = disallowed_tools.clone();
 
+    // Track the effective agent for the current step (may differ from default for workflow steps).
+    let mut effective_agent = agent_name.clone();
+
     // If a workflow is specified, initialise/load its state and derive the step prompt.
     let mut effective_entrypoint: Vec<String>;
     let command_display: String;
@@ -1725,6 +1805,53 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
             Some(s) => s,
             None => return, // Error already pushed to output.
         };
+
+        // Build per-step agent map and pre-flight check all required agent Dockerfiles.
+        // Steps without an explicit `Agent:` field fall back to the config default.
+        // Previously accepted fallbacks (from AgentSetupFallbackAccepted) are applied here.
+        let step_agent_map: std::collections::HashMap<String, String> = {
+            let agent_fallbacks = app.active_tab().workflow_agent_fallbacks.clone();
+            let mut map = std::collections::HashMap::new();
+            let mut seen = std::collections::HashSet::new();
+            let mut first_missing: Option<String> = None;
+            for s in &wf_state.steps {
+                // Apply any accepted fallback: if this step's desired agent was declined,
+                // substitute the default agent instead.
+                let desired = s.agent.as_deref().unwrap_or(&agent_name).to_string();
+                let step_ag = agent_fallbacks.get(&desired).cloned().unwrap_or(desired);
+                map.insert(s.name.clone(), step_ag.clone());
+                if seen.insert(step_ag.clone()) {
+                    let df = git_root.join(".amux").join(format!("Dockerfile.{}", &step_ag));
+                    if !df.exists() && first_missing.is_none() {
+                        first_missing = Some(step_ag);
+                    }
+                }
+            }
+            if let Some(missing) = first_missing {
+                // Save pending command so we can resume after the agent Dockerfile is built
+                // (or after the user accepts a fallback via AgentSetupFallbackAccepted).
+                app.active_tab_mut().pending_command = PendingCommand::Implement {
+                    work_item,
+                    non_interactive,
+                    plan,
+                    allow_docker,
+                    workflow: workflow_path.clone(),
+                    worktree,
+                    mount_ssh,
+                    yolo,
+                    auto,
+                };
+                app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
+                    agent: missing,
+                    default_agent: agent_name.clone(),
+                };
+                return;
+            }
+            map
+        };
+        // Record the per-step agent map for "same container" eligibility checks in the TUI.
+        app.active_tab_mut().workflow_step_agents = step_agent_map.clone();
+
         // Get the first ready step.
         let ready = wf_state.next_ready();
         if ready.is_empty() {
@@ -1739,6 +1866,48 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         let step_name = ready[0].clone();
         let step_state = wf_state.get_step(&step_name).unwrap().clone();
 
+        // Determine the current step's agent (may differ from the config default).
+        let step_agent = step_agent_map
+            .get(&step_name)
+            .cloned()
+            .unwrap_or_else(|| agent_name.clone());
+
+        // Re-resolve image/dockerfile if the step uses a different agent.
+        if step_agent != agent_name {
+            let r = crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &step_agent);
+            image_tag = r.0;
+            agent_dockerfile_path = r.1;
+            // Refresh host settings for the step's agent.
+            app.active_tab_mut().host_settings =
+                crate::passthrough::passthrough_for_agent(&step_agent).prepare_host_settings();
+            let msg = app.active_tab_mut().host_settings.as_mut()
+                .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
+            if let Some(msg) = msg {
+                app.active_tab_mut().push_output(msg);
+            }
+            if yolo {
+                if let Some(ref s) = app.active_tab().host_settings {
+                    let _ = s.apply_yolo_settings();
+                }
+            }
+        }
+        // Validate the step's agent Dockerfile and image.
+        if !agent_dockerfile_path.exists() {
+            app.active_tab_mut().push_output(format!(
+                "Error: agent '{}' Dockerfile not found. Run `amux ready` to build it.",
+                step_agent
+            ));
+            app.active_tab_mut().finish_command(1);
+            return;
+        } else if !app.runtime.image_exists(&image_tag) {
+            app.active_tab_mut().push_output(format!(
+                "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
+            ));
+            app.active_tab_mut().finish_command(1);
+            return;
+        }
+        effective_agent = step_agent.clone();
+
         // Load work item content for prompt substitution.
         let work_item_content = match find_work_item(&git_root, work_item).and_then(|p| {
             std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("{}", e))
@@ -1752,7 +1921,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         };
 
         let prompt = workflow::substitute_prompt(&step_state.prompt_template, work_item, &work_item_content);
-        effective_entrypoint = workflow_step_entrypoint(&agent_name, &prompt, non_interactive, plan);
+        effective_entrypoint = workflow_step_entrypoint(&step_agent, &prompt, non_interactive, plan);
         command_display = format!("implement {:04} [step: {}]", work_item, step_name);
 
         // Update state: mark step as Running, persist, store in tab.
@@ -1776,7 +1945,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
 
     // Apply autonomous-mode flags to the entrypoint.
     use crate::commands::agent::append_autonomous_flags;
-    append_autonomous_flags(&mut effective_entrypoint, &agent_name, yolo, auto, &disallowed_tools);
+    append_autonomous_flags(&mut effective_entrypoint, &effective_agent, yolo, auto, &disallowed_tools);
 
     let entrypoint = effective_entrypoint;
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
@@ -1851,7 +2020,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
     } else {
         // Print interactive notice to the outer window.
         let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
-        print_interactive_notice(&sink, &agent_name);
+        print_interactive_notice(&sink, &effective_agent);
 
         let pty_args = app.runtime.build_run_args_pty(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, Some(&container_name), ssh_dir.as_deref());
         let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
@@ -1868,7 +2037,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         };
 
         // Activate the container window.
-        let display_name = state::agent_display_name(&agent_name).to_string();
+        let display_name = state::agent_display_name(&effective_agent).to_string();
         app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(&git_root);
         app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
 
@@ -1942,15 +2111,24 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
         }
     }
 
-    // Resolve which image and dockerfile to use (new modular layout vs legacy).
-    let (image_tag, agent_dockerfile_path, is_legacy_layout) =
+    // Resolve which image and dockerfile to use.
+    let (image_tag, agent_dockerfile_path) =
         crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
-    if is_legacy_layout {
-        app.active_tab_mut().push_output(format!(
-            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
-             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
-            agent_name
-        ));
+    if !agent_dockerfile_path.exists() {
+        // Dockerfile missing — prompt to download and build, then re-launch.
+        app.active_tab_mut().pending_command = PendingCommand::Chat {
+            non_interactive,
+            plan,
+            allow_docker,
+            mount_ssh,
+            yolo,
+            auto,
+        };
+        app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
+            agent: agent_name.clone(),
+            default_agent: agent_name.clone(),
+        };
+        return;
     } else if !app.runtime.image_exists(&image_tag) {
         app.active_tab_mut().push_output(format!(
             "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
@@ -1962,7 +2140,6 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
     // Prepare host settings (sanitized config files in a temp dir).
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
     {
-        // Use the agent dockerfile for USER detection in the new layout, Dockerfile.dev for legacy.
         let msg = app.active_tab_mut().host_settings.as_mut()
             .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
         if let Some(msg) = msg {
@@ -2715,6 +2892,21 @@ async fn check_audit_continuation(app: &mut App) {
         AuditPhase::InitPostAudit => {
             app.active_tab_mut().audit_phase = AuditPhase::Inactive;
         }
+
+        AuditPhase::AgentSetupBuild => {
+            app.active_tab_mut().audit_phase = AuditPhase::Inactive;
+            if matches!(app.active_tab().phase, state::ExecutionPhase::Done { .. }) {
+                // Build succeeded — re-trigger the pending command.
+                // launch_implement will re-check for any remaining missing agents.
+                launch_pending_command(app).await;
+            } else {
+                // Build failed; the error was already printed to the output window.
+                app.active_tab_mut().push_output(
+                    "Agent setup failed. Workflow cannot continue.".to_string(),
+                );
+                app.active_tab_mut().pending_command = PendingCommand::None;
+            }
+        }
     }
 }
 
@@ -3245,15 +3437,16 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
     let credentials = agent_keychain_credentials(&agent_name);
     let env_vars = credentials.env_vars;
 
-    // Resolve which image and dockerfile to use (new modular layout vs legacy).
-    let (image_tag, agent_dockerfile_path, is_legacy_layout) =
+    // Resolve which image and dockerfile to use.
+    let (image_tag, agent_dockerfile_path) =
         crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
-    if is_legacy_layout {
+    if !agent_dockerfile_path.exists() {
         app.active_tab_mut().push_output(format!(
-            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
-             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
+            "Error: agent '{}' Dockerfile not found. Run `amux ready` to build agent images.",
             agent_name
         ));
+        app.active_tab_mut().finish_command(1);
+        return;
     } else if !app.runtime.image_exists(&image_tag) {
         app.active_tab_mut().push_output(format!(
             "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
@@ -3377,15 +3570,16 @@ async fn launch_specs_interview_agent(
     let credentials = agent_keychain_credentials(&agent_name);
     let env_vars = credentials.env_vars;
 
-    // Resolve which image and dockerfile to use (new modular layout vs legacy).
-    let (image_tag, agent_dockerfile_path, is_legacy_layout) =
+    // Resolve which image and dockerfile to use.
+    let (image_tag, agent_dockerfile_path) =
         crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
-    if is_legacy_layout {
+    if !agent_dockerfile_path.exists() {
         app.active_tab_mut().push_output(format!(
-            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
-             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
+            "Error: agent '{}' Dockerfile not found. Run `amux ready` to build agent images.",
             agent_name
         ));
+        app.active_tab_mut().finish_command(1);
+        return;
     } else if !app.runtime.image_exists(&image_tag) {
         app.active_tab_mut().push_output(format!(
             "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
@@ -3746,6 +3940,12 @@ async fn launch_next_workflow_step(app: &mut App) {
     let step_name = ready[0].clone();
     let step_state = wf_state.get_step(&step_name).unwrap().clone();
 
+    // Resolve the per-step agent: prefer the map built at workflow launch, fall back to
+    // the step's own field, and ultimately to the config default.
+    let step_agent = app.active_tab().workflow_step_agents.get(&step_name).cloned()
+        .or_else(|| step_state.agent.clone())
+        .unwrap_or_else(|| agent_name.clone());
+
     // Load work item content.
     let work_item_content = match find_work_item(&git_root, work_item).and_then(|p| {
         std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("{}", e))
@@ -3757,9 +3957,7 @@ async fn launch_next_workflow_step(app: &mut App) {
         }
     };
 
-    let config = load_repo_config(&git_root).unwrap_or_default();
-    let agent = config.agent.as_deref().unwrap_or("claude").to_string();
-    let credentials = agent_keychain_credentials(&agent);
+    let credentials = agent_keychain_credentials(&step_agent);
     let env_vars = credentials.env_vars;
 
     let prompt = workflow::substitute_prompt(&step_state.prompt_template, work_item, &work_item_content);
@@ -3767,22 +3965,23 @@ async fn launch_next_workflow_step(app: &mut App) {
         let tab = app.active_tab();
         (tab.yolo_mode, tab.auto_mode, tab.yolo_disallowed_tools.clone())
     };
-    let mut entrypoint = workflow_step_entrypoint(&agent_name, &prompt, false, false);
+    let mut entrypoint = workflow_step_entrypoint(&step_agent, &prompt, false, false);
     {
         use crate::commands::agent::append_autonomous_flags;
-        append_autonomous_flags(&mut entrypoint, &agent_name, yolo_mode, auto_mode, &yolo_disallowed_tools);
+        append_autonomous_flags(&mut entrypoint, &step_agent, yolo_mode, auto_mode, &yolo_disallowed_tools);
     }
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    // Resolve which image and dockerfile to use (new modular layout vs legacy).
-    let (image_tag, agent_dockerfile_path, is_legacy_layout) =
-        crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
-    if is_legacy_layout {
+    // Resolve which image and dockerfile to use.
+    let (image_tag, agent_dockerfile_path) =
+        crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &step_agent);
+    if !agent_dockerfile_path.exists() {
         app.active_tab_mut().push_output(format!(
-            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
-             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
-            agent_name
+            "Error: agent '{}' Dockerfile not found. Run `amux ready` to build agent images.",
+            step_agent
         ));
+        app.active_tab_mut().finish_command(1);
+        return;
     } else if !app.runtime.image_exists(&image_tag) {
         app.active_tab_mut().push_output(format!(
             "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
@@ -3793,8 +3992,13 @@ async fn launch_next_workflow_step(app: &mut App) {
 
     let container_name = generate_container_name();
 
-    if app.active_tab().host_settings.is_none() {
-        app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
+    // Reset host settings when the step's agent differs from the previously running step.
+    let prev_step_agent = app.active_tab().workflow_current_step.as_ref()
+        .and_then(|s| app.active_tab().workflow_step_agents.get(s).cloned())
+        .unwrap_or_else(|| agent_name.clone());
+    if step_agent != prev_step_agent || app.active_tab().host_settings.is_none() {
+        app.active_tab_mut().host_settings =
+            crate::passthrough::passthrough_for_agent(&step_agent).prepare_host_settings();
         if yolo_mode {
             if let Some(ref s) = app.active_tab().host_settings {
                 let _ = s.apply_yolo_settings();
@@ -3836,7 +4040,7 @@ async fn launch_next_workflow_step(app: &mut App) {
         pixel_height: 0,
     };
 
-    let display_name = state::agent_display_name(&agent).to_string();
+    let display_name = state::agent_display_name(&step_agent).to_string();
     app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(&git_root);
     app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
 
@@ -4260,6 +4464,7 @@ mod tests {
             prompt_template: format!("do {}", name),
             status,
             container_id: None,
+            agent: None,
         }
     }
 
