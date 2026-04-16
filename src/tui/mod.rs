@@ -1735,6 +1735,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
             app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
                 agent: agent_name.clone(),
                 default_agent: config_default,
+                from_workflow: false,
             };
             return;
         } else if !app.runtime.image_exists(&image_tag) {
@@ -1837,6 +1838,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
                 app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
                     agent: missing,
                     default_agent: agent_name.clone(),
+                    from_workflow: true,
                 };
                 return;
             }
@@ -2124,6 +2126,7 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
         app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
             agent: agent_name.clone(),
             default_agent: agent_name.clone(),
+            from_workflow: false,
         };
         return;
     } else if !app.runtime.image_exists(&image_tag) {

@@ -559,7 +559,7 @@ async fn run_workflow(
             |name| {
                 use std::io::{BufRead, Write};
                 print!(
-                    "Agent '{}' has no Dockerfile. Download and build it? [y/N]: ",
+                    "Workflow step requires agent '{}', but its Dockerfile is missing. Download and build the agent image? [y/N]: ",
                     name
                 );
                 std::io::stdout().flush()?;
