@@ -1449,7 +1449,7 @@ pub fn autocomplete_suggestions(input: &str) -> Vec<String> {
     // If there is content after the first space (even empty), the user has
     // committed to a subcommand — show its flag suggestions.
     if tokens.len() == 2 {
-        return flag_suggestions_for(cmd, tokens[1]);
+        return flag_suggestions_for(cmd);
     }
 
     // Otherwise, suggest subcommands that start with the typed prefix.
@@ -1460,33 +1460,11 @@ pub fn autocomplete_suggestions(input: &str) -> Vec<String> {
         .collect()
 }
 
-fn flag_suggestions_for(cmd: &str, _typed: &str) -> Vec<String> {
-    match cmd {
-        "init" => {
-            use crate::cli::Agent;
-            Agent::all().iter().map(|a| format!("init --agent={}", a.as_str())).collect()
-        }
-        "ready" => vec![
-            "ready --refresh".into(),
-            "ready --build".into(),
-            "ready --no-cache".into(),
-            "ready --build --no-cache".into(),
-            "ready --non-interactive".into(),
-            "ready --refresh --non-interactive".into(),
-            "ready --refresh --allow-docker".into(),
-        ],
+fn flag_suggestions_for(cmd: &str) -> Vec<String> {
+    // Positional argument and subcommand hints are handwritten per command.
+    let mut suggestions: Vec<String> = match cmd {
         "implement" => vec![
             "implement <NNNN>  e.g. implement 0001".into(),
-            "implement <NNNN> --non-interactive".into(),
-            "implement <NNNN> --plan".into(),
-            "implement <NNNN> --allow-docker".into(),
-            "implement <NNNN> --workflow aspec/workflows/implement-feature.md".into(),
-        ],
-        "chat" => vec![
-            "chat  (start a freeform agent session)".into(),
-            "chat --non-interactive".into(),
-            "chat --plan".into(),
-            "chat --allow-docker".into(),
         ],
         "specs" => vec![
             "specs new".into(),
@@ -1498,15 +1476,25 @@ fn flag_suggestions_for(cmd: &str, _typed: &str) -> Vec<String> {
             "claws ready  (check status; start container if stopped)".into(),
             "claws chat   (attach to running nanoclaw container)".into(),
         ],
-        "status" => vec![
-            "status         (show all running agents and nanoclaw containers)".into(),
-            "status --watch (refresh every 3 seconds)".into(),
-        ],
         "config" => vec![
             "config show    (view all config fields in a table dialog)".into(),
         ],
         _ => vec![],
+    };
+
+    // Flag hints are generated from the canonical CommandSpec registry.
+    use crate::commands::spec::ALL_COMMANDS;
+    if let Some(spec) = ALL_COMMANDS.iter().find(|c| c.name == cmd) {
+        for f in spec.flags {
+            if f.takes_value {
+                suggestions.push(format!("--{} <{}>  \u{2014} {}", f.name, f.value_name, f.hint));
+            } else {
+                suggestions.push(format!("--{}  \u{2014} {}", f.name, f.hint));
+            }
+        }
     }
+
+    suggestions
 }
 
 /// Return the subcommand name most similar to `input` (for typo correction).
@@ -2063,6 +2051,33 @@ mod tests {
     fn suggestions_full_command_with_space_shows_flags() {
         let suggestions = autocomplete_suggestions("init ");
         assert!(suggestions.iter().any(|s| s.contains("--agent")));
+    }
+
+    // ── flag_suggestions_for ──────────────────────────────────────────────────
+
+    #[test]
+    fn flag_suggestions_for_chat_contains_agent() {
+        let suggestions = flag_suggestions_for("chat");
+        assert!(
+            suggestions.iter().any(|s| s.contains("--agent")),
+            "flag_suggestions_for(\"chat\") must contain an --agent entry; got: {:?}",
+            suggestions,
+        );
+    }
+
+    #[test]
+    fn flag_suggestions_for_implement_contains_agent_and_workflow() {
+        let suggestions = flag_suggestions_for("implement");
+        assert!(
+            suggestions.iter().any(|s| s.contains("--agent")),
+            "flag_suggestions_for(\"implement\") must contain --agent; got: {:?}",
+            suggestions,
+        );
+        assert!(
+            suggestions.iter().any(|s| s.contains("--workflow")),
+            "flag_suggestions_for(\"implement\") must contain --workflow; got: {:?}",
+            suggestions,
+        );
     }
 
     #[test]

@@ -1080,6 +1080,143 @@ mod tests {
         assert!(cli.command.is_none()); // no subcommand given
     }
 
+    // ─── CLI/spec parity (work item 0053 Test A) ─────────────────────────────
+    //
+    // Each test enumerates the long-flag names that clap exposes for a
+    // subcommand and compares them against the corresponding `*_FLAGS`
+    // constant in `spec.rs`.  A failure means someone added a flag to one
+    // place but not the other.
+
+    fn cli_long_flags_for(subcommand: &str) -> Vec<String> {
+        use clap::CommandFactory;
+        Cli::command()
+            .find_subcommand(subcommand)
+            .unwrap_or_else(|| panic!("subcommand '{}' not found in CLI", subcommand))
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .filter(|&name| name != "help")
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn cli_spec_parity_chat() {
+        use crate::commands::spec;
+        let cli_flags = cli_long_flags_for("chat");
+        let spec_flags: Vec<&str> = spec::CHAT_FLAGS.iter().map(|f| f.name).collect();
+        for flag in &cli_flags {
+            assert!(
+                spec_flags.contains(&flag.as_str()),
+                "CLI flag --{flag} missing from CHAT_FLAGS in spec.rs",
+            );
+        }
+        for flag in &spec_flags {
+            assert!(
+                cli_flags.contains(&flag.to_string()),
+                "Spec flag --{flag} missing from CLI `chat` subcommand in cli.rs",
+            );
+        }
+    }
+
+    #[test]
+    fn cli_spec_parity_implement() {
+        use crate::commands::spec;
+        let cli_flags = cli_long_flags_for("implement");
+        let spec_flags: Vec<&str> = spec::IMPLEMENT_FLAGS.iter().map(|f| f.name).collect();
+        for flag in &cli_flags {
+            assert!(
+                spec_flags.contains(&flag.as_str()),
+                "CLI flag --{flag} missing from IMPLEMENT_FLAGS in spec.rs",
+            );
+        }
+        for flag in &spec_flags {
+            assert!(
+                cli_flags.contains(&flag.to_string()),
+                "Spec flag --{flag} missing from CLI `implement` subcommand in cli.rs",
+            );
+        }
+    }
+
+    #[test]
+    fn cli_spec_parity_init() {
+        use crate::commands::spec;
+        let cli_flags = cli_long_flags_for("init");
+        let spec_flags: Vec<&str> = spec::INIT_FLAGS.iter().map(|f| f.name).collect();
+        for flag in &cli_flags {
+            assert!(
+                spec_flags.contains(&flag.as_str()),
+                "CLI flag --{flag} missing from INIT_FLAGS in spec.rs",
+            );
+        }
+        for flag in &spec_flags {
+            assert!(
+                cli_flags.contains(&flag.to_string()),
+                "Spec flag --{flag} missing from CLI `init` subcommand in cli.rs",
+            );
+        }
+    }
+
+    #[test]
+    fn cli_spec_parity_ready() {
+        use crate::commands::spec;
+        let cli_flags = cli_long_flags_for("ready");
+        let spec_flags: Vec<&str> = spec::READY_FLAGS.iter().map(|f| f.name).collect();
+        for flag in &cli_flags {
+            assert!(
+                spec_flags.contains(&flag.as_str()),
+                "CLI flag --{flag} missing from READY_FLAGS in spec.rs",
+            );
+        }
+        for flag in &spec_flags {
+            assert!(
+                cli_flags.contains(&flag.to_string()),
+                "Spec flag --{flag} missing from CLI `ready` subcommand in cli.rs",
+            );
+        }
+    }
+
+    #[test]
+    fn cli_spec_parity_status() {
+        use crate::commands::spec;
+        let cli_flags = cli_long_flags_for("status");
+        let spec_flags: Vec<&str> = spec::STATUS_FLAGS.iter().map(|f| f.name).collect();
+        for flag in &cli_flags {
+            assert!(
+                spec_flags.contains(&flag.as_str()),
+                "CLI flag --{flag} missing from STATUS_FLAGS in spec.rs",
+            );
+        }
+        for flag in &spec_flags {
+            assert!(
+                cli_flags.contains(&flag.to_string()),
+                "Spec flag --{flag} missing from CLI `status` subcommand in cli.rs",
+            );
+        }
+    }
+
+    // ─── CLI --flag=value regression (work item 0053 step 6) ─────────────────
+    //
+    // Clap handles the `=`-separated form natively.  These tests act as a
+    // regression guard to ensure both forms always produce identical results.
+
+    #[test]
+    fn chat_agent_both_forms_produce_identical_result() {
+        let space_form = parse(&["amux", "chat", "--agent", "codex"]);
+        let eq_form    = parse(&["amux", "chat", "--agent=codex"]);
+        let agent_space = match space_form.command.unwrap() { Command::Chat { agent, .. } => agent, _ => panic!() };
+        let agent_eq    = match eq_form.command.unwrap()    { Command::Chat { agent, .. } => agent, _ => panic!() };
+        assert_eq!(agent_space, agent_eq, "--agent codex and --agent=codex must parse identically");
+    }
+
+    #[test]
+    fn implement_agent_both_forms_produce_identical_result() {
+        let space_form = parse(&["amux", "implement", "0042", "--agent", "opencode"]);
+        let eq_form    = parse(&["amux", "implement", "0042", "--agent=opencode"]);
+        let agent_space = match space_form.command.unwrap() { Command::Implement { agent, .. } => agent, _ => panic!() };
+        let agent_eq    = match eq_form.command.unwrap()    { Command::Implement { agent, .. } => agent, _ => panic!() };
+        assert_eq!(agent_space, agent_eq, "--agent opencode and --agent=opencode must parse identically");
+    }
+
     // ─── --agent flag on chat / validate_agent_name (work item 0049) ─────────
 
     #[test]

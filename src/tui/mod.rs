@@ -1,4 +1,5 @@
 pub mod input;
+mod flag_parser;
 mod pty;
 pub mod render;
 pub mod state;
@@ -961,54 +962,6 @@ fn ready_needs_template_audit_confirm(git_root: &std::path::Path) -> bool {
     dockerfile_matches_template(&content)
 }
 
-fn parse_ready_flags(parts: &[&str]) -> (bool, bool, bool, bool, bool) {
-    let refresh = parts.iter().any(|p| *p == "--refresh");
-    let build = parts.iter().any(|p| *p == "--build");
-    let no_cache = parts.iter().any(|p| *p == "--no-cache");
-    let non_interactive = parts.iter().any(|p| *p == "--non-interactive");
-    let allow_docker = parts.iter().any(|p| *p == "--allow-docker");
-    (refresh, build, no_cache, non_interactive, allow_docker)
-}
-
-/// Parse flags from implement command parts, returning (non_interactive, plan, allow_docker, workflow_path, worktree, mount_ssh, yolo, auto).
-fn parse_implement_flags(parts: &[&str]) -> (bool, bool, bool, Option<std::path::PathBuf>, bool, bool, bool, bool) {
-    let non_interactive = parts.iter().any(|p| *p == "--non-interactive");
-    let plan = parts.iter().any(|p| *p == "--plan");
-    let allow_docker = parts.iter().any(|p| *p == "--allow-docker");
-    let worktree = parts.iter().any(|p| *p == "--worktree");
-    let mount_ssh = parts.iter().any(|p| *p == "--mount-ssh");
-    let yolo = parts.iter().any(|p| *p == "--yolo");
-    let auto = parts.iter().any(|p| *p == "--auto");
-    // Accept --workflow=<path> or --workflow <path>
-    let workflow = parts
-        .iter()
-        .find_map(|p| {
-            if let Some(val) = p.strip_prefix("--workflow=") {
-                Some(std::path::PathBuf::from(val))
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            // --workflow <path> (separate token)
-            parts
-                .windows(2)
-                .find(|w| w[0] == "--workflow")
-                .map(|w| std::path::PathBuf::from(w[1]))
-        });
-    (non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto)
-}
-
-/// Parse flags from chat command parts, returning (non_interactive, plan, allow_docker, mount_ssh, yolo, auto).
-fn parse_chat_flags(parts: &[&str]) -> (bool, bool, bool, bool, bool, bool) {
-    let non_interactive = parts.iter().any(|p| *p == "--non-interactive");
-    let plan = parts.iter().any(|p| *p == "--plan");
-    let allow_docker = parts.iter().any(|p| *p == "--allow-docker");
-    let mount_ssh = parts.iter().any(|p| *p == "--mount-ssh");
-    let yolo = parts.iter().any(|p| *p == "--yolo");
-    let auto = parts.iter().any(|p| *p == "--auto");
-    (non_interactive, plan, allow_docker, mount_ssh, yolo, auto)
-}
 
 /// Parse and dispatch a command string entered by the user.
 async fn execute_command(app: &mut App, cmd: &str) {
@@ -1019,8 +972,12 @@ async fn execute_command(app: &mut App, cmd: &str) {
 
     match parts[0] {
         "init" => {
-            let agent = parse_agent_flag(&parts).unwrap_or(Agent::Claude);
-            let aspec = parts.iter().any(|p| *p == "--aspec");
+            let init_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "init").unwrap();
+            let flags = flag_parser::parse_flags(&parts, init_spec);
+            let agent = flag_parser::flag_string(&flags, "agent")
+                .and_then(|v| Agent::all().iter().find(|a| a.as_str() == v).cloned())
+                .unwrap_or(Agent::Claude);
+            let aspec = flag_parser::flag_bool(&flags, "aspec");
 
             // Validate git root before any Q&A begins (spec requirement).
             let tab_cwd = app.active_tab().cwd.clone();
@@ -1043,7 +1000,13 @@ async fn execute_command(app: &mut App, cmd: &str) {
         }
 
         "ready" => {
-            let (refresh, build, no_cache, non_interactive, allow_docker) = parse_ready_flags(&parts);
+            let ready_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "ready").unwrap();
+            let flags = flag_parser::parse_flags(&parts, ready_spec);
+            let refresh = flag_parser::flag_bool(&flags, "refresh");
+            let build = flag_parser::flag_bool(&flags, "build");
+            let no_cache = flag_parser::flag_bool(&flags, "no-cache");
+            let non_interactive = flag_parser::flag_bool(&flags, "non-interactive");
+            let allow_docker = flag_parser::flag_bool(&flags, "allow-docker");
             let effective_build = compute_ready_build_flag(refresh, build);
             app.active_tab_mut().pending_command = PendingCommand::Ready {
                 refresh,
@@ -1079,7 +1042,17 @@ async fn execute_command(app: &mut App, cmd: &str) {
         }
 
         "implement" => {
-            let (non_interactive, plan, allow_docker, workflow, mut worktree, mount_ssh, yolo, auto) = parse_implement_flags(&parts);
+            let impl_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "implement").unwrap();
+            let flags = flag_parser::parse_flags(&parts, impl_spec);
+            let non_interactive = flag_parser::flag_bool(&flags, "non-interactive");
+            let plan = flag_parser::flag_bool(&flags, "plan");
+            let allow_docker = flag_parser::flag_bool(&flags, "allow-docker");
+            let mut worktree = flag_parser::flag_bool(&flags, "worktree");
+            let mount_ssh = flag_parser::flag_bool(&flags, "mount-ssh");
+            let yolo = flag_parser::flag_bool(&flags, "yolo");
+            let auto = flag_parser::flag_bool(&flags, "auto");
+            let agent = flag_parser::flag_string(&flags, "agent").map(str::to_string);
+            let workflow = flag_parser::flag_string(&flags, "workflow").map(std::path::PathBuf::from);
             // --yolo/--auto + --workflow implies --worktree.
             if yolo && workflow.is_some() && !worktree {
                 app.active_tab_mut().push_output(
@@ -1103,17 +1076,25 @@ async fn execute_command(app: &mut App, cmd: &str) {
                 Some(n) => n,
                 None => {
                     app.active_tab_mut().input_error =
-                        Some("Usage: implement <work-item-number> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>] [--worktree] [--mount-ssh] [--yolo] [--auto]".into());
+                        Some("Usage: implement <work-item-number> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>] [--worktree] [--mount-ssh] [--yolo] [--auto] [--agent=<NAME>]".into());
                     return;
                 }
             };
-            app.active_tab_mut().pending_command = PendingCommand::Implement { work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto };
+            app.active_tab_mut().pending_command = PendingCommand::Implement { agent, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto };
             show_pre_command_dialogs(app).await;
         }
 
         "chat" => {
-            let (non_interactive, plan, allow_docker, mount_ssh, yolo, auto) = parse_chat_flags(&parts);
-            app.active_tab_mut().pending_command = PendingCommand::Chat { non_interactive, plan, allow_docker, mount_ssh, yolo, auto };
+            let chat_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "chat").unwrap();
+            let flags = flag_parser::parse_flags(&parts, chat_spec);
+            let non_interactive = flag_parser::flag_bool(&flags, "non-interactive");
+            let plan = flag_parser::flag_bool(&flags, "plan");
+            let allow_docker = flag_parser::flag_bool(&flags, "allow-docker");
+            let mount_ssh = flag_parser::flag_bool(&flags, "mount-ssh");
+            let yolo = flag_parser::flag_bool(&flags, "yolo");
+            let auto = flag_parser::flag_bool(&flags, "auto");
+            let agent = flag_parser::flag_string(&flags, "agent").map(str::to_string);
+            app.active_tab_mut().pending_command = PendingCommand::Chat { agent, non_interactive, plan, allow_docker, mount_ssh, yolo, auto };
             show_pre_command_dialogs(app).await;
         }
 
@@ -1121,11 +1102,15 @@ async fn execute_command(app: &mut App, cmd: &str) {
         "specs" => {
             match parts.get(1) {
                 Some(&"new") => {
-                    let interview = parts.iter().any(|p| *p == "--interview");
+                    let specs_new_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "specs new").unwrap();
+                    let flags = flag_parser::parse_flags(&parts, specs_new_spec);
+                    let interview = flag_parser::flag_bool(&flags, "interview");
                     app.active_tab_mut().dialog = state::Dialog::NewKindSelect { interview };
                 }
                 Some(&"amend") => {
-                    let allow_docker = parts.iter().any(|p| *p == "--allow-docker");
+                    let specs_amend_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "specs amend").unwrap();
+                    let flags = flag_parser::parse_flags(&parts, specs_amend_spec);
+                    let allow_docker = flag_parser::flag_bool(&flags, "allow-docker");
                     let work_item: u32 = match parts.iter()
                         .skip(2)
                         .find(|s| !s.starts_with("--"))
@@ -1167,7 +1152,9 @@ async fn execute_command(app: &mut App, cmd: &str) {
         }
 
         "status" => {
-            let watch = parts.iter().any(|p| *p == "--watch");
+            let status_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "status").unwrap();
+            let flags = flag_parser::parse_flags(&parts, status_spec);
+            let watch = flag_parser::flag_bool(&flags, "watch");
             app.active_tab_mut().start_command(cmd.to_string());
             let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
             app.active_tab_mut().exit_rx = Some(exit_rx);
@@ -1276,11 +1263,11 @@ async fn launch_pending_command(app: &mut App) {
         PendingCommand::Ready { .. } => {
             launch_ready(app).await;
         }
-        PendingCommand::Implement { work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto } => {
-            launch_implement(app, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto).await;
+        PendingCommand::Implement { agent, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto } => {
+            launch_implement(app, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto, agent).await;
         }
-        PendingCommand::Chat { non_interactive, plan, allow_docker, mount_ssh, yolo, auto } => {
-            launch_chat(app, non_interactive, plan, allow_docker, mount_ssh, yolo, auto).await;
+        PendingCommand::Chat { agent, non_interactive, plan, allow_docker, mount_ssh, yolo, auto } => {
+            launch_chat(app, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent).await;
         }
         PendingCommand::ClawsReady => {
             // Claws ready is launched directly from dialog actions (ClawsReadyProceed /
@@ -1588,7 +1575,7 @@ async fn launch_init(
 
 /// Actually spawn the docker container for `implement` via PTY.
 #[allow(clippy::too_many_arguments)]
-async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, plan: bool, allow_docker: bool, workflow_path: Option<std::path::PathBuf>, worktree: bool, mount_ssh: bool, yolo: bool, auto: bool) {
+async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, plan: bool, allow_docker: bool, workflow_path: Option<std::path::PathBuf>, worktree: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
         Some(r) => r,
@@ -1605,7 +1592,10 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
     }
 
     let config = load_repo_config(&git_root).unwrap_or_default();
-    let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
+    // Agent resolution order: CLI/TUI flag → config → hardcoded default.
+    let agent_name = agent_override.clone()
+        .or_else(|| config.agent.clone())
+        .unwrap_or_else(|| "claude".to_string());
 
     // Resolve SSH dir if requested.
     let ssh_dir: Option<std::path::PathBuf> = if mount_ssh {
@@ -1669,6 +1659,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
                 if !files.is_empty() {
                     // Save parameters so the dialog can resume the command after resolution.
                     app.active_tab_mut().pending_command = PendingCommand::Implement {
+                        agent: agent_override.clone(),
                         work_item,
                         non_interactive,
                         plan,
@@ -1730,6 +1721,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
             // Dockerfile missing — prompt to download and build, then re-launch.
             let config_default = agent_name.clone();
             app.active_tab_mut().pending_command = PendingCommand::Implement {
+                agent: agent_override.clone(),
                 work_item,
                 non_interactive,
                 plan,
@@ -1831,6 +1823,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
                 // Save pending command so we can resume after the agent Dockerfile is built
                 // (or after the user accepts a fallback via AgentSetupFallbackAccepted).
                 app.active_tab_mut().pending_command = PendingCommand::Implement {
+                    agent: agent_override.clone(),
                     work_item,
                     non_interactive,
                     plan,
@@ -2059,7 +2052,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
 }
 
 /// Actually spawn the docker container for `chat` via PTY.
-async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool) {
+async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
         Some(r) => r,
@@ -2070,7 +2063,10 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
     };
 
     let config = load_repo_config(&git_root).unwrap_or_default();
-    let agent_name = config.agent.as_deref().unwrap_or("claude").to_string();
+    // Agent resolution order: CLI/TUI flag → config → hardcoded default.
+    let agent_name = agent_override.clone()
+        .or_else(|| config.agent.clone())
+        .unwrap_or_else(|| "claude".to_string());
     let mount_path = app.active_tab_mut().pending_mount_path.take().unwrap_or_else(|| git_root.clone());
 
     // Resolve SSH dir if requested.
@@ -2117,6 +2113,7 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
     if !agent_dockerfile_path.exists() {
         // Dockerfile missing — prompt to download and build, then re-launch.
         app.active_tab_mut().pending_command = PendingCommand::Chat {
+            agent: agent_override.clone(),
             non_interactive,
             plan,
             allow_docker,
@@ -3678,26 +3675,6 @@ async fn launch_specs_interview_agent(
     }
 }
 
-fn parse_agent_flag(parts: &[&str]) -> Option<Agent> {
-    let mut iter = parts.iter().peekable();
-    while let Some(part) = iter.next() {
-        // Support both --agent=<value> and --agent <value>.
-        let value = if let Some(v) = part.strip_prefix("--agent=") {
-            v.to_string()
-        } else if *part == "--agent" {
-            match iter.next() {
-                Some(v) => v.to_string(),
-                None => return None,
-            }
-        } else {
-            continue;
-        };
-        // Drive from Agent::all() so this never drifts from the CLI's agent list.
-        return Agent::all().iter().find(|a| a.as_str() == value.as_str()).cloned();
-    }
-    None
-}
-
 // ─── Multi-step workflow helpers ──────────────────────────────────────────────
 
 /// Initialise or resume workflow state for TUI mode.
@@ -4424,37 +4401,108 @@ mod tests {
     use crate::tui::state::{App, Dialog, ExecutionPhase};
     use crate::workflow::{StepStatus, WorkflowState, WorkflowStepState};
 
-    /// Every agent in Agent::all() must be parseable via both flag forms.
-    /// This test fails immediately when a new agent is added to Agent::all()
-    /// but parse_agent_flag is not updated — keeping TUI and CLI in sync.
+    /// Every agent in Agent::all() must be parseable via both flag forms using the generic
+    /// flag_parser driven by INIT_FLAGS. This test fails immediately when a new agent is
+    /// added to Agent::all() but INIT_FLAGS is not updated — keeping TUI and CLI in sync.
     #[test]
     fn parse_agent_flag_covers_all_cli_agents() {
+        use crate::commands::spec;
+        let init_spec = spec::ALL_COMMANDS.iter().find(|c| c.name == "init").unwrap();
         for agent in Agent::all() {
             let eq_form = format!("--agent={}", agent.as_str());
             let parts_eq: Vec<&str> = vec!["init", &eq_form];
+            let flags = flag_parser::parse_flags(&parts_eq, init_spec);
             assert_eq!(
-                parse_agent_flag(&parts_eq).as_ref().map(Agent::as_str),
+                flag_parser::flag_string(&flags, "agent"),
                 Some(agent.as_str()),
                 "--agent={} not parsed by TUI",
                 agent.as_str(),
             );
 
-            let parts_space: Vec<&str> = vec!["init", "--agent", agent.as_str()];
+            let agent_name = agent.as_str();
+            let parts_space: Vec<&str> = vec!["init", "--agent", agent_name];
+            let flags = flag_parser::parse_flags(&parts_space, init_spec);
             assert_eq!(
-                parse_agent_flag(&parts_space).as_ref().map(Agent::as_str),
+                flag_parser::flag_string(&flags, "agent"),
                 Some(agent.as_str()),
                 "--agent {} not parsed by TUI",
                 agent.as_str(),
             );
         }
-        // Unknown agents return None.
-        assert!(parse_agent_flag(&["init", "--agent=notanagent"]).is_none());
-        // Missing value after --agent returns None.
-        assert!(parse_agent_flag(&["init", "--agent"]).is_none());
+        // Missing value after --agent yields no flag entry.
+        let flags = flag_parser::parse_flags(&["init", "--agent"], init_spec);
+        assert!(flag_parser::flag_string(&flags, "agent").is_none());
     }
 
     fn new_app() -> App {
         App::new(std::path::PathBuf::new())
+    }
+
+    /// App whose CWD is outside any Git repository. Used by TUI flag-parsing
+    /// integration tests so `show_pre_command_dialogs` returns early (no git
+    /// root) after `pending_command` is set — without trying to spawn Docker.
+    fn app_no_git() -> App {
+        App::new(std::path::PathBuf::from("/tmp"))
+    }
+
+    // ── TUI flag-parsing integration tests (work item 0053) ─────────────────
+
+    /// `chat --agent codex` sets `PendingCommand::Chat { agent: Some("codex"), .. }`.
+    #[tokio::test]
+    async fn tui_chat_agent_space_form_sets_pending_command() {
+        let mut app = app_no_git();
+        execute_command(&mut app, "chat --agent codex").await;
+        match &app.active_tab().pending_command {
+            PendingCommand::Chat { agent, .. } => {
+                assert_eq!(
+                    agent.as_deref(),
+                    Some("codex"),
+                    "expected agent Some(\"codex\"), got {:?}",
+                    agent,
+                );
+            }
+            other => panic!("expected PendingCommand::Chat, got {:?}", other),
+        }
+    }
+
+    /// `implement 0042 --agent=opencode` sets the correct `PendingCommand::Implement`.
+    #[tokio::test]
+    async fn tui_implement_agent_eq_form_sets_pending_command() {
+        let mut app = app_no_git();
+        execute_command(&mut app, "implement 0042 --agent=opencode").await;
+        match &app.active_tab().pending_command {
+            PendingCommand::Implement { agent, work_item, .. } => {
+                assert_eq!(
+                    agent.as_deref(),
+                    Some("opencode"),
+                    "expected agent Some(\"opencode\"), got {:?}",
+                    agent,
+                );
+                assert_eq!(*work_item, 42u32);
+            }
+            other => panic!("expected PendingCommand::Implement, got {:?}", other),
+        }
+    }
+
+    /// `implement 0007 --workflow my-workflow.md` extracts the workflow path alongside
+    /// other flag defaults (agent stays None, work_item = 7).
+    #[tokio::test]
+    async fn tui_implement_workflow_flag_is_extracted() {
+        let mut app = app_no_git();
+        execute_command(&mut app, "implement 0007 --workflow my-workflow.md").await;
+        match &app.active_tab().pending_command {
+            PendingCommand::Implement { workflow, work_item, agent, .. } => {
+                assert_eq!(
+                    workflow.as_deref(),
+                    Some(std::path::Path::new("my-workflow.md")),
+                    "expected workflow Some(\"my-workflow.md\"), got {:?}",
+                    workflow,
+                );
+                assert_eq!(*work_item, 7u32);
+                assert_eq!(*agent, None, "no --agent flag was given");
+            }
+            other => panic!("expected PendingCommand::Implement, got {:?}", other),
+        }
     }
 
     fn make_step_state(name: &str, deps: &[&str], status: StepStatus) -> WorkflowStepState {

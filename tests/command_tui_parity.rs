@@ -902,19 +902,18 @@ fn agent_display_names() {
 
 #[test]
 fn tui_init_autocomplete_covers_all_cli_agents() {
-    use amux::cli::Agent;
     use amux::tui::input::autocomplete_suggestions;
 
     // "init --" triggers flag-completion for the init subcommand.
+    // The new spec-driven format generates a single "--agent <NAME>  — ..." entry
+    // (not one entry per agent), so we just verify that --agent appears in the
+    // suggestions — keeping TUI and CLI in sync via ALL_COMMANDS/INIT_FLAGS.
     let suggestions = autocomplete_suggestions("init --");
-    for agent in Agent::all() {
-        let expected = format!("init --agent={}", agent.as_str());
-        assert!(
-            suggestions.contains(&expected),
-            "TUI autocomplete missing '{}' — Agent::all() and flag_suggestions_for(\"init\") are out of sync",
-            expected,
-        );
-    }
+    assert!(
+        suggestions.iter().any(|s| s.contains("--agent")),
+        "TUI autocomplete missing '--agent' hint for 'init' — INIT_FLAGS and flag_suggestions_for(\"init\") are out of sync; got: {:?}",
+        suggestions,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,9 +1190,8 @@ fn autocomplete_includes_chat_subcommand() {
 fn autocomplete_chat_shows_hints() {
     let sug = autocomplete_suggestions("chat ");
     assert!(
-        sug.iter().any(|s| s.contains("chat")),
-        "Expected hint for 'chat' command, got: {:?}",
-        sug
+        !sug.is_empty(),
+        "Expected at least one hint for 'chat' command, got empty list",
     );
     assert!(
         sug.iter().any(|s| s.contains("--non-interactive")),
@@ -1210,9 +1208,9 @@ fn autocomplete_chat_shows_hints() {
 fn pending_command_chat_variant() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Chat { non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false };
-    assert_eq!(cmd, PendingCommand::Chat { non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
-    assert_ne!(cmd, PendingCommand::Chat { non_interactive: true, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
+    let cmd = PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false };
+    assert_eq!(cmd, PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
+    assert_ne!(cmd, PendingCommand::Chat { agent: None, non_interactive: true, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
     assert_ne!(cmd, PendingCommand::None);
 }
 
@@ -1560,18 +1558,18 @@ fn plan_false_does_not_add_flags() {
 fn pending_command_chat_plan_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Chat { non_interactive: false, plan: true, allow_docker: false, mount_ssh: false, yolo: false, auto: false };
-    assert_eq!(cmd, PendingCommand::Chat { non_interactive: false, plan: true, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
-    assert_ne!(cmd, PendingCommand::Chat { non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
+    let cmd = PendingCommand::Chat { agent: None, non_interactive: false, plan: true, allow_docker: false, mount_ssh: false, yolo: false, auto: false };
+    assert_eq!(cmd, PendingCommand::Chat { agent: None, non_interactive: false, plan: true, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
+    assert_ne!(cmd, PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
 }
 
 #[test]
 fn pending_command_implement_plan_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Implement { work_item: 1, non_interactive: false, plan: true, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false };
-    assert_eq!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: true, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
-    assert_ne!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
+    let cmd = PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: true, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false };
+    assert_eq!(cmd, PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: true, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
+    assert_ne!(cmd, PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: false, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
 }
 
 // ---------------------------------------------------------------------------
@@ -1741,18 +1739,18 @@ fn cli_ready_allow_docker_with_refresh() {
 fn pending_command_chat_allow_docker_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Chat { non_interactive: false, plan: false, allow_docker: true, mount_ssh: false, yolo: false, auto: false };
-    assert_eq!(cmd, PendingCommand::Chat { non_interactive: false, plan: false, allow_docker: true, mount_ssh: false, yolo: false, auto: false });
-    assert_ne!(cmd, PendingCommand::Chat { non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
+    let cmd = PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: true, mount_ssh: false, yolo: false, auto: false };
+    assert_eq!(cmd, PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: true, mount_ssh: false, yolo: false, auto: false });
+    assert_ne!(cmd, PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
 }
 
 #[test]
 fn pending_command_implement_allow_docker_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: true, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false };
-    assert_eq!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: true, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
-    assert_ne!(cmd, PendingCommand::Implement { work_item: 1, non_interactive: false, plan: false, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
+    let cmd = PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: false, allow_docker: true, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false };
+    assert_eq!(cmd, PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: false, allow_docker: true, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
+    assert_ne!(cmd, PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: false, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
 }
 
 #[test]

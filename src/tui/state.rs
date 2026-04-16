@@ -271,6 +271,8 @@ pub enum PendingCommand {
         template_audit_decision: Option<bool>,
     },
     Implement {
+        /// Override the configured agent for this session.
+        agent: Option<String>,
         work_item: u32,
         non_interactive: bool,
         plan: bool,
@@ -287,6 +289,8 @@ pub enum PendingCommand {
         auto: bool,
     },
     Chat {
+        /// Override the configured agent for this session.
+        agent: Option<String>,
         non_interactive: bool,
         plan: bool,
         allow_docker: bool,

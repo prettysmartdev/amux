@@ -62,10 +62,22 @@ As you type, amux shows matching suggestions below the command box:
 ```
 implement --
   implement <NNNN>  e.g. implement 0001
-  implement <NNNN> --plan
-  implement <NNNN> --worktree
-  implement <NNNN> --yolo
-  implement <NNNN> --yolo --workflow <path>
+  implement <NNNN> --agent <NAME>  — override configured agent
+  implement <NNNN> --non-interactive  — run without interactive prompt
+  implement <NNNN> --plan  — plan mode
+  implement <NNNN> --worktree  — use git worktree
+  implement <NNNN> --yolo  — skip confirmation prompts
+  implement <NNNN> --yolo --workflow <FILE>  — workflow file path
+```
+
+Every flag available in `amux implement` and `amux chat` is also available in
+the TUI command box and appears in autocomplete. Both `--flag value` and
+`--flag=value` forms are accepted. For example:
+
+```
+chat --agent codex
+chat --agent=codex
+implement 0042 --agent opencode --plan
 ```
 
 If you type an unrecognised command, amux suggests the closest known one:

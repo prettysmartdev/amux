@@ -35,6 +35,9 @@ src/
                            DEFAULT_SCROLLBACK_LINES, effective_scrollback_lines()
   commands/
     mod.rs                 Public run() dispatcher
+    spec.rs                CommandSpec + FlagSpec tables: canonical single source of truth
+                           for all subcommand flags. Imported by cli.rs, tui/mod.rs, and
+                           tui/input.rs. Never imports from those modules (leaf node).
     output.rs              OutputSink: routes output to stdout or TUI channel
     auth.rs                Agent credential path resolution, auth prompts
     agent.rs               Shared agent launching: run_agent_with_sink()
@@ -89,7 +92,8 @@ src/
                            ClipboardWriter trait; copy_selection_to_clipboard();
                            capture_vt100_snapshot(); extract_selection_text()
     state.rs               App struct; Focus/ExecutionPhase/Dialog enums;
-                           PendingCommand (Ready/Implement/Chat with flags);
+                           PendingCommand (Ready/Implement/Chat with flags,
+                             including agent: Option<String> on Chat and Implement);
                            TuiInitAnswers: pre-collected init Q&A answers for TuiInitQa;
                            ContainerWindowState, ContainerInfo,
                            LastContainerSummary; terminal selection state fields;
@@ -97,7 +101,14 @@ src/
                            Tab.ready_summary: Option<ReadySummary> (stores
                            pre-audit summary for handoff to post-audit phase)
     input.rs               handle_key(); Action enum (incl. CopyToClipboard);
-                           autocomplete; key→bytes; Ctrl+Y copy keybinding
+                           autocomplete (flag_suggestions_for() generated from
+                             CommandSpec — no manual hint lists);
+                           key→bytes; Ctrl+Y copy keybinding
+    flag_parser.rs         parse_flags(): generic TUI flag parser driven by CommandSpec.
+                           Handles both --flag value and --flag=value forms.
+                           flag_bool() / flag_string() convenience helpers.
+                           Replaces the deleted parse_chat_flags(),
+                           parse_implement_flags(), and parse_agent_flag() functions.
     render.rs              draw(); draw_exec_window/command_box/dialog etc.;
                            render_vt100_screen/no_cursor (selection highlight);
                            cell_in_selection(); scrollback depth probe + indicator
@@ -289,10 +300,132 @@ None ──[q / Ctrl+C]───────────────────
 Dialogs intercept all key events until dismissed. For the `init` flow, dialogs
 collect answers into a `TuiInitAnswers` struct; `launch_init()` reads those answers
 via `TuiInitQa` and delegates to `init_flow::execute()`. A `PendingCommand` enum
-(`Ready { refresh, non_interactive }`, `Implement { work_item, non_interactive, plan }`,
-or `Chat { non_interactive, plan }`)
+(`Ready { refresh, non_interactive }`,
+`Implement { agent, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto }`,
+or `Chat { agent, non_interactive, plan, allow_docker, mount_ssh, yolo, auto }`)
 and the mount path are preserved in `App` fields while a dialog is active, so
-the correct command resumes after the dialog is dismissed.
+the correct command resumes after the dialog is dismissed. All flag fields —
+including `agent: Option<String>` — are populated from the parsed TUI command
+line before any dialog is shown, so the flag values survive through the dialog
+flow and are applied when the command launches.
+
+---
+
+## CLI/TUI Flag Unification
+
+Before work item 0053, every command's flags were defined in three separate
+places with no structural guarantee they stayed in sync:
+
+| Location | Role |
+|---|---|
+| `src/cli.rs` — clap struct | CLI argument parsing |
+| `src/tui/mod.rs` — `parse_chat_flags()` / `parse_implement_flags()` | TUI command-line parsing |
+| `src/tui/input.rs` — hint lists in `flag_suggestions_for()` | TUI autocomplete |
+
+This meant a flag added to `cli.rs` could be silently ignored in the TUI: the
+parser would not extract it, the `PendingCommand` had no field for it, and
+autocomplete would not hint it.
+
+### `CommandSpec` — single source of truth (`src/commands/spec.rs`)
+
+`spec.rs` is the leaf module that all three sites import from. It defines every
+flag for every subcommand as static data:
+
+```rust
+pub struct FlagSpec {
+    pub name: &'static str,       // long flag name without "--"
+    pub takes_value: bool,        // true for --agent NAME, false for --plan
+    pub value_name: &'static str, // metavar shown in hints ("NAME", "FILE", "")
+    pub hint: &'static str,       // short description for autocomplete display
+}
+
+pub struct CommandSpec {
+    pub name: &'static str,
+    pub flags: &'static [FlagSpec],
+}
+
+pub static ALL_COMMANDS: &[CommandSpec] = &[
+    CommandSpec { name: "chat",      flags: CHAT_FLAGS      },
+    CommandSpec { name: "implement", flags: IMPLEMENT_FLAGS },
+    // … all subcommands
+];
+```
+
+`spec.rs` has zero imports from `cli.rs`, `tui/mod.rs`, or `tui/input.rs`. It is
+re-exported from `src/commands/mod.rs`.
+
+### Generic TUI flag parser (`src/tui/flag_parser.rs`)
+
+`parse_flags(parts, spec)` replaces all ad-hoc `parse_*_flags()` functions. It
+accepts a tokenized command line and a `&CommandSpec`, and returns a
+`HashMap<&'static str, String>` of flag name → value (empty string for boolean
+flags):
+
+- `--flag value` and `--flag=value` forms are both handled
+- Unknown flags are silently ignored (the user may be mid-typing)
+- A value token that starts with `--` is never consumed as the value of a
+  preceding flag (e.g. `--workflow --non-interactive` does not treat
+  `--non-interactive` as the workflow path)
+- `--flag=` (empty value) is parsed as `Some("")`
+
+The deleted functions `parse_chat_flags()`, `parse_implement_flags()`, and
+`parse_agent_flag()` are all replaced by calls to `parse_flags()` with the
+corresponding `CommandSpec`.
+
+### Autocomplete driven by `CommandSpec` (`src/tui/input.rs`)
+
+`flag_suggestions_for(cmd)` is now a thin wrapper over `ALL_COMMANDS`:
+
+```rust
+pub fn flag_suggestions_for(cmd: &str) -> Vec<String> {
+    let Some(spec) = ALL_COMMANDS.iter().find(|c| c.name == cmd) else {
+        return vec![];
+    };
+    spec.flags.iter().map(|f| {
+        if f.takes_value {
+            format!("--{} <{}>  — {}", f.name, f.value_name, f.hint)
+        } else {
+            format!("--{}  — {}", f.name, f.hint)
+        }
+    }).collect()
+}
+```
+
+The handwritten hint strings for positional argument examples (e.g.
+`"implement <NNNN>  e.g. implement 0001"`) are prepended separately.
+Because the flag hints are now derived, there is no separate hint list to drift.
+
+### Enforcement tests
+
+#### CLI/spec parity (compile-time guarantee)
+
+A `#[test]` in `src/cli.rs` enumerates all clap `Arg` long names for each
+subcommand and asserts they match the corresponding `spec::*_FLAGS` table
+bidirectionally. The test fails immediately when a flag is added to `cli.rs`
+but not `spec.rs`, or vice versa. A single test failure surfaces both problems:
+the missing spec entry and the missing CLI arg.
+
+#### TUI parser coverage
+
+A unit test for each `CommandSpec` in `ALL_COMMANDS` calls `parse_flags()` with
+every flag in both `--flag value` and `--flag=value` forms and asserts the
+correct value is extracted. A separate test verifies that a value-taking flag
+followed by another `--flag` does not consume the second flag as the value.
+
+#### Autocomplete structural guarantee
+
+Because `flag_suggestions_for()` reads directly from `ALL_COMMANDS`, there is no
+separate hint list that could drift out of sync. The derivation itself is the
+guarantee — no additional test is needed for autocomplete completeness.
+
+### Agent override resolution order
+
+The agent used for a session is resolved in this order, matching both CLI and TUI:
+
+1. **Flag** — `--agent <name>` passed on the command line (CLI or TUI)
+2. **Repo config** — `agent` field in `aspec/.amux.json`
+3. **Global config** — `default_agent` field in `~/.amux/config.json`
+4. **Built-in default** — `claude`
 
 ---
 
@@ -1189,6 +1322,11 @@ Inactive tabs are rendered only as a tab bar entry — the full render path runs
 | Unit — container window | `tui::state::tests` | Container state transitions, PTY routing, summary generation |
 | Unit — container render | `tui::render::tests` | Container window overlay, minimized bar, summary bar |
 | Unit — container input | `tui::input::tests` | Key handling in maximized/minimized/hidden states |
+| Unit — CLI/spec parity | `cli::tests` | Every clap flag for each subcommand is present in `spec::*_FLAGS` and vice versa — fails immediately when the two diverge |
+| Unit — flag parser | `tui::flag_parser::tests` | `parse_flags()` with every flag in `--flag value` and `--flag=value` forms; unknown flags ignored; value-taking flag not consuming a following `--flag` token; empty-value form |
+| Unit — autocomplete completeness | `tui::input::tests` | `flag_suggestions_for("chat")` contains `--agent`; `flag_suggestions_for("implement")` contains `--agent` and `--workflow` |
+| Integration — TUI chat with `--agent` | `tui::mod::tests` | Submitting `"chat --agent codex"` produces `PendingCommand::Chat { agent: Some("codex"), .. }` |
+| Integration — TUI implement with `--agent=` | `tui::mod::tests` | Submitting `"implement 0042 --agent=opencode"` produces `PendingCommand::Implement { agent: Some("opencode"), .. }` |
 | Unit — docker build streaming | `docker::tests` | Incremental line delivery, stderr capture, failure handling |
 | Unit — docker stats | `docker::tests` | Stats parsing, container name generation |
 | Unit — host settings / LSP suppression | `docker::tests` | `disable_lsp_recommendations` file creation, key merging, invalid-JSON fallback; `prepare_minimal` returns valid settings with LSP key |
