@@ -1262,6 +1262,7 @@ fn pending_command_ready_build_no_cache_fields() {
         non_interactive: false,
         allow_docker: false,
         migrate_decision: None,
+        template_audit_decision: None,
     };
     assert_eq!(cmd, PendingCommand::Ready {
         refresh: false,
@@ -1270,6 +1271,7 @@ fn pending_command_ready_build_no_cache_fields() {
         non_interactive: false,
         allow_docker: false,
         migrate_decision: None,
+        template_audit_decision: None,
     });
     // Different build flag should not match
     assert_ne!(cmd, PendingCommand::Ready {
@@ -1279,6 +1281,7 @@ fn pending_command_ready_build_no_cache_fields() {
         non_interactive: false,
         allow_docker: false,
         migrate_decision: None,
+        template_audit_decision: None,
     });
 }
 
@@ -1756,9 +1759,9 @@ fn pending_command_implement_allow_docker_field() {
 fn pending_command_ready_allow_docker_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: true, migrate_decision: None };
-    assert_eq!(cmd, PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: true, migrate_decision: None });
-    assert_ne!(cmd, PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: false, migrate_decision: None });
+    let cmd = PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: true, migrate_decision: None, template_audit_decision: None };
+    assert_eq!(cmd, PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: true, migrate_decision: None, template_audit_decision: None });
+    assert_ne!(cmd, PendingCommand::Ready { refresh: false, build: false, no_cache: false, non_interactive: false, allow_docker: false, migrate_decision: None, template_audit_decision: None });
 }
 
 // ---------------------------------------------------------------------------
@@ -2450,6 +2453,7 @@ fn workflow_resume_loads_correct_ready_steps() {
             prompt_template: "Plan the work.".to_string(),
             status: WfStepStatus::Done,
             container_id: Some("amux-plan-container".to_string()),
+            agent: None,
         },
         WorkflowStepState {
             name: "implement".to_string(),
@@ -2457,6 +2461,7 @@ fn workflow_resume_loads_correct_ready_steps() {
             prompt_template: "Implement the work.".to_string(),
             status: WfStepStatus::Pending,
             container_id: None,
+            agent: None,
         },
     ];
     let wf = WorkflowState {
@@ -2488,6 +2493,7 @@ fn workflow_state_file_removed_on_completion() {
             prompt_template: "Do the plan.".to_string(),
             status: WfStepStatus::Done,
             container_id: Some("amux-abc".to_string()),
+            agent: None,
         },
     ];
     let wf = WorkflowState {
@@ -2525,6 +2531,7 @@ fn workflow_set_container_id_overwrites_on_retry() {
             prompt_template: "Plan.".to_string(),
             status: WfStepStatus::Pending,
             container_id: None,
+            agent: None,
         },
     ];
     let mut wf = WorkflowState {

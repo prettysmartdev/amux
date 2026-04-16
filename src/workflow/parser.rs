@@ -9,6 +9,9 @@ pub struct WorkflowStep {
     pub depends_on: Vec<String>,
     /// The raw prompt template string (may contain `{{...}}` variables).
     pub prompt_template: String,
+    /// Optional agent override for this step (from `Agent:` field).
+    /// When `None`, the workflow default agent (from config or `--agent` flag) is used.
+    pub agent: Option<String>,
 }
 
 /// Parse a workflow Markdown file into an optional title and ordered list of steps.
@@ -27,6 +30,7 @@ pub fn parse_workflow(content: &str) -> Result<(Option<String>, Vec<WorkflowStep
 
     let mut current_name: Option<String> = None;
     let mut current_depends: Vec<String> = Vec::new();
+    let mut current_agent: Option<String> = None;
     let mut current_body = String::new();
     let mut in_prompt = false;
 
@@ -43,6 +47,7 @@ pub fn parse_workflow(content: &str) -> Result<(Option<String>, Vec<WorkflowStep
                 &mut steps,
                 &mut current_name,
                 &mut current_depends,
+                &mut current_agent,
                 &mut current_body,
                 &mut in_prompt,
             );
@@ -57,6 +62,7 @@ pub fn parse_workflow(content: &str) -> Result<(Option<String>, Vec<WorkflowStep
                 &mut steps,
                 &mut current_name,
                 &mut current_depends,
+                &mut current_agent,
                 &mut current_body,
                 &mut in_prompt,
             );
@@ -74,6 +80,15 @@ pub fn parse_workflow(content: &str) -> Result<(Option<String>, Vec<WorkflowStep
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
+                continue;
+            }
+
+            // Agent: field — optional per-step agent override.
+            if trimmed.starts_with("Agent:") && !in_prompt {
+                let agent_str = trimmed["Agent:".len()..].trim().to_string();
+                if !agent_str.is_empty() {
+                    current_agent = Some(agent_str);
+                }
                 continue;
             }
 
@@ -100,6 +115,7 @@ pub fn parse_workflow(content: &str) -> Result<(Option<String>, Vec<WorkflowStep
         &mut steps,
         &mut current_name,
         &mut current_depends,
+        &mut current_agent,
         &mut current_body,
         &mut in_prompt,
     );
@@ -118,6 +134,7 @@ fn flush_step(
     steps: &mut Vec<WorkflowStep>,
     current_name: &mut Option<String>,
     current_depends: &mut Vec<String>,
+    current_agent: &mut Option<String>,
     current_body: &mut String,
     in_prompt: &mut bool,
 ) {
@@ -125,6 +142,7 @@ fn flush_step(
         steps.push(WorkflowStep {
             name,
             depends_on: std::mem::take(current_depends),
+            agent: current_agent.take(),
             prompt_template: current_body.trim().to_string(),
         });
         current_body.clear();
@@ -214,5 +232,60 @@ mod tests {
         assert!(result.is_ok());
         let (_t, steps) = result.unwrap();
         assert_eq!(steps[0].prompt_template, "");
+    }
+
+    // ─── Agent: field tests (work item 0052) ──────────────────────────────────
+
+    #[test]
+    fn parse_agent_field_populates_agent() {
+        let md = "## Step: plan\nAgent: codex\nPrompt: Do the thing.\n";
+        let (_, steps) = parse_workflow(md).unwrap();
+        assert_eq!(
+            steps[0].agent,
+            Some("codex".to_string()),
+            "Agent: field must populate the agent field on WorkflowStep"
+        );
+    }
+
+    #[test]
+    fn parse_step_without_agent_field_gives_none() {
+        let md = "## Step: plan\nPrompt: Do the thing.\n";
+        let (_, steps) = parse_workflow(md).unwrap();
+        assert!(
+            steps[0].agent.is_none(),
+            "agent must be None when no Agent: field is present"
+        );
+    }
+
+    #[test]
+    fn parse_agent_after_prompt_is_body_not_directive() {
+        // An `Agent:` line appearing after `Prompt:` belongs to the prompt body,
+        // not to the step header — `agent` must remain `None`.
+        let md = "## Step: plan\nPrompt: Do the thing.\nAgent: codex\n";
+        let (_, steps) = parse_workflow(md).unwrap();
+        assert!(
+            steps[0].agent.is_none(),
+            "`agent` must be None when Agent: appears after Prompt:"
+        );
+        assert!(
+            steps[0].prompt_template.contains("Agent: codex"),
+            "Agent: line after Prompt: must appear verbatim in the prompt body"
+        );
+    }
+
+    #[test]
+    fn parse_agent_field_isolated_per_step() {
+        // Only the step with an Agent: field should have a non-None agent.
+        let md = "## Step: a\nAgent: codex\nPrompt: A.\n\n## Step: b\nPrompt: B.\n";
+        let (_, steps) = parse_workflow(md).unwrap();
+        assert_eq!(
+            steps[0].agent,
+            Some("codex".to_string()),
+            "step 'a' must carry the Agent: codex field"
+        );
+        assert!(
+            steps[1].agent.is_none(),
+            "step 'b' must have agent = None (no Agent: field)"
+        );
     }
 }

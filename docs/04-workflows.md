@@ -37,6 +37,7 @@ A workflow is a plain Markdown file. amux looks for:
 | `# Title` | Optional heading used for display only |
 | `## Step: <name>` | Defines a step; names must be unique within the file |
 | `Depends-on: <step>[, <step>…]` | Declares upstream dependencies (omit for root steps) |
+| `Agent: <name>` | Optional. Run this step with a specific agent instead of the default. Valid values: `claude`, `codex`, `opencode`, `maki`, `gemini` |
 | `Prompt:` | Everything after this keyword (until the next heading) is the step's prompt template |
 
 ### Example
@@ -75,6 +76,60 @@ In this example, `review` and `docs` both depend on `implement` — they form a 
 | `{{work_item_section:[Name]}}` | Content of the named section from the work item file (case-insensitive) |
 
 Unknown variables or missing sections are left in place with a warning.
+
+---
+
+## Multi-agent workflows
+
+Each step in a workflow can run in a different agent's container by adding an `Agent:` field to the step header block — between `Depends-on:` and `Prompt:`:
+
+```markdown
+## Step: plan
+Prompt: Produce an implementation plan.
+
+## Step: implement
+Depends-on: plan
+Agent: codex
+Prompt: Implement the plan from the previous step.
+
+## Step: review
+Depends-on: implement
+Agent: claude
+Prompt: Review the implementation for correctness and style.
+```
+
+Steps without an `Agent:` field use the workflow default agent — the value from repo config (or global config), overridden by the `--agent` flag if one was passed at the command line. The `--agent` flag sets the **default** for steps that do not name an agent; it does **not** override steps that explicitly specify one.
+
+### Agent pre-flight check
+
+Before the first step runs, amux collects every distinct agent name required across all steps and checks that the corresponding image exists. If an image is missing, amux prompts:
+
+```
+Agent 'codex' has no Dockerfile. Download and build it? [y/N]:
+```
+
+**Accept** — amux downloads the agent Dockerfile template, builds the project base image (if needed), then builds the agent image. If your repo has multiple agents to set up, each is prompted in turn before the workflow begins.
+
+**Decline** — amux asks whether to substitute the default agent for that step instead:
+
+```
+Use the default agent (claude) for steps that specify 'codex'? [y/N]:
+```
+
+- Accept the fallback: those steps run with the default agent. The workflow starts normally.
+- Decline the fallback: the workflow does not start.
+
+If all required images are already available, the pre-flight check completes silently and the first step launches immediately.
+
+### Field placement
+
+`Agent:` must appear in the step header block — after any `Depends-on:` line and before the `Prompt:` line. An `Agent:` that appears after `Prompt:` is treated as prompt text, not as a directive.
+
+An unknown agent name in an `Agent:` field is caught at parse time, before any container runs, and exits with a list of valid options.
+
+### Resuming workflows with per-step agents
+
+When resuming a saved workflow, the per-step agent assignments from the original run are preserved in the state file. If you pass a different `--agent` flag on resume, amux warns you; the persisted assignments still take precedence.
 
 ---
 
@@ -125,6 +180,7 @@ All flags available on `implement` work with `--workflow`:
 
 | Flag | Description |
 |------|-------------|
+| `--agent=<name>` | Default agent for steps that do not specify an `Agent:` field. Does not override steps with an explicit `Agent:` directive |
 | `--non-interactive` | Run each step's agent in print/batch mode |
 | `--plan` | Run each step in read-only mode |
 | `--allow-docker` | Mount Docker socket into each step's container |
@@ -166,6 +222,14 @@ Each action persists workflow state before launching any new execution, so an un
 ### Next step: same container
 
 The **↓** action reuses the already-running container — the next step's prompt is written directly to its PTY stdin. Useful when the container has already installed dependencies or built artifacts that the next step needs. If the PTY session has closed, amux falls back to a new container and shows a status message.
+
+If the next step requires a **different agent** than the current step, the **↓** option is unavailable. In the TUI it renders greyed out with the message:
+
+```
+Next step uses agent 'codex'; cannot reuse current 'claude' container.
+```
+
+In command mode, the "same container" prompt is skipped entirely and the explanation is printed instead. Use **→** (new container) to advance, which always works regardless of agent.
 
 ### Manual vs. automatic opening
 
@@ -264,6 +328,17 @@ Steps that share the same `Depends-on` set form a **parallel group**. amux execu
 |-----------|-----------|
 | Cycle in `Depends-on` graph | Error before any agent runs |
 | Unknown `Depends-on` step name | Error at parse time |
+| Unknown agent name in `Agent:` field | Error at parse time, before any containers run |
+| `Agent:` field placed after `Prompt:` | Treated as prompt text, not a directive |
+| Missing agent image at workflow start | Pre-flight prompt: build it, fall back to default, or abort |
+| Agent Dockerfile download fails during pre-flight | Error surfaced; workflow does not start |
+| Agent image build fails during pre-flight | Error surfaced; partial Dockerfile removed; workflow does not start |
+| `--agent` flag + step with explicit `Agent:` field | Step's `Agent:` directive wins; `--agent` is only the default for unspecified steps |
+| All steps specify non-default agents | Pre-flight still runs for each; default fallback offered only if setup is declined |
+| Parallel steps with different agents | Each step runs in its own container — no cross-step sharing |
+| Resume with a different `--agent` flag | Warning printed; persisted per-step agent assignments take precedence |
+| Current step and next step use the same agent | "Same container" (**↓**) option available as usual |
+| Current step and next step use different agents | "Same container" option greyed out (TUI) or skipped (CLI) with explanation |
 | Empty workflow file | Rejected with a helpful message |
 | Work item file not found | Error before loading the workflow |
 | Workflow file not found / unreadable | Clear error with the file path |

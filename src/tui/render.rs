@@ -1069,6 +1069,31 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
                 input
             ),
         ),
+        Dialog::AgentSetupConfirm { agent, default_agent } => (
+            " Agent Setup Required ",
+            if agent != default_agent {
+                format!(
+                    "  Workflow step requires the '{}' agent, but its Dockerfile is not present.\n\
+                     \n\
+                     Download the Dockerfile template from GitHub and build the agent image?\n\
+                     \n\
+                     [y/Enter] Yes, download and build\n  \
+                     [f]       Use '{}' instead (default agent)\n  \
+                     [n/Esc]   No, cancel workflow  ",
+                    agent, default_agent
+                )
+            } else {
+                format!(
+                    "  Workflow step requires the '{}' agent, but its Dockerfile is not present.\n\
+                     \n\
+                     Download the Dockerfile template from GitHub and build the agent image?\n\
+                     \n\
+                     [y/Enter] Yes, download and build\n  \
+                     [n/Esc]   No, cancel workflow  ",
+                    agent
+                )
+            },
+        ),
         Dialog::None => return,
         // NewInterviewSummary is handled by the early return above — this arm is unreachable.
         Dialog::NewInterviewSummary { .. } => return,
@@ -1807,6 +1832,7 @@ fn build_workflow_columns(wf: &WorkflowState) -> Vec<Vec<String>> {
             name: s.name.clone(),
             depends_on: s.depends_on.clone(),
             prompt_template: String::new(),
+            agent: None,
         }).collect::<Vec<_>>(),
     );
 
@@ -2533,6 +2559,7 @@ mod tests {
                 prompt_template: "Plan the work.".to_string(),
                 status: StepStatus::Done,
                 container_id: None,
+                agent: None,
             },
             WorkflowStepState {
                 name: "implement".to_string(),
@@ -2540,6 +2567,7 @@ mod tests {
                 prompt_template: "Implement it.".to_string(),
                 status: StepStatus::Running,
                 container_id: Some("abc123".to_string()),
+                agent: None,
             },
             WorkflowStepState {
                 name: "review".to_string(),
@@ -2547,6 +2575,7 @@ mod tests {
                 prompt_template: "Review the changes.".to_string(),
                 status: StepStatus::Pending,
                 container_id: None,
+                agent: None,
             },
         ];
 
@@ -2595,6 +2624,7 @@ mod tests {
                 prompt_template: String::new(),
                 status: StepStatus::Pending,
                 container_id: None,
+                agent: None,
             },
             WorkflowStepState {
                 name: "b".to_string(),
@@ -2602,6 +2632,7 @@ mod tests {
                 prompt_template: String::new(),
                 status: StepStatus::Pending,
                 container_id: None,
+                agent: None,
             },
         ];
         let wf_linear = WorkflowState {
@@ -2622,6 +2653,7 @@ mod tests {
                 prompt_template: String::new(),
                 status: StepStatus::Pending,
                 container_id: None,
+                agent: None,
             },
             WorkflowStepState {
                 name: "b".to_string(),
@@ -2629,6 +2661,7 @@ mod tests {
                 prompt_template: String::new(),
                 status: StepStatus::Pending,
                 container_id: None,
+                agent: None,
             },
             WorkflowStepState {
                 name: "c".to_string(),
@@ -2636,6 +2669,7 @@ mod tests {
                 prompt_template: String::new(),
                 status: StepStatus::Pending,
                 container_id: None,
+                agent: None,
             },
         ];
         let wf_parallel = WorkflowState {
@@ -2740,6 +2774,7 @@ mod tests {
                 name: "plan".to_string(),
                 depends_on: vec![],
                 prompt_template: "do it".to_string(),
+                agent: None,
             }],
             "hash".to_string(),
             1,

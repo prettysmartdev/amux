@@ -32,6 +32,11 @@ pub struct WorkflowStepState {
     pub status: StepStatus,
     /// Most-recent container ID used for this step (overwritten on retry).
     pub container_id: Option<String>,
+    /// Optional agent override resolved at workflow start time.
+    /// `None` means use the default agent. Serialized to JSON with `serde(default)`
+    /// so existing state files without this field deserialize without error.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 // ─── Workflow state ───────────────────────────────────────────────────────────
@@ -68,6 +73,7 @@ impl WorkflowState {
                 status: StepStatus::Pending,
                 container_id: None,
                 name: s.name,
+                agent: s.agent,
             })
             .collect();
 
@@ -101,6 +107,7 @@ impl WorkflowState {
                 name: s.name.clone(),
                 depends_on: s.depends_on.clone(),
                 prompt_template: s.prompt_template.clone(),
+                agent: s.agent.clone(),
             })
             .collect();
 
@@ -189,6 +196,13 @@ pub fn load_workflow_file(path: &Path) -> Result<(String, Option<String>, Vec<Wo
     let (title, steps) = parse_workflow(&content)?;
     validate_references(&steps)?;
     detect_cycle(&steps)?;
+    // Validate any per-step agent names.
+    for step in &steps {
+        if let Some(ref agent_name) = step.agent {
+            crate::cli::validate_agent_name(agent_name)
+                .with_context(|| format!("Invalid agent name in step '{}'", step.name))?;
+        }
+    }
     Ok((hash, title, steps))
 }
 
@@ -335,6 +349,7 @@ mod tests {
             name: name.to_string(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             prompt_template: prompt.to_string(),
+            agent: None,
         }
     }
 
@@ -544,5 +559,101 @@ mod tests {
     #[test]
     fn sha256_hex_correct_length() {
         assert_eq!(sha256_hex("test").len(), 64);
+    }
+
+    // ─── Agent propagation tests (work item 0052) ─────────────────────────────
+
+    #[test]
+    fn workflow_state_new_propagates_agent_from_steps() {
+        let steps = vec![
+            WorkflowStep {
+                name: "plan".to_string(),
+                depends_on: vec![],
+                prompt_template: "p".to_string(),
+                agent: Some("codex".to_string()),
+            },
+            WorkflowStep {
+                name: "impl".to_string(),
+                depends_on: vec!["plan".to_string()],
+                prompt_template: "i".to_string(),
+                agent: None,
+            },
+        ];
+        let state = WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
+        assert_eq!(
+            state.get_step("plan").unwrap().agent,
+            Some("codex".to_string()),
+            "agent must be propagated from WorkflowStep to WorkflowStepState"
+        );
+        assert!(
+            state.get_step("impl").unwrap().agent.is_none(),
+            "None agent must also be preserved"
+        );
+    }
+
+    #[test]
+    fn workflow_state_serde_round_trip_preserves_agent() {
+        let steps = vec![WorkflowStep {
+            name: "plan".to_string(),
+            depends_on: vec![],
+            prompt_template: "p".to_string(),
+            agent: Some("gemini".to_string()),
+        }];
+        let state = WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: WorkflowState = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.get_step("plan").unwrap().agent,
+            Some("gemini".to_string()),
+            "agent field must survive a serde round-trip"
+        );
+    }
+
+    #[test]
+    fn workflow_state_serde_old_json_without_agent_deserializes_ok() {
+        // State JSON produced before the `agent` field was added must deserialize
+        // without error thanks to `#[serde(default)]` on `WorkflowStepState.agent`.
+        let json = r#"{
+            "title": null,
+            "steps": [
+                {
+                    "name": "plan",
+                    "depends_on": [],
+                    "prompt_template": "p",
+                    "status": "Pending",
+                    "container_id": null
+                }
+            ],
+            "workflow_hash": "abc123",
+            "work_item": 1,
+            "workflow_name": "wf"
+        }"#;
+        let state: WorkflowState =
+            serde_json::from_str(json).expect("old state JSON without agent field must deserialize");
+        assert!(
+            state.get_step("plan").unwrap().agent.is_none(),
+            "missing agent field must default to None"
+        );
+    }
+
+    #[test]
+    fn load_workflow_file_invalid_agent_returns_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let wf_path = tmp.path().join("test.md");
+        std::fs::write(
+            &wf_path,
+            "## Step: plan\nAgent: unknown-bot\nPrompt: Do the thing.\n",
+        )
+        .unwrap();
+        let result = load_workflow_file(&wf_path);
+        assert!(
+            result.is_err(),
+            "load_workflow_file must return an error for an invalid agent name"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("unknown-bot") || msg.contains("unknown agent") || msg.contains("plan"),
+            "error message should reference the invalid agent name or step; got: {msg}"
+        );
     }
 }

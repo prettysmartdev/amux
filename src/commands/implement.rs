@@ -1,4 +1,4 @@
-use crate::commands::agent::{append_autonomous_flags, run_agent_with_sink};
+use crate::commands::agent::{append_autonomous_flags, ensure_agent_available, prepare_agent_cli, run_agent_with_sink};
 use crate::commands::auth::resolve_auth;
 use crate::commands::init_flow::find_git_root;
 use crate::commands::output::OutputSink;
@@ -6,6 +6,7 @@ use crate::config::{effective_env_passthrough, effective_yolo_disallowed_tools, 
 use crate::runtime::{generate_container_name, HostSettings};
 use crate::workflow::{self, StepStatus, WorkflowState};
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Parse a work item string like "0001" or "1" into a u32.
@@ -157,20 +158,38 @@ pub async fn run(
         return result;
     }
 
-    let mut entrypoint = if non_interactive {
-        agent_entrypoint_non_interactive(&agent, work_item, plan)
+    // Ensure the requested agent is available; offer fallback to default if setup is declined.
+    let effective_agent =
+        prepare_agent_cli(&git_root, &agent, &config_agent, &*runtime).await?;
+
+    // Recompute credentials and env_vars if fallback changed the agent.
+    let (final_env_vars, final_host_settings) = if effective_agent != agent {
+        let new_creds = crate::commands::auth::resolve_auth(&git_root, &effective_agent)?;
+        let new_hs = crate::passthrough::passthrough_for_agent(&effective_agent).prepare_host_settings();
+        let mut new_ev = new_creds.env_vars.clone();
+        for name in &passthrough_names {
+            if new_ev.iter().any(|(k, _)| k == name) { continue; }
+            if let Ok(val) = std::env::var(name) { new_ev.push((name.clone(), val)); }
+        }
+        (new_ev, new_hs)
     } else {
-        agent_entrypoint(&agent, work_item, plan)
+        (env_vars, host_settings)
+    };
+
+    let mut entrypoint = if non_interactive {
+        agent_entrypoint_non_interactive(&effective_agent, work_item, plan)
+    } else {
+        agent_entrypoint(&effective_agent, work_item, plan)
     };
 
     let disallowed_tools = if yolo || auto { effective_yolo_disallowed_tools(&git_root) } else { vec![] };
-    append_autonomous_flags(&mut entrypoint, &agent, yolo, auto, &disallowed_tools);
+    append_autonomous_flags(&mut entrypoint, &effective_agent, yolo, auto, &disallowed_tools);
 
     let work_item_path = find_work_item(&git_root, work_item)?;
     let status = format!(
         "Implementing work item {:04} with agent '{}': {}",
         work_item,
-        &agent,
+        &effective_agent,
         work_item_path.display()
     );
 
@@ -179,13 +198,13 @@ pub async fn run(
         &status,
         &OutputSink::Stdout,
         Some(mount_path.clone()),
-        env_vars,
+        final_env_vars,
         non_interactive,
-        host_settings.as_ref(),
+        final_host_settings.as_ref(),
         allow_docker,
         mount_ssh,
         None,
-        agent_override.clone(),
+        Some(effective_agent),
         &*runtime,
     )
     .await;
@@ -499,7 +518,7 @@ async fn run_workflow(
 
     let mut state = if state_path.exists() {
         let existing = workflow::load_workflow_state(&state_path)?;
-        resolve_resume_or_restart(existing, &hash, &steps, work_item, &workflow_name, &state_path)?
+        resolve_resume_or_restart(existing, &hash, &steps, work_item, &workflow_name, &state_path, &agent)?
     } else {
         WorkflowState::new(title.clone(), steps.clone(), hash.clone(), work_item, workflow_name.clone())
     };
@@ -519,6 +538,94 @@ async fn run_workflow(
     let work_item_path = find_work_item(&PathBuf::from(git_root), work_item)?;
     let work_item_content = std::fs::read_to_string(&work_item_path)
         .with_context(|| format!("Cannot read work item: {}", work_item_path.display()))?;
+
+    // ── Pre-flight: validate all required agents ──────────────────────────────
+    // Collect the distinct effective agent names required across all steps.
+    let mut required_agents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for step in &state.steps {
+        let effective = step.agent.as_deref().unwrap_or(agent);
+        required_agents.insert(effective.to_string());
+    }
+
+    // For each required agent, ensure it is available (Dockerfile + image).
+    // Track agents the user declined to set up so we can offer fallback.
+    let mut declined_agents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for agent_name in &required_agents {
+        let available = ensure_agent_available(
+            git_root,
+            agent_name,
+            &OutputSink::Stdout,
+            runtime,
+            |name| {
+                use std::io::{BufRead, Write};
+                print!(
+                    "Agent '{}' has no Dockerfile. Download and build it? [y/N]: ",
+                    name
+                );
+                std::io::stdout().flush()?;
+                let stdin = std::io::stdin();
+                let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+                Ok(answer.trim().eq_ignore_ascii_case("y"))
+            },
+        )
+        .await;
+        match available {
+            Ok(false) => {
+                declined_agents.insert(agent_name.clone());
+            }
+            Err(e) => {
+                eprintln!("Warning: could not set up agent '{}': {}", agent_name, e);
+                declined_agents.insert(agent_name.clone());
+            }
+            Ok(true) => {}
+        }
+    }
+
+    // For each declined agent, ask once whether to fall back to the default.
+    // Build a map: declined_agent → resolved_fallback_agent.
+    let mut fallback_map: HashMap<String, String> = HashMap::new();
+    {
+        use std::io::{BufRead, Write};
+        // Collect unique declined agents that differ from the default.
+        let mut unique_declined: Vec<String> = declined_agents.iter().cloned().collect();
+        unique_declined.sort();
+        for declined in &unique_declined {
+            if declined.as_str() == agent {
+                // Default agent itself was declined — abort.
+                bail!(
+                    "Aborting workflow: the default agent '{}' is not available.",
+                    agent
+                );
+            }
+            print!(
+                "Use the default agent ('{}') for steps that specify '{}'? [y/N]: ",
+                agent, declined
+            );
+            std::io::stdout().flush()?;
+            let stdin = std::io::stdin();
+            let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+            if answer.trim().eq_ignore_ascii_case("y") {
+                fallback_map.insert(declined.clone(), agent.to_string());
+            } else {
+                bail!(
+                    "Aborting workflow: agent '{}' is not available and no fallback was accepted.",
+                    declined
+                );
+            }
+        }
+    }
+
+    // Build the per-step agent map: step_name → effective agent name.
+    let mut step_agent_map: HashMap<String, String> = HashMap::new();
+    for step in &state.steps {
+        let desired = step.agent.as_deref().unwrap_or(agent);
+        let effective = if let Some(fallback) = fallback_map.get(desired) {
+            fallback.clone()
+        } else {
+            desired.to_string()
+        };
+        step_agent_map.insert(step.name.clone(), effective);
+    }
 
     // Handle any previously Running steps (from an interrupted run).
     let interrupted = state.interrupted_running_steps();
@@ -561,6 +668,12 @@ async fn run_workflow(
 
         println!("\n─── Step: {} ───", step_name);
 
+        // Resolve the effective agent for this step.
+        let step_agent = step_agent_map
+            .get(&step_name)
+            .map(String::as_str)
+            .unwrap_or(agent);
+
         // Substitute template variables in the prompt.
         let prompt = workflow::substitute_prompt(
             &step_state.prompt_template,
@@ -569,12 +682,12 @@ async fn run_workflow(
         );
 
         let mut entrypoint =
-            workflow_step_entrypoint(agent, &prompt, non_interactive, plan);
+            workflow_step_entrypoint(step_agent, &prompt, non_interactive, plan);
         let disallowed_tools = if yolo || auto { effective_yolo_disallowed_tools(git_root) } else { vec![] };
-        append_autonomous_flags(&mut entrypoint, agent, yolo, auto, &disallowed_tools);
+        append_autonomous_flags(&mut entrypoint, step_agent, yolo, auto, &disallowed_tools);
         let status_msg = format!(
             "Workflow step '{}' — work item {:04} with agent '{}'",
-            step_name, work_item, agent
+            step_name, work_item, step_agent
         );
 
         // Generate a container name and record it for state persistence.
@@ -596,7 +709,7 @@ async fn run_workflow(
             allow_docker,
             mount_ssh,
             Some(container_name),
-            None,
+            Some(step_agent.to_string()),
             runtime,
         )
         .await;
@@ -653,6 +766,9 @@ async fn run_workflow(
 /// Resolve whether to resume an existing workflow state or start fresh.
 ///
 /// Handles hash mismatch detection and interrupted-run step recovery.
+/// `default_agent` is the CLI's current effective agent (from --agent flag or config).
+/// A warning is printed when resuming if any persisted step specifies an agent that
+/// differs from `default_agent`, so the user knows per-step overrides are in effect.
 fn resolve_resume_or_restart(
     existing: WorkflowState,
     new_hash: &str,
@@ -660,6 +776,7 @@ fn resolve_resume_or_restart(
     work_item: u32,
     workflow_name: &str,
     state_path: &Path,
+    default_agent: &str,
 ) -> Result<WorkflowState> {
     use std::io::{BufRead, Write};
 
@@ -719,7 +836,38 @@ fn resolve_resume_or_restart(
     }
 
     println!("Resuming previous workflow run.");
+    warn_resume_agent_overrides(&existing, default_agent);
     Ok(existing)
+}
+
+/// Print a warning when resuming if any persisted step specifies a different agent
+/// than the current CLI default. This alerts the user that per-step `Agent:` overrides
+/// will take precedence over the `--agent` flag for those steps.
+fn warn_resume_agent_overrides(state: &WorkflowState, default_agent: &str) {
+    let overridden: Vec<(&str, &str)> = state
+        .steps
+        .iter()
+        .filter(|s| {
+            s.agent
+                .as_deref()
+                .map(|a| a != default_agent)
+                .unwrap_or(false)
+        })
+        .map(|s| (s.name.as_str(), s.agent.as_deref().unwrap()))
+        .collect();
+
+    if overridden.is_empty() {
+        return;
+    }
+
+    println!(
+        "Note: the following steps specify an agent that differs from the current default ('{}'):",
+        default_agent
+    );
+    for (name, agent) in &overridden {
+        println!("  step '{}' → agent '{}'", name, agent);
+    }
+    println!("Per-step agent overrides take precedence over the --agent flag.");
 }
 
 // ─── Worktree helpers (command mode) ─────────────────────────────────────────
@@ -1097,5 +1245,107 @@ mod tests {
         let (wt, msg) = apply_worktree_implication(false, false, Some("steps.md"), false);
         assert!(!wt, "worktree must not be set without --yolo or --auto");
         assert!(!msg);
+    }
+
+    // ─── Workflow pre-flight: per-step agent resolution ───────────────────────
+    //
+    // The full run_workflow() function requires stdin and real file I/O, so we
+    // test the pure pre-flight logic that builds the per-step agent map and the
+    // fallback map. These mirror the cases documented in work item 0052.
+
+    /// Build a minimal WorkflowState where every step carries its specified agent.
+    fn make_state_with_agents(step_agents: &[(&str, Option<&str>)]) -> crate::workflow::WorkflowState {
+        let steps: Vec<crate::workflow::parser::WorkflowStep> = step_agents
+            .iter()
+            .map(|(name, agent)| crate::workflow::parser::WorkflowStep {
+                name: name.to_string(),
+                depends_on: vec![],
+                prompt_template: "p".to_string(),
+                agent: agent.map(|a| a.to_string()),
+            })
+            .collect();
+        crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into())
+    }
+
+    /// Compute the per-step agent map given a state, default agent, and fallback map.
+    /// Mirrors the logic inlined in run_workflow().
+    fn compute_step_agent_map(
+        state: &crate::workflow::WorkflowState,
+        default_agent: &str,
+        fallback_map: &std::collections::HashMap<String, String>,
+    ) -> std::collections::HashMap<String, String> {
+        state
+            .steps
+            .iter()
+            .map(|s| {
+                let desired = s.agent.as_deref().unwrap_or(default_agent);
+                let effective = fallback_map
+                    .get(desired)
+                    .cloned()
+                    .unwrap_or_else(|| desired.to_string());
+                (s.name.clone(), effective)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn preflight_all_agents_available_uses_per_step_agents() {
+        // All steps have explicit agents; no agent is declined.
+        let state = make_state_with_agents(&[("plan", Some("codex")), ("impl", Some("claude"))]);
+        let fallback: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let map = compute_step_agent_map(&state, "claude", &fallback);
+
+        assert_eq!(map.get("plan").map(String::as_str), Some("codex"));
+        assert_eq!(map.get("impl").map(String::as_str), Some("claude"));
+    }
+
+    #[test]
+    fn preflight_step_without_agent_uses_default() {
+        // Steps without an Agent: field fall back to the workflow default.
+        let state = make_state_with_agents(&[("plan", None), ("impl", Some("codex"))]);
+        let fallback: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let map = compute_step_agent_map(&state, "claude", &fallback);
+
+        assert_eq!(map.get("plan").map(String::as_str), Some("claude"),
+            "step without Agent: must use the workflow default agent");
+        assert_eq!(map.get("impl").map(String::as_str), Some("codex"));
+    }
+
+    #[test]
+    fn preflight_declined_agent_replaced_by_fallback() {
+        // When the user declines to set up "codex", all steps requesting it
+        // must be redirected to the fallback (default) agent.
+        let state = make_state_with_agents(&[("plan", Some("codex")), ("impl", None)]);
+        let mut fallback = std::collections::HashMap::new();
+        // Simulate user accepting the fallback: codex → claude.
+        fallback.insert("codex".to_string(), "claude".to_string());
+        let map = compute_step_agent_map(&state, "claude", &fallback);
+
+        assert_eq!(
+            map.get("plan").map(String::as_str),
+            Some("claude"),
+            "declined codex must be replaced by the accepted fallback"
+        );
+        assert_eq!(
+            map.get("impl").map(String::as_str),
+            Some("claude"),
+            "step with no Agent: field must still use the default"
+        );
+    }
+
+    #[test]
+    fn preflight_multiple_steps_different_agents_no_fallback() {
+        // Three steps, three different agents, none declined.
+        let state = make_state_with_agents(&[
+            ("a", Some("claude")),
+            ("b", Some("codex")),
+            ("c", Some("gemini")),
+        ]);
+        let fallback: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let map = compute_step_agent_map(&state, "claude", &fallback);
+
+        assert_eq!(map.get("a").map(String::as_str), Some("claude"));
+        assert_eq!(map.get("b").map(String::as_str), Some("codex"));
+        assert_eq!(map.get("c").map(String::as_str), Some("gemini"));
     }
 }

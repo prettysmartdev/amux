@@ -240,6 +240,13 @@ pub enum Dialog {
         dir: String,
         input: String,
     },
+    /// Agent setup: agent Dockerfile is missing — ask whether to download and build it.
+    AgentSetupConfirm {
+        /// The agent name that needs setup.
+        agent: String,
+        /// The configured default agent name, used to offer a fallback when the user declines.
+        default_agent: String,
+    },
 }
 
 /// Tracks which command is waiting for dialog answers (mount scope, auth).
@@ -342,6 +349,8 @@ pub enum AuditPhase {
     InitAuditPty,
     /// `init` post-audit text task is running.
     InitPostAudit,
+    /// An agent Dockerfile is being downloaded and built; re-launch pending command on completion.
+    AgentSetupBuild,
 }
 
 /// State of the container overlay window.
@@ -561,6 +570,15 @@ pub struct TabState {
     pub workflow_current_step: Option<String>,
     /// Git root path captured when the workflow was launched (needed for state persistence).
     pub workflow_git_root: Option<PathBuf>,
+    /// Resolved per-step agent map: step_name → effective agent name.
+    /// Built during workflow initialization using per-step `Agent:` fields and the
+    /// config default. Used to determine "same container" eligibility between steps.
+    pub workflow_step_agents: std::collections::HashMap<String, String>,
+    /// Fallback decisions made during workflow pre-flight: declined_agent → default_agent.
+    /// When `AgentSetupConfirm` is declined for a non-default agent, the user is offered
+    /// a fallback to the default; accepted fallbacks are stored here so pre-flight can
+    /// substitute the default for all steps that referenced the declined agent.
+    pub workflow_agent_fallbacks: std::collections::HashMap<String, String>,
     /// Set to `true` once the `WorkflowControlBoard` dialog has been auto-opened for the
     /// current stuck episode, preventing it from re-opening on every subsequent tick.
     /// Reset to `false` by `acknowledge_stuck()` and `finish_command()`.
@@ -680,6 +698,8 @@ impl TabState {
             workflow: None,
             workflow_current_step: None,
             workflow_git_root: None,
+            workflow_step_agents: std::collections::HashMap::new(),
+            workflow_agent_fallbacks: std::collections::HashMap::new(),
             workflow_stuck_dialog_opened: false,
             workflow_stuck_dialog_dismissed_at: None,
             worktree_branch: None,
@@ -1048,6 +1068,27 @@ impl TabState {
         self.dialog = Dialog::None;
         self.workflow_stuck_dialog_opened = false;
         self.workflow_stuck_dialog_dismissed_at = Some(Instant::now());
+    }
+
+    /// Returns `Some(next_agent)` when the next ready step uses a different agent
+    /// than the currently running step, making "continue in same container" invalid.
+    /// Returns `None` when it is safe to reuse the container (same agent or no next step).
+    pub fn next_step_different_agent(&self) -> Option<String> {
+        let current_step = self.workflow_current_step.as_deref()?;
+        let current_agent = self.workflow_step_agents.get(current_step)?;
+
+        let wf = self.workflow.as_ref()?;
+        let mut wf_clone = wf.clone();
+        wf_clone.set_status(current_step, crate::workflow::StepStatus::Done);
+        let next_ready = wf_clone.next_ready();
+        let next_step = next_ready.first()?;
+
+        let next_agent = self.workflow_step_agents.get(next_step.as_str())?;
+        if next_agent != current_agent {
+            Some(next_agent.clone())
+        } else {
+            None
+        }
     }
 
     /// Returns `true` if the currently running workflow step is the last one —
@@ -2798,6 +2839,85 @@ mod tests {
         assert!(
             app.tabs[1].yolo_countdown_started_at.is_none(),
             "yolo_countdown_started_at must be cleared when the tab is no longer stuck"
+        );
+    }
+
+    // ─── next_step_different_agent tests (work item 0052) ────────────────────
+
+    /// Build a two-step WorkflowState (a → b) from scratch.
+    fn make_two_step_workflow() -> crate::workflow::WorkflowState {
+        let steps = vec![
+            crate::workflow::parser::WorkflowStep {
+                name: "a".to_string(),
+                depends_on: vec![],
+                prompt_template: "Step A".to_string(),
+                agent: None,
+            },
+            crate::workflow::parser::WorkflowStep {
+                name: "b".to_string(),
+                depends_on: vec!["a".to_string()],
+                prompt_template: "Step B".to_string(),
+                agent: None,
+            },
+        ];
+        crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into())
+    }
+
+    #[test]
+    fn next_step_different_agent_returns_none_when_same_agent() {
+        let mut tab = new_tab();
+        let wf = make_two_step_workflow();
+        tab.workflow = Some(wf);
+        tab.workflow_current_step = Some("a".to_string());
+        // Both steps use the same agent.
+        tab.workflow_step_agents.insert("a".to_string(), "claude".to_string());
+        tab.workflow_step_agents.insert("b".to_string(), "claude".to_string());
+
+        let result = tab.next_step_different_agent();
+        assert!(
+            result.is_none(),
+            "next_step_different_agent must return None when both steps use the same agent; got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn next_step_different_agent_returns_next_agent_when_different() {
+        let mut tab = new_tab();
+        let wf = make_two_step_workflow();
+        tab.workflow = Some(wf);
+        tab.workflow_current_step = Some("a".to_string());
+        // Steps use different agents.
+        tab.workflow_step_agents.insert("a".to_string(), "claude".to_string());
+        tab.workflow_step_agents.insert("b".to_string(), "codex".to_string());
+
+        let result = tab.next_step_different_agent();
+        assert_eq!(
+            result,
+            Some("codex".to_string()),
+            "next_step_different_agent must return the next step's agent when it differs"
+        );
+    }
+
+    #[test]
+    fn next_step_different_agent_returns_none_when_no_next_step() {
+        let mut tab = new_tab();
+        // Single-step workflow — no next step after "solo".
+        let steps = vec![crate::workflow::parser::WorkflowStep {
+            name: "solo".to_string(),
+            depends_on: vec![],
+            prompt_template: "Only step".to_string(),
+            agent: None,
+        }];
+        let wf = crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
+        tab.workflow = Some(wf);
+        tab.workflow_current_step = Some("solo".to_string());
+        tab.workflow_step_agents.insert("solo".to_string(), "claude".to_string());
+
+        let result = tab.next_step_different_agent();
+        assert!(
+            result.is_none(),
+            "next_step_different_agent must return None when there is no next step"
         );
     }
 }

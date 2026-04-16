@@ -5,24 +5,220 @@ use crate::runtime::{agent_image_tag, project_image_tag, HostSettings};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use dirs;
+use reqwest;
+
+/// GitHub raw URL template for per-agent Dockerfile downloads.
+/// Each entry: (agent_name, dockerfile_url)
+static AGENT_DOCKERFILE_URLS: &[(&str, &str)] = &[
+    ("claude",    "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates/Dockerfile.claude"),
+    ("codex",     "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates/Dockerfile.codex"),
+    ("opencode",  "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates/Dockerfile.opencode"),
+    ("maki",      "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates/Dockerfile.maki"),
+    ("gemini",    "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates/Dockerfile.gemini"),
+];
 
 /// Resolves which Docker image tag and Dockerfile path to use for a given agent.
 ///
-/// - New layout: `.amux/Dockerfile.{agent}` exists → agent image tag + agent dockerfile
-/// - Legacy layout: no agent dockerfile → project image tag + Dockerfile.dev
+/// Always returns agent-specific paths. The Dockerfile may not yet exist (e.g. when
+/// the agent has not been set up yet); callers must check existence before use.
 ///
-/// Returns `(image_tag, dockerfile_path, is_legacy)`.
+/// Returns `(image_tag, dockerfile_path)`.
 pub fn resolve_agent_image_and_dockerfile(
     git_root: &std::path::Path,
     agent_name: &str,
-) -> (String, std::path::PathBuf, bool) {
+) -> (String, std::path::PathBuf) {
     let agent_dockerfile = git_root.join(".amux").join(format!("Dockerfile.{}", agent_name));
+    let agent_tag = agent_image_tag(git_root, agent_name);
+    (agent_tag, agent_dockerfile)
+}
+
+/// Ensure an agent's Dockerfile and image are available, prompting the user to
+/// download and build them if missing.
+///
+/// Returns:
+/// - `Ok(true)`  — the agent is ready (Dockerfile exists or was just created and built).
+/// - `Ok(false)` — the user declined, or a download/build error occurred (error printed via `out`).
+/// - `Err(_)`    — a programming error (e.g. no URL known for the agent name).
+///
+/// `ask_fn` is called with the agent name when the Dockerfile is missing. It
+/// should return `Ok(true)` if the user wants to download and build, `Ok(false)`
+/// to decline.
+pub async fn ensure_agent_available<F>(
+    git_root: &std::path::Path,
+    agent_name: &str,
+    out: &OutputSink,
+    runtime: &dyn crate::runtime::AgentRuntime,
+    ask_fn: F,
+) -> Result<bool>
+where
+    F: FnOnce(&str) -> Result<bool>,
+{
+    ensure_agent_available_inner(git_root, agent_name, out, runtime, ask_fn, AGENT_DOCKERFILE_URLS).await
+}
+
+/// Inner implementation of `ensure_agent_available`, taking an explicit URL map for testability.
+async fn ensure_agent_available_inner<F>(
+    git_root: &std::path::Path,
+    agent_name: &str,
+    out: &OutputSink,
+    runtime: &dyn crate::runtime::AgentRuntime,
+    ask_fn: F,
+    url_map: &[(&str, &str)],
+) -> Result<bool>
+where
+    F: FnOnce(&str) -> Result<bool>,
+{
+    let agent_dockerfile = git_root.join(".amux").join(format!("Dockerfile.{}", agent_name));
+
+    // Dockerfile already exists — agent is available (image may still need building,
+    // but that is handled at launch time).
     if agent_dockerfile.exists() {
-        let agent_tag = agent_image_tag(git_root, agent_name);
-        (agent_tag, agent_dockerfile, false)
+        return Ok(true);
+    }
+
+    // Dockerfile missing — ask the user whether to download and build it.
+    if !ask_fn(agent_name)? {
+        return Ok(false);
+    }
+
+    // Find the download URL for this agent.
+    let url = url_map
+        .iter()
+        .find(|(name, _)| *name == agent_name)
+        .map(|(_, url)| *url)
+        .ok_or_else(|| anyhow::anyhow!(
+            "No Dockerfile template URL known for agent '{}'. \
+             Create .amux/Dockerfile.{} manually.",
+            agent_name, agent_name
+        ))?;
+
+    // Download the Dockerfile template.
+    out.println(format!("Downloading Dockerfile.{}…", agent_name));
+    let client = reqwest::Client::builder()
+        .user_agent("amux")
+        .build()
+        .context("Failed to build HTTP client")?;
+    let resp = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            out.println(format!("Error: failed to download Dockerfile.{}: {}", agent_name, e));
+            return Ok(false);
+        }
+    };
+    if !resp.status().is_success() {
+        out.println(format!(
+            "Error: failed to download Dockerfile.{}: HTTP {} from {}",
+            agent_name, resp.status(), url
+        ));
+        return Ok(false);
+    }
+    let content = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            out.println(format!("Error: failed to read Dockerfile.{} response body: {}", agent_name, e));
+            return Ok(false);
+        }
+    };
+
+    // Save the Dockerfile.
+    if let Some(parent) = agent_dockerfile.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Cannot create .amux directory: {}", parent.display()))?;
+    }
+    std::fs::write(&agent_dockerfile, &content)
+        .with_context(|| format!("Cannot write {}", agent_dockerfile.display()))?;
+    out.println(format!("Saved {}", agent_dockerfile.display()));
+
+    // Build the agent image.
+    let project_tag = project_image_tag(git_root);
+    if !runtime.image_exists(&project_tag) {
+        anyhow::bail!(
+            "Project base image {} is not built. Run `amux ready` first.",
+            project_tag
+        );
+    }
+    let agent_tag = agent_image_tag(git_root, agent_name);
+    out.println(format!("Building {}…", agent_tag));
+    let git_root_str = git_root.to_str().unwrap_or(".");
+    let out_clone = out.clone();
+    let build_result = runtime.build_image_streaming(
+        &agent_tag,
+        &agent_dockerfile,
+        std::path::Path::new(git_root_str),
+        false,
+        &mut |line| { out_clone.println(line); },
+    );
+    match build_result {
+        Ok(_) => {
+            out.println(format!("Agent image {} built successfully.", agent_tag));
+            Ok(true)
+        }
+        Err(e) => {
+            out.println(format!("Error: failed to build agent image {}: {}", agent_tag, e));
+            // Build failed — remove the Dockerfile so we don't leave a partial state.
+            let _ = std::fs::remove_file(&agent_dockerfile);
+            Ok(false)
+        }
+    }
+}
+
+/// CLI mode: ensure the requested agent is available, prompting via stdin.
+///
+/// If the agent Dockerfile is missing and the user declines to download/build it,
+/// offers to fall back to `config_default` instead. Returns the effective agent
+/// name to use (may equal `agent` or `config_default`).
+pub async fn prepare_agent_cli(
+    git_root: &std::path::Path,
+    agent: &str,
+    config_default: &str,
+    runtime: &dyn crate::runtime::AgentRuntime,
+) -> Result<String> {
+    let available = ensure_agent_available(
+        git_root,
+        agent,
+        &OutputSink::Stdout,
+        runtime,
+        |name| {
+            use std::io::{BufRead, Write};
+            print!(
+                "Agent '{}' has no Dockerfile. Download and build it? [y/N]: ",
+                name
+            );
+            std::io::stdout().flush()?;
+            let stdin = std::io::stdin();
+            let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+            Ok(answer.trim().eq_ignore_ascii_case("y"))
+        },
+    )
+    .await?;
+
+    if available {
+        return Ok(agent.to_string());
+    }
+
+    // User declined (or setup failed). If the requested agent is already the configured
+    // default, there is no fallback — abort.
+    if agent == config_default {
+        anyhow::bail!(
+            "Agent '{}' is not available and no fallback is possible \
+             (it is the configured default). Run `amux ready` to build it.",
+            agent
+        );
+    }
+
+    // Offer to fall back to the configured default agent.
+    use std::io::{BufRead, Write};
+    print!("Use the default agent ('{}') instead? [y/N]: ", config_default);
+    std::io::stdout().flush()?;
+    let stdin = std::io::stdin();
+    let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+    if answer.trim().eq_ignore_ascii_case("y") {
+        Ok(config_default.to_string())
     } else {
-        let project_tag = project_image_tag(git_root);
-        (project_tag, git_root.join("Dockerfile.dev"), true)
+        anyhow::bail!(
+            "Agent '{}' is not available and fallback to '{}' was declined.",
+            agent, config_default
+        );
     }
 }
 
@@ -104,23 +300,24 @@ pub async fn run_agent_with_sink(
     };
 
     // Determine which image to use and the dockerfile for USER detection.
-    // Layout selection is based on file existence; image availability is checked below.
     let agent_dockerfile = git_root.join(".amux").join(format!("Dockerfile.{}", agent));
-    let (image_tag, dockerfile_for_user, is_legacy) = if agent_dockerfile.exists() {
-        let agent_tag = agent_image_tag(&git_root, &agent);
-        (agent_tag, agent_dockerfile.clone(), false)
-    } else {
-        let project_tag = project_image_tag(&git_root);
-        (project_tag, git_root.join("Dockerfile.dev"), true)
-    };
+    if !agent_dockerfile.exists() {
+        anyhow::bail!(
+            "Agent '{}' is not set up: .amux/Dockerfile.{} not found. \
+             Run `amux ready` to build agent images, or use `--agent <name>` \
+             to request a different agent.",
+            agent, agent
+        );
+    }
+    let image_tag = agent_image_tag(&git_root, &agent);
 
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
-    // Detect the last USER directive in the agent dockerfile (or project dockerfile for legacy)
+    // Detect the last USER directive in the agent dockerfile
     // and update settings mounts to target the correct home directory inside the container.
     let modified_settings: Option<crate::runtime::HostSettings> = host_settings.and_then(|settings| {
         let mut new_settings = settings.clone_view();
-        if let Some(msg) = crate::runtime::apply_dockerfile_user(&mut new_settings, &dockerfile_for_user) {
+        if let Some(msg) = crate::runtime::apply_dockerfile_user(&mut new_settings, &agent_dockerfile) {
             out.println(msg);
             Some(new_settings)
         } else {
@@ -143,43 +340,28 @@ pub async fn run_agent_with_sink(
     );
     out.println(format!("$ {} {}", runtime.cli_binary(), display_args.join(" ")));
 
-    // Ensure the required image is available, building it if needed.
-    if !is_legacy {
-        if !runtime.image_exists(&image_tag) {
-            // Agent dockerfile exists but image doesn't — build it (first-run case).
-            let project_tag = project_image_tag(&git_root);
-            if !runtime.image_exists(&project_tag) {
-                anyhow::bail!(
-                    "Agent image {} not found and project base image {} is not built. \
-                     Run `amux ready` first to build both images.",
-                    image_tag, project_tag
-                );
-            }
-            out.println(format!("Agent image {} not found. Building from {}...", image_tag, agent_dockerfile.display()));
-            let git_root_str = git_root.to_str().unwrap().to_string();
-            let out_clone = out.clone();
-            runtime.build_image_streaming(
-                &image_tag,
-                &agent_dockerfile,
-                std::path::Path::new(&git_root_str),
-                false,
-                &mut |line| { out_clone.println(line); },
-            ).context("Failed to build agent image")?;
-            out.println(format!("Agent image {} built successfully.", image_tag));
-        }
-    } else {
-        // Legacy layout: project image must already be built.
-        if !runtime.image_exists(&image_tag) {
+    // Ensure the agent image is available, building it if needed.
+    if !runtime.image_exists(&image_tag) {
+        // Agent dockerfile exists but image doesn't — build it (first-run case).
+        let project_tag = project_image_tag(&git_root);
+        if !runtime.image_exists(&project_tag) {
             anyhow::bail!(
-                "No agent image and no project base image found. \
-                 Run `amux ready` to build the images.",
+                "Agent image {} not found and project base image {} is not built. \
+                 Run `amux ready` first to build both images.",
+                image_tag, project_tag
             );
         }
-        out.println(format!(
-            "DEPRECATION WARNING: .amux/Dockerfile.{} not found. \
-             Falling back to project image. Run `amux ready` to migrate to the modular layout.",
-            agent
-        ));
+        out.println(format!("Agent image {} not found. Building from {}...", image_tag, agent_dockerfile.display()));
+        let git_root_str = git_root.to_str().unwrap().to_string();
+        let out_clone = out.clone();
+        runtime.build_image_streaming(
+            &image_tag,
+            &agent_dockerfile,
+            std::path::Path::new(&git_root_str),
+            false,
+            &mut |line| { out_clone.println(line); },
+        ).context("Failed to build agent image")?;
+        out.println(format!("Agent image {} built successfully.", image_tag));
     }
 
     if !non_interactive {
@@ -301,6 +483,320 @@ pub fn append_autonomous_flags(args: &mut Vec<String>, agent: &str, yolo: bool, 
 mod tests {
     use super::*;
     use tokio::sync::mpsc::unbounded_channel;
+
+    // ─── MockRuntime for ensure_agent_available tests ─────────────────────────
+
+    /// Minimal `AgentRuntime` stub for `ensure_agent_available` unit tests.
+    /// Tracks `build_image_streaming` calls; all container-run methods panic.
+    struct MockRuntime {
+        /// Returned by `image_exists` for every tag query.
+        project_image_exists: bool,
+        /// When `false`, `build_image_streaming` returns an error.
+        builds_succeed: bool,
+        /// Records every image tag passed to `build_image_streaming`.
+        built_tags: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl MockRuntime {
+        /// Runtime where the project base image exists and builds succeed.
+        fn with_project_image() -> Self {
+            Self {
+                project_image_exists: true,
+                builds_succeed: true,
+                built_tags: std::sync::Mutex::new(vec![]),
+            }
+        }
+
+        fn built_tags(&self) -> Vec<String> {
+            self.built_tags.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::runtime::AgentRuntime for MockRuntime {
+        fn is_available(&self) -> bool { true }
+        fn check_socket(&self) -> anyhow::Result<std::path::PathBuf> {
+            Ok(std::path::PathBuf::from("/var/run/mock.sock"))
+        }
+        fn image_exists(&self, _tag: &str) -> bool { self.project_image_exists }
+        fn name(&self) -> &'static str { "mock" }
+        fn cli_binary(&self) -> &'static str { "mock" }
+
+        fn build_image_streaming(
+            &self,
+            tag: &str,
+            _dockerfile: &std::path::Path,
+            _context: &std::path::Path,
+            _no_cache: bool,
+            _on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<String> {
+            self.built_tags.lock().unwrap().push(tag.to_string());
+            if self.builds_succeed {
+                Ok(String::new())
+            } else {
+                anyhow::bail!("mock build failure")
+            }
+        }
+
+        fn run_container(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> anyhow::Result<()> { unreachable!("run_container not expected") }
+
+        fn run_container_captured(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> anyhow::Result<(String, String)> { unreachable!("run_container_captured not expected") }
+
+        fn run_container_at_path(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _entrypoint: &[&str], _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>, _allow_docker: bool,
+            _container_name: Option<&str>,
+        ) -> anyhow::Result<()> { unreachable!() }
+
+        fn run_container_captured_at_path(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _entrypoint: &[&str], _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>, _allow_docker: bool,
+        ) -> anyhow::Result<(String, String)> { unreachable!() }
+
+        fn run_container_detached(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _container_name: Option<&str>, _env_vars: Vec<(String, String)>, _allow_docker: bool,
+            _host_settings: Option<&crate::runtime::HostSettings>,
+        ) -> anyhow::Result<String> { unreachable!() }
+
+        fn start_container(&self, _id: &str) -> anyhow::Result<()> { unreachable!() }
+        fn stop_container(&self, _id: &str) -> anyhow::Result<()> { unreachable!() }
+        fn remove_container(&self, _id: &str) -> anyhow::Result<()> { unreachable!() }
+        fn is_container_running(&self, _id: &str) -> bool { unreachable!() }
+
+        fn find_stopped_container(
+            &self, _name: &str, _image: &str,
+        ) -> Option<crate::runtime::StoppedContainerInfo> { unreachable!() }
+
+        fn list_running_containers_by_prefix(&self, _prefix: &str) -> Vec<String> {
+            unreachable!()
+        }
+
+        fn list_running_containers_with_ids_by_prefix(
+            &self, _prefix: &str,
+        ) -> Vec<(String, String)> { unreachable!() }
+
+        fn get_container_workspace_mount(&self, _name: &str) -> Option<String> { unreachable!() }
+
+        fn query_container_stats(
+            &self, _name: &str,
+        ) -> Option<crate::runtime::ContainerStats> { unreachable!() }
+
+        fn build_run_args_pty(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_run_args_pty_display(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_run_args_pty_at_path(
+            &self, _image: &str, _host_path: &str, _container_path: &str, _working_dir: &str,
+            _entrypoint: &[&str], _env_vars: &[(String, String)],
+            _host_settings: Option<&crate::runtime::HostSettings>, _allow_docker: bool,
+            _container_name: Option<&str>,
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_exec_args_pty(
+            &self, _container_id: &str, _working_dir: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)],
+        ) -> Vec<String> { unreachable!() }
+
+        fn build_run_args_display(
+            &self, _image: &str, _host_path: &str, _entrypoint: &[&str],
+            _env_vars: &[(String, String)], _host_settings: Option<&crate::runtime::HostSettings>,
+            _allow_docker: bool, _container_name: Option<&str>, _ssh_dir: Option<&std::path::Path>,
+        ) -> Vec<String> { unreachable!() }
+    }
+
+    // ─── ensure_agent_available tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ensure_agent_available_returns_true_when_dockerfile_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Create .amux/Dockerfile.codex so the agent is already set up.
+        let amux_dir = tmp.path().join(".amux");
+        std::fs::create_dir_all(&amux_dir).unwrap();
+        std::fs::write(amux_dir.join("Dockerfile.codex"), "FROM ubuntu\n").unwrap();
+
+        let runtime = MockRuntime::with_project_image();
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        let result = ensure_agent_available(
+            tmp.path(),
+            "codex",
+            &sink,
+            &runtime,
+            |_| panic!("ask_fn must not be called when Dockerfile already exists"),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), true, "must return true when Dockerfile already exists");
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_available_returns_false_on_http_connection_failure() {
+        // When the HTTP download fails (connection refused), ensure_agent_available must
+        // return Ok(false) and not leave a partial Dockerfile on disk.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let amux_dir = tmp.path().join(".amux");
+        std::fs::create_dir_all(&amux_dir).unwrap();
+
+        let runtime = MockRuntime::with_project_image();
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        // Port 0 is guaranteed to be unreachable — produces a connection-refused error.
+        let result = ensure_agent_available_inner(
+            tmp.path(),
+            "codex",
+            &sink,
+            &runtime,
+            |_| Ok(true), // user accepts download
+            &[("codex", "http://localhost:0/Dockerfile.codex")],
+        )
+        .await;
+
+        assert!(result.is_ok(), "connection failure must return Ok, not Err; got: {:?}", result);
+        assert_eq!(result.unwrap(), false, "connection failure must return Ok(false)");
+        assert!(
+            !amux_dir.join("Dockerfile.codex").exists(),
+            "no partial Dockerfile must be left on connection failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_available_build_failure_returns_false_and_removes_dockerfile() {
+        // When the image build fails after a successful download, ensure_agent_available
+        // must return Ok(false) and remove the partial Dockerfile from .amux/.
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let amux_dir = tmp.path().join(".amux");
+        std::fs::create_dir_all(&amux_dir).unwrap();
+
+        // Spin up a minimal HTTP server that serves a dummy Dockerfile.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}/Dockerfile.codex", addr);
+
+        let _server = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let body = b"FROM ubuntu:22.04\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.write_all(body).await;
+            }
+        });
+
+        let runtime = MockRuntime {
+            project_image_exists: true,
+            builds_succeed: false,
+            built_tags: std::sync::Mutex::new(vec![]),
+        };
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        let result = ensure_agent_available_inner(
+            tmp.path(),
+            "codex",
+            &sink,
+            &runtime,
+            |_| Ok(true),
+            &[("codex", url.as_str())],
+        )
+        .await;
+
+        assert!(result.is_ok(), "build failure must return Ok, not Err");
+        assert_eq!(result.unwrap(), false, "build failure must return Ok(false)");
+        assert!(
+            !amux_dir.join("Dockerfile.codex").exists(),
+            "partial Dockerfile must be removed on build failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_available_returns_false_when_user_declines() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // No dockerfiles exist.
+
+        let runtime = MockRuntime::with_project_image();
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        let result = ensure_agent_available(
+            tmp.path(),
+            "codex",
+            &sink,
+            &runtime,
+            |_| Ok(false), // user declines
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), false, "must return false when user declines");
+        // No Dockerfile must have been created.
+        assert!(
+            !tmp.path().join(".amux").join("Dockerfile.codex").exists(),
+            "Dockerfile must not be created when user declines"
+        );
+        // No image build must have been triggered.
+        assert_eq!(
+            runtime.built_tags(),
+            Vec::<String>::new(),
+            "build_image_streaming must not be called when user declines"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_available_returns_error_for_unknown_agent_after_accept() {
+        // When the user accepts setup but the agent has no known Dockerfile URL,
+        // the function must return an error describing the problem.
+        let tmp = tempfile::TempDir::new().unwrap();
+        // No dockerfiles exist.
+
+        let runtime = MockRuntime::with_project_image();
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        let result = ensure_agent_available(
+            tmp.path(),
+            "unknown-bot",
+            &sink,
+            &runtime,
+            |_| Ok(true), // user accepts
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "must return an error when no Dockerfile URL is known for the agent"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("unknown-bot"),
+            "error must mention the unknown agent name; got: {msg}"
+        );
+    }
 
     // --- append_autonomous_flags tests ---
 

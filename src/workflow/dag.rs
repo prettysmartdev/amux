@@ -135,6 +135,7 @@ mod tests {
             name: name.to_string(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             prompt_template: String::new(),
+            agent: None,
         }
     }
 
