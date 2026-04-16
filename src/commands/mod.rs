@@ -11,6 +11,7 @@ pub mod new;
 pub mod output;
 pub mod ready;
 pub mod ready_flow;
+pub mod spec;
 pub mod specs;
 pub mod status;
 

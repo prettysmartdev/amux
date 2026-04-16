@@ -47,9 +47,17 @@ After the agent launches, you can interact with it directly — add follow-up in
 Override the configured agent for this session. Available agents: `claude`, `codex`, `opencode`, `maki`, `gemini`.
 
 ```sh
+# CLI
 amux chat --agent codex               # launch a Codex session for this project
 amux implement 0050 --agent gemini    # implement with Gemini instead of the configured agent
+amux chat --agent=codex               # --flag=value form is also accepted
+
+# TUI command box
+chat --agent codex
+implement 0042 --agent=opencode
 ```
+
+Both `--agent NAME` and `--agent=NAME` forms are accepted in both the CLI and the TUI command box. The TUI command box honours the flag and passes the correct agent to the container — it is not silently ignored.
 
 This overrides the `agent` field in your repo config for this run only — no config file is modified. amux uses the agent-specific image (`amux-{project}-{agent}:latest`) for the session.
 
