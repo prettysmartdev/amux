@@ -383,7 +383,7 @@ pub fn agent_entrypoint_non_interactive(agent: &str, work_item: u32, plan: bool)
         ],
         "codex" => vec![
             "codex".to_string(),
-            "--quiet".to_string(),
+            "exec".to_string(),
             prompt,
         ],
         "opencode" => vec![
@@ -415,7 +415,7 @@ pub fn workflow_step_entrypoint(agent: &str, prompt: &str, non_interactive: bool
     let mut args = match (agent, non_interactive) {
         ("claude", true) => vec!["claude".to_string(), "-p".to_string(), prompt.to_string()],
         ("claude", false) => vec!["claude".to_string(), prompt.to_string()],
-        ("codex", true) => vec!["codex".to_string(), "--quiet".to_string(), prompt.to_string()],
+        ("codex", true) => vec!["codex".to_string(), "exec".to_string(), prompt.to_string()],
         ("codex", false) => vec!["codex".to_string(), prompt.to_string()],
         ("opencode", _) => vec!["opencode".to_string(), "run".to_string(), prompt.to_string()],
         ("maki", true) => vec!["maki".to_string(), "--print".to_string(), prompt.to_string()],
@@ -874,7 +874,7 @@ mod tests {
     fn agent_entrypoint_non_interactive_codex() {
         let args = agent_entrypoint_non_interactive("codex", 2, false);
         assert_eq!(args[0], "codex");
-        assert_eq!(args[1], "--quiet");
+        assert_eq!(args[1], "exec");
         assert!(args[2].contains("work item 0002"));
     }
 
@@ -982,7 +982,7 @@ mod tests {
     fn agent_entrypoint_non_interactive_plan_codex() {
         let args = agent_entrypoint_non_interactive("codex", 2, true);
         assert_eq!(args[0], "codex");
-        assert_eq!(args[1], "--quiet");
+        assert_eq!(args[1], "exec");
         assert!(args[2].contains("work item 0002"));
         assert_eq!(args[3], "--approval-mode");
         assert_eq!(args[4], "plan");
@@ -1015,7 +1015,8 @@ mod tests {
     fn workflow_step_entrypoint_codex_non_interactive() {
         let args = workflow_step_entrypoint("codex", "prompt", true, false);
         assert_eq!(args[0], "codex");
-        assert_eq!(args[1], "--quiet");
+        assert_eq!(args[1], "exec");
+        assert_eq!(args[2], "prompt");
     }
 
     #[test]

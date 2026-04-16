@@ -232,7 +232,7 @@ pub async fn check_local_agent(agent_name: &str) -> (StepStatus, String, String)
     let greeting = select_random_greeting();
     let (cmd, args): (&str, Vec<&str>) = match agent_name {
         "claude" => ("claude", vec!["--print", greeting]),
-        "codex" => ("codex", vec!["--quiet", greeting]),
+        "codex" => ("codex", vec!["exec", greeting]),
         "opencode" => ("opencode", vec!["run", greeting]),
         "maki" => ("maki", vec!["--print", greeting]),
         "gemini" => ("gemini", vec!["-p", greeting]),
@@ -816,7 +816,7 @@ pub fn audit_entrypoint_non_interactive(agent: &str) -> Vec<String> {
             "--allowedTools=Edit,Write".into(),
             AUDIT_PROMPT.into(),
         ],
-        "codex" => vec!["codex".into(), "--quiet".into(), AUDIT_PROMPT.into()],
+        "codex" => vec!["codex".into(), "exec".into(), AUDIT_PROMPT.into()],
         "opencode" => vec!["opencode".into(), "run".into(), AUDIT_PROMPT.into()],
         "maki" => vec!["maki".into(), "--print".into(), AUDIT_PROMPT.into()],
         "gemini" => vec!["gemini".into(), "-p".into(), AUDIT_PROMPT.into()],
@@ -878,7 +878,7 @@ mod tests {
     fn audit_entrypoint_non_interactive_codex() {
         let args = audit_entrypoint_non_interactive("codex");
         assert_eq!(args[0], "codex");
-        assert_eq!(args[1], "--quiet");
+        assert_eq!(args[1], "exec");
         assert!(args[2].contains("scan this project"));
     }
 

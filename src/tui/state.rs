@@ -202,6 +202,9 @@ pub enum Dialog {
     ReadyLegacyMigration {
         agent_name: String,
     },
+    /// Ready: Dockerfile.dev is identical to the default project template — ask whether to
+    /// launch the audit container to customise it for this project's toolchain.
+    ReadyTemplateAuditConfirm,
     /// Init: ask whether to run the agent audit container after creating project files.
     InitAuditConfirm {
         agent: crate::cli::Agent,
@@ -254,6 +257,11 @@ pub enum PendingCommand {
         /// `Some(true)` = user accepted migration.
         /// `Some(false)` = user declined migration (keep legacy layout).
         migrate_decision: Option<bool>,
+        /// Pre-collected answer to the template-audit dialog.
+        /// `None` = no template match detected (or dialog not yet shown).
+        /// `Some(true)` = user accepted running the audit.
+        /// `Some(false)` = user declined running the audit.
+        template_audit_decision: Option<bool>,
     },
     Implement {
         work_item: u32,
@@ -309,6 +317,31 @@ pub enum ClawsPhase {
     PreAudit,
     /// Post-build: /setup dialog + docker socket dialog + container launch + detached audit exec.
     PostAudit,
+}
+
+/// Which phase of the multi-step `ready` / `init` audit workflow is active in the TUI.
+///
+/// Both commands split into three phases so the audit agent runs in a foreground
+/// PTY container window rather than being captured in the background:
+///   1. Pre-audit text task (image builds, Q&A)
+///   2. PTY audit container (foreground, interactive)
+///   3. Post-audit text task (image rebuild, summary)
+#[derive(Debug, Clone, PartialEq)]
+pub enum AuditPhase {
+    /// No audit workflow is in progress.
+    Inactive,
+    /// `ready` pre-audit text task is running; handoff arrives via `ready_audit_handoff_rx`.
+    ReadyPreAudit,
+    /// `ready` PTY audit container is running; handoff is in `ready_audit_handoff`.
+    ReadyAuditPty,
+    /// `ready` post-audit text task is running.
+    ReadyPostAudit,
+    /// `init` pre-audit text task is running; handoff arrives via `init_audit_handoff_rx`.
+    InitPreAudit,
+    /// `init` PTY audit container is running; handoff is in `init_audit_handoff`.
+    InitAuditPty,
+    /// `init` post-audit text task is running.
+    InitPostAudit,
 }
 
 /// State of the container overlay window.
@@ -467,6 +500,19 @@ pub struct TabState {
     /// and the tab turns yellow.
     pub last_output_time: Option<Instant>,
 
+    // --- Ready / init audit phase split state ---
+    /// Which phase of the ready/init audit workflow is active.
+    pub audit_phase: AuditPhase,
+    /// Handoff produced by the `ready` pre-audit text task; consumed to launch the PTY.
+    /// Also retained during `ReadyAuditPty` so post-audit has `ctx`, `opts`, `summary`.
+    pub ready_audit_handoff: Option<crate::commands::ready_flow::ReadyAuditHandoff>,
+    /// Receives the handoff from the `ready` pre-audit background task.
+    pub ready_audit_handoff_rx: Option<tokio::sync::oneshot::Receiver<crate::commands::ready_flow::ReadyAuditHandoff>>,
+    /// Handoff produced by the `init` pre-audit text task; consumed to launch the PTY.
+    pub init_audit_handoff: Option<crate::commands::init_flow::InitAuditHandoff>,
+    /// Receives the handoff from the `init` pre-audit background task.
+    pub init_audit_handoff_rx: Option<tokio::sync::oneshot::Receiver<crate::commands::init_flow::InitAuditHandoff>>,
+
     // --- Claws wizard state ---
     /// Which phase of the claws workflow is active.
     pub claws_phase: ClawsPhase,
@@ -611,6 +657,11 @@ impl TabState {
             terminal_selection_end: None,
             terminal_selection_snapshot: None,
             container_inner_area: None,
+            audit_phase: AuditPhase::Inactive,
+            ready_audit_handoff: None,
+            ready_audit_handoff_rx: None,
+            init_audit_handoff: None,
+            init_audit_handoff_rx: None,
             claws_phase: ClawsPhase::Inactive,
             claws_container_id: None,
             claws_container_id_rx: None,
@@ -746,8 +797,9 @@ impl TabState {
         // Drop host settings only if no multi-phase workflow is in progress.
         // During claws setup, the text task completes before the PTY exec session starts —
         // host_settings must survive until the exec session ends.
-        // Also preserve host_settings while a workflow step sequence is in progress.
+        // Also preserve host_settings while a workflow step sequence or audit PTY is active.
         if self.claws_phase == ClawsPhase::Inactive
+            && self.audit_phase == AuditPhase::Inactive
             && self.workflow.is_none()
         {
             self.host_settings = None;
@@ -1228,6 +1280,22 @@ impl TabState {
                         had_error: code != 0,
                     };
                 }
+            }
+        }
+
+        // Check for ready audit handoff from the pre-audit background task.
+        if let Some(ref mut rx) = self.ready_audit_handoff_rx {
+            if let Ok(handoff) = rx.try_recv() {
+                self.ready_audit_handoff = Some(handoff);
+                self.ready_audit_handoff_rx = None;
+            }
+        }
+
+        // Check for init audit handoff from the pre-audit background task.
+        if let Some(ref mut rx) = self.init_audit_handoff_rx {
+            if let Ok(handoff) = rx.try_recv() {
+                self.init_audit_handoff = Some(handoff);
+                self.init_audit_handoff_rx = None;
             }
         }
 

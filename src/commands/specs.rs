@@ -68,7 +68,7 @@ pub fn interview_agent_entrypoint_non_interactive(
     let prompt = interview_prompt(number, kind, title, summary);
     match agent {
         "claude" => vec!["claude".to_string(), "-p".to_string(), prompt],
-        "codex" => vec!["codex".to_string(), "--quiet".to_string(), prompt],
+        "codex" => vec!["codex".to_string(), "exec".to_string(), prompt],
         "opencode" => vec!["opencode".to_string(), "run".to_string(), prompt],
         _ => vec![agent.to_string(), prompt],
     }
@@ -90,7 +90,7 @@ pub fn amend_agent_entrypoint_non_interactive(agent: &str, number: u32) -> Vec<S
     let prompt = amend_prompt(number);
     match agent {
         "claude" => vec!["claude".to_string(), "-p".to_string(), prompt],
-        "codex" => vec!["codex".to_string(), "--quiet".to_string(), prompt],
+        "codex" => vec!["codex".to_string(), "exec".to_string(), prompt],
         "opencode" => vec!["opencode".to_string(), "run".to_string(), prompt],
         _ => vec![agent.to_string(), prompt],
     }

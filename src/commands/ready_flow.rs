@@ -8,10 +8,33 @@ use crate::commands::ready::{
     ReadyContext, ReadyOptions, ReadySummary, StepStatus,
 };
 use crate::config::load_repo_config;
-use crate::runtime::AgentRuntime;
+use crate::runtime::{generate_container_name, AgentRuntime};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+// ─── TUI Phase-Split Types ────────────────────────────────────────────────────
+
+/// Context produced by `execute_pre_audit`. Carries everything needed to:
+/// 1. Launch the PTY audit container (image, entrypoint, credentials, host settings)
+/// 2. Run the post-audit image rebuild and summary
+pub struct ReadyAuditHandoff {
+    pub ctx: ReadyContext,
+    pub opts: ReadyOptions,
+    pub summary: ReadySummary,
+    /// Host settings after applying the agent Dockerfile USER directive.
+    /// Ready to be mounted into the audit container.
+    pub host_settings: Option<crate::runtime::HostSettings>,
+    pub runtime: Arc<dyn AgentRuntime>,
+}
+
+/// Result of `execute_pre_audit`.
+pub enum ReadyPreAuditResult {
+    /// No audit required; summary has already been printed to the sink.
+    Done { summary: ReadySummary },
+    /// An audit should be run; all context is in the handoff.
+    NeedsAudit(ReadyAuditHandoff),
+}
 
 // ─── Traits ───────────────────────────────────────────────────────────────────
 
@@ -157,6 +180,7 @@ impl ReadyAuditLauncher for CliReadyAuditLauncher {
         let audit = build_audit_setup(ctx, opts.non_interactive);
         let entrypoint_refs: Vec<&str> = audit.entrypoint.iter().map(String::as_str).collect();
 
+        let container_name = generate_container_name();
         if opts.non_interactive {
             let (_cmd, output) = self
                 .runtime
@@ -167,7 +191,7 @@ impl ReadyAuditLauncher for CliReadyAuditLauncher {
                     &ctx.env_vars,
                     host_settings,
                     opts.allow_docker,
-                    None,
+                    Some(&container_name),
                     None,
                 )
                 .context("Dockerfile audit container failed")?;
@@ -175,6 +199,7 @@ impl ReadyAuditLauncher for CliReadyAuditLauncher {
                 sink.println(line);
             }
         } else {
+            print_interactive_notice(sink, &ctx.agent_name);
             self.runtime
                 .run_container(
                     &audit.image_tag,
@@ -183,7 +208,7 @@ impl ReadyAuditLauncher for CliReadyAuditLauncher {
                     &ctx.env_vars,
                     host_settings,
                     opts.allow_docker,
-                    None,
+                    Some(&container_name),
                     None,
                 )
                 .context("Dockerfile audit container failed")?;
@@ -192,24 +217,27 @@ impl ReadyAuditLauncher for CliReadyAuditLauncher {
     }
 }
 
-// ─── execute() ────────────────────────────────────────────────────────────────
+// ─── execute_pre_audit() ──────────────────────────────────────────────────────
 
-/// Run the full ready flow.
+/// Run the pre-audit phase of the ready flow.
 ///
-/// All business logic lives here; CLI and TUI differ only through their `qa`
-/// and `launcher` implementations. `mount_path` is either the process CWD (CLI)
-/// or the tab's working directory (TUI); the git root is derived from it.
-pub async fn execute<Q, L>(
+/// Performs all Q&A, option building, and the pre-audit image checks. Returns
+/// either `Done` (no audit required; summary + tips have already been printed)
+/// or `NeedsAudit` (caller should launch the audit PTY container, then call
+/// `execute_post_audit` when it exits).
+///
+/// This is the TUI-optimised entry point. The monolithic `execute()` delegates
+/// to this function and then calls `launcher.run_audit()` + `execute_post_audit`
+/// in one step.
+pub async fn execute_pre_audit<Q>(
     params: ReadyParams,
     qa: &mut Q,
-    launcher: &L,
     sink: &OutputSink,
     mount_path: PathBuf,
     runtime: Arc<dyn AgentRuntime>,
-) -> Result<ReadySummary>
+) -> Result<ReadyPreAuditResult>
 where
     Q: ReadyQa,
-    L: ReadyAuditLauncher,
 {
     // ── Pre-Q&A setup: resolve config to get agent name ───────────────────────
     let git_root = find_git_root_from(&mount_path).context("Not inside a Git repository")?;
@@ -224,32 +252,23 @@ where
     if !dockerfile_path.exists() {
         if qa.ask_create_dockerfile()? {
             auto_create_dockerfile = true;
-            // User accepted: create Dockerfile and run audit automatically.
             effective_refresh = true;
         } else {
-            // User declined: proceed so run_pre_audit can record the failure.
             sink.println("Dockerfile.dev is required. Run `amux init` to set it up.");
             auto_create_dockerfile = false;
         }
     } else if !params.refresh {
-        // Dockerfile.dev exists; offer audit when it still matches the default template.
         let content = std::fs::read_to_string(&dockerfile_path).unwrap_or_default();
         if dockerfile_matches_template(&content) && qa.ask_run_audit_on_template()? {
             effective_refresh = true;
         }
-        auto_create_dockerfile = true; // file already exists, no creation needed
+        auto_create_dockerfile = true;
     } else {
-        // --refresh was explicitly set and Dockerfile.dev exists.
         effective_refresh = true;
         auto_create_dockerfile = true;
     }
 
     // ── Q&A: legacy layout migration ─────────────────────────────────────────
-    //
-    // compute_ready_build_flag uses *effective_refresh* (which may have been
-    // set to true above), but migration overrides effective_build afterward —
-    // that is intentional: migration forces a project image rebuild regardless
-    // of what the user passed on the command line.
     let mut effective_build = compute_ready_build_flag(effective_refresh, params.build);
     let legacy_mode = if is_legacy_layout(&git_root, &agent_name) {
         if qa.ask_migrate_legacy(&agent_name)? {
@@ -257,19 +276,18 @@ where
             for msg in &messages {
                 sink.println(msg.as_str());
             }
-            // Force project image rebuild from the new minimal Dockerfile.dev (DIV-4).
             effective_build = true;
             effective_refresh = true;
-            false // migrated — proceed with the new modular layout
+            false
         } else {
             sink.println("Keeping existing layout. Use the project image for this session.");
             sink.println(
                 "DEPRECATION WARNING: Run `amux ready` to migrate to the modular layout.",
             );
-            true // stay in legacy mode
+            true
         }
     } else {
-        false // no legacy layout detected
+        false
     };
 
     // ── Gather credentials ────────────────────────────────────────────────────
@@ -287,47 +305,88 @@ where
         legacy_mode,
     };
 
-    // ── Phase 1: Pre-audit ────────────────────────────────────────────────────
+    // ── Phase 1: Pre-audit image setup ────────────────────────────────────────
     let mut summary = ReadySummary::default();
     let ctx = run_pre_audit(sink, mount_path, env_vars, &opts, &mut summary, &*runtime).await?;
 
-    // ── Phase 2: Audit ────────────────────────────────────────────────────────
+    // ── Phase 2 gate: decide whether to run the audit ─────────────────────────
     if opts.refresh {
-        // Apply the USER directive from the agent dockerfile now that run_pre_audit()
-        // has written it. Must happen before the audit container is launched so that
-        // settings files are mounted at the correct in-container home directory.
+        // Apply the USER directive from the agent dockerfile before launching the
+        // audit container so settings files are mounted at the right home directory.
         if let Some(msg) = apply_ready_user_directive(host_settings.as_mut(), &ctx) {
             sink.println(msg);
         }
 
-        if !opts.non_interactive {
-            print_interactive_notice(sink, &ctx.agent_name);
-        }
-
         check_allow_docker(sink, opts.allow_docker, &*runtime)?;
 
-        launcher.run_audit(&ctx, host_settings.as_ref(), &opts, sink)?;
-        summary.refresh = StepStatus::Ok("completed".into());
+        return Ok(ReadyPreAuditResult::NeedsAudit(ReadyAuditHandoff {
+            ctx,
+            opts,
+            summary,
+            host_settings,
+            runtime,
+        }));
+    }
 
-        // ── Phase 3: Post-audit rebuild ───────────────────────────────────────
-        run_post_audit(sink, &ctx, &opts, &mut summary, &*runtime).await?;
+    // ── No audit path: skip or force-build, then print summary ───────────────
+    sink.println("Skipping Dockerfile audit (use --refresh to run it).");
+    summary.refresh = StepStatus::Skipped("use --refresh to run".into());
+    if opts.build {
+        run_force_build(sink, &ctx, &opts, &mut summary, &*runtime).await?;
     } else {
-        sink.println("Skipping Dockerfile audit (use --refresh to run it).");
-        summary.refresh = StepStatus::Skipped("use --refresh to run".into());
-        if opts.build {
-            run_force_build(sink, &ctx, &opts, &mut summary, &*runtime).await?;
-        } else {
-            summary.image_rebuild = StepStatus::Skipped("no refresh".into());
-        }
+        summary.image_rebuild = StepStatus::Skipped("no refresh".into());
     }
 
-    // ── Summary and tips ──────────────────────────────────────────────────────
     print_summary(sink, runtime.name(), &summary);
+    sink.println("");
+    sink.println("Tip: use `amux ready --refresh` to run the Dockerfile audit agent.");
+    print_ready_tips(sink, &summary);
+    sink.println("");
+    sink.println("amux is ready.");
 
-    if !opts.refresh {
-        sink.println("");
-        sink.println("Tip: use `amux ready --refresh` to run the Dockerfile audit agent.");
+    Ok(ReadyPreAuditResult::Done { summary })
+}
+
+/// Run the post-audit phase of the ready flow.
+///
+/// Called by the TUI after the PTY audit container exits. Rebuilds images and
+/// prints the final summary. `audit_exit_code = 0` means the audit succeeded.
+///
+/// The CLI's `execute()` calls this with `audit_exit_code = 0` (synchronous
+/// `run_audit` propagates errors via `?` before reaching this function).
+pub async fn execute_post_audit(
+    sink: &OutputSink,
+    mut handoff: ReadyAuditHandoff,
+    audit_exit_code: i32,
+) -> Result<ReadySummary> {
+    let runtime_name = handoff.runtime.name().to_string();
+
+    if audit_exit_code == 0 {
+        handoff.summary.refresh = StepStatus::Ok("completed".into());
+        run_post_audit(
+            sink,
+            &handoff.ctx,
+            &handoff.opts,
+            &mut handoff.summary,
+            &*handoff.runtime,
+        )
+        .await?;
+    } else {
+        handoff.summary.refresh =
+            StepStatus::Failed(format!("agent exited with code {}", audit_exit_code));
+        handoff.summary.image_rebuild = StepStatus::Skipped("audit failed".into());
     }
+
+    print_summary(sink, &runtime_name, &handoff.summary);
+    print_ready_tips(sink, &handoff.summary);
+    sink.println("");
+    sink.println("amux is ready.");
+
+    Ok(handoff.summary)
+}
+
+/// Print the optional tips that follow the ready summary table.
+fn print_ready_tips(sink: &OutputSink, summary: &ReadySummary) {
     if matches!(summary.aspec_folder, StepStatus::Failed(_)) {
         sink.println("");
         sink.println("Tip: run `amux init --aspec` to add an aspec folder to this project.");
@@ -338,11 +397,44 @@ where
             "Tip: run `amux config set work_items.dir <path>` to configure a work items directory.",
         );
     }
+}
 
-    sink.println("");
-    sink.println("amux is ready.");
+// ─── execute() ────────────────────────────────────────────────────────────────
 
-    Ok(summary)
+/// Run the full ready flow.
+///
+/// All business logic lives here; CLI and TUI differ only through their `qa`
+/// and `launcher` implementations. `mount_path` is either the process CWD (CLI)
+/// or the tab's working directory (TUI); the git root is derived from it.
+///
+/// The TUI uses `execute_pre_audit` / `execute_post_audit` directly so that the
+/// audit container runs in a foreground PTY container window rather than being
+/// captured in the background.
+pub async fn execute<Q, L>(
+    params: ReadyParams,
+    qa: &mut Q,
+    launcher: &L,
+    sink: &OutputSink,
+    mount_path: PathBuf,
+    runtime: Arc<dyn AgentRuntime>,
+) -> Result<ReadySummary>
+where
+    Q: ReadyQa,
+    L: ReadyAuditLauncher,
+{
+    match execute_pre_audit(params, qa, sink, mount_path, runtime).await? {
+        ReadyPreAuditResult::Done { summary } => Ok(summary),
+        ReadyPreAuditResult::NeedsAudit(handoff) => {
+            // Run the audit synchronously (CLI mode: inherited stdio or captured output).
+            {
+                let ctx = &handoff.ctx;
+                let host_settings = handoff.host_settings.as_ref();
+                let opts = &handoff.opts;
+                launcher.run_audit(ctx, host_settings, opts, sink)?;
+            }
+            execute_post_audit(sink, handoff, 0).await
+        }
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ use crate::commands::download;
 use crate::commands::output::OutputSink;
 use crate::commands::ready::{audit_entrypoint, print_interactive_notice, StepStatus};
 use crate::config::{load_repo_config, save_repo_config, WorkItemsConfig};
-use crate::runtime::{agent_image_tag, format_build_cmd, project_image_tag, AgentRuntime};
+use crate::runtime::{agent_image_tag, format_build_cmd, generate_container_name, project_image_tag, AgentRuntime};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -222,6 +222,7 @@ impl InitContainerLauncher for CliContainerLauncher {
         print_interactive_notice(sink, agent.as_str());
         let entrypoint = audit_entrypoint(agent.as_str());
         let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+        let container_name = generate_container_name();
 
         let modified_settings: Option<crate::runtime::HostSettings> =
             host_settings.as_ref().and_then(|settings| {
@@ -246,11 +247,456 @@ impl InitContainerLauncher for CliContainerLauncher {
                 &env_vars,
                 effective_settings,
                 false,
-                None,
+                Some(&container_name),
                 None,
             )
             .map_err(|e| anyhow::anyhow!("{}", e))
     }
+}
+
+// ─── TUI Phase-Split Types ────────────────────────────────────────────────────
+
+/// Context produced by `execute_init_pre_audit`. Carries everything the TUI needs to:
+/// 1. Launch the PTY audit container (image, entrypoint, credentials, host settings)
+/// 2. Run the post-audit image rebuild and work-items setup
+pub struct InitAuditHandoff {
+    pub agent: crate::cli::Agent,
+    pub git_root: PathBuf,
+    pub image_tag: String,
+    pub agent_image_tag: String,
+    pub aspec: bool,
+    pub summary: InitSummary,
+    pub env_vars: Vec<(String, String)>,
+    pub host_settings: Option<crate::runtime::HostSettings>,
+    pub runtime: Arc<dyn AgentRuntime>,
+    /// Pre-collected work-items setup answer from the TUI dialog.
+    /// `None` if work-items setup was not offered or was declined.
+    pub work_items: Option<crate::config::WorkItemsConfig>,
+}
+
+/// Result of `execute_init_pre_audit`.
+pub enum InitPreAuditResult {
+    /// No audit required (or runtime unavailable); summary has already been printed.
+    Done { summary: InitSummary },
+    /// An audit should be run; all context is in the handoff.
+    NeedsAudit(InitAuditHandoff),
+}
+
+// ─── execute_init_pre_audit / execute_init_post_audit ─────────────────────────
+
+/// Run the pre-audit phase of the init flow (stages 1-7b).
+///
+/// Writes config, Dockerfiles, checks the runtime, and builds the project/agent
+/// images. Returns `NeedsAudit` when images were successfully built and the
+/// caller should launch the PTY audit container. Returns `Done` for all other
+/// paths (user declined, runtime unavailable, build failures).
+///
+/// `replace_aspec`, `run_audit`, and `work_items` are pre-collected TUI dialog
+/// answers; the CLI's `execute()` calls this via the trait-based `qa` path instead.
+pub async fn execute_init_pre_audit<L>(
+    params: InitParams,
+    replace_aspec: bool,
+    run_audit: bool,
+    work_items: Option<crate::config::WorkItemsConfig>,
+    sink: &OutputSink,
+    launcher: &L,
+    runtime: Arc<dyn AgentRuntime>,
+) -> Result<InitPreAuditResult>
+where
+    L: InitContainerLauncher,
+{
+    let git_root = params.git_root.clone();
+    let agent = params.agent;
+    let aspec = params.aspec;
+    let mut summary = InitSummary::default();
+
+    sink.println(format!("Initializing amux in: {}", git_root.display()));
+    sink.println(format!("Agent: {}", agent.as_str()));
+
+    // ── Stage 2: Load and update repo config ─────────────────────────────────
+    let mut config = load_repo_config(&git_root).unwrap_or_default();
+    config.agent = Some(agent.as_str().to_string());
+    save_repo_config(&git_root, &config)?;
+    sink.println(format!(
+        "Config written to: {}",
+        git_root.join(".amux/config.json").display()
+    ));
+    summary.config = StepStatus::Ok("saved".into());
+
+    // ── Stage 3: Download or skip aspec folder ───────────────────────────────
+    let aspec_dir = git_root.join("aspec");
+    if aspec {
+        if !aspec_dir.exists() || replace_aspec {
+            match download::download_aspec_folder(&git_root, sink).await {
+                Ok(()) => {
+                    summary.aspec_folder = StepStatus::Ok("downloaded".into());
+                }
+                Err(e) => {
+                    sink.println(format!(
+                        "Warning: failed to download aspec folder from GitHub: {}",
+                        e
+                    ));
+                    sink.println(
+                        "You can manually download it from https://github.com/cohix/aspec"
+                            .to_string(),
+                    );
+                    summary.aspec_folder = StepStatus::Failed("download failed".into());
+                }
+            }
+        } else {
+            sink.println(format!(
+                "aspec folder already exists at: {} (keeping existing)",
+                aspec_dir.display()
+            ));
+            summary.aspec_folder = StepStatus::Ok("already exists".into());
+        }
+    } else if aspec_dir.exists() {
+        summary.aspec_folder = StepStatus::Ok("already exists".into());
+    } else {
+        summary.aspec_folder = StepStatus::Skipped("use --aspec to download".into());
+    }
+
+    // ── Stage 4: Write Dockerfile.dev ────────────────────────────────────────
+    let dockerfile_was_new = write_project_dockerfile(&git_root, sink).await?;
+    if dockerfile_was_new {
+        sink.println(format!(
+            "Dockerfile.dev written to: {}",
+            git_root.join("Dockerfile.dev").display()
+        ));
+        summary.dockerfile = StepStatus::Ok("created".into());
+    } else {
+        sink.println(format!(
+            "Dockerfile.dev already exists at: {} (not overwritten)",
+            git_root.join("Dockerfile.dev").display()
+        ));
+        summary.dockerfile = StepStatus::Ok("already exists".into());
+    }
+
+    // ── Stage 5: Write .amux/Dockerfile.{agent} ──────────────────────────────
+    let agent_dockerfile_was_new = write_agent_dockerfile(&git_root, &agent, sink).await?;
+
+    // ── Stages 6-7b: Runtime check + build both images ───────────────────────
+    let image_tag = project_image_tag(&git_root);
+    let agent_image_tag_val = agent_image_tag(&git_root, agent.as_str());
+    let dockerfile_path = git_root.join("Dockerfile.dev");
+    let agent_df_path = git_root
+        .join(".amux")
+        .join(format!("Dockerfile.{}", agent.as_str()));
+
+    if run_audit {
+        // Stage 6: Check runtime availability
+        sink.print(format!("Checking {} runtime... ", runtime.name()));
+        if !runtime.is_available() {
+            sink.println("FAILED".to_string());
+            sink.println(format!(
+                "{} runtime is not running. Skipping audit and image build.",
+                runtime.name()
+            ));
+            summary.audit = StepStatus::Failed(format!("{} not running", runtime.name()));
+            summary.image_build =
+                StepStatus::Failed(format!("{} not running", runtime.name()));
+            summary.work_items_setup = StepStatus::Skipped("runtime not running".into());
+            print_init_summary(sink, &summary, agent.as_str());
+            print_whats_next(sink);
+            return Ok(InitPreAuditResult::Done { summary });
+        }
+        sink.println("OK".to_string());
+
+        // Stage 7a: Build project base image before audit.
+        sink.println(format!("Building image {}...", image_tag));
+        match launcher.build_image(&image_tag, &dockerfile_path, &git_root, sink) {
+            Ok(()) => {
+                sink.println(format!("Image {} built successfully.", image_tag));
+            }
+            Err(e) => {
+                sink.println(format!("Warning: failed to build image: {}", e));
+                summary.audit = StepStatus::Failed("image build failed before audit".into());
+                summary.image_build = StepStatus::Failed("build failed".into());
+                summary.work_items_setup = StepStatus::Skipped("build failed".into());
+                print_init_summary(sink, &summary, agent.as_str());
+                print_whats_next(sink);
+                return Ok(InitPreAuditResult::Done { summary });
+            }
+        }
+
+        // Stage 7b: Build agent image before audit.
+        sink.println(format!("Building agent image {}...", agent_image_tag_val));
+        match launcher.build_image(&agent_image_tag_val, &agent_df_path, &git_root, sink) {
+            Ok(()) => {
+                sink.println(format!(
+                    "Agent image {} built successfully.",
+                    agent_image_tag_val
+                ));
+            }
+            Err(e) => {
+                sink.println(format!("Warning: failed to build agent image: {}", e));
+                summary.audit =
+                    StepStatus::Failed("agent image build failed before audit".into());
+                summary.image_build = StepStatus::Failed("agent build failed".into());
+                summary.work_items_setup = StepStatus::Skipped("build failed".into());
+                print_init_summary(sink, &summary, agent.as_str());
+                print_whats_next(sink);
+                return Ok(InitPreAuditResult::Done { summary });
+            }
+        }
+
+        // Both images built — gather credentials and host settings for the PTY audit.
+        let credentials = resolve_auth(&git_root, agent.as_str()).unwrap_or_default();
+        let mut env_vars = credentials.env_vars;
+        let passthrough_names = crate::config::effective_env_passthrough(&git_root);
+        for name in &passthrough_names {
+            if env_vars.iter().any(|(k, _)| k == name) {
+                continue;
+            }
+            if let Ok(val) = std::env::var(name) {
+                env_vars.push((name.clone(), val));
+            }
+        }
+        let mut host_settings =
+            crate::passthrough::passthrough_for_agent(agent.as_str()).prepare_host_settings();
+
+        // Apply USER directive so settings files mount at the correct home directory.
+        if let Some(ref mut settings) = host_settings {
+            if let Some(msg) = crate::runtime::apply_dockerfile_user(settings, &agent_df_path) {
+                sink.println(msg);
+            }
+        }
+
+        return Ok(InitPreAuditResult::NeedsAudit(InitAuditHandoff {
+            agent,
+            git_root,
+            image_tag,
+            agent_image_tag: agent_image_tag_val,
+            aspec,
+            summary,
+            env_vars,
+            host_settings,
+            runtime,
+            work_items,
+        }));
+    }
+
+    // ── No-audit paths (stages 8-9) ───────────────────────────────────────────
+    if dockerfile_was_new || agent_dockerfile_was_new {
+        // Stage 8: New Dockerfiles, no audit — build both images.
+        sink.print(format!("Checking {} runtime... ", runtime.name()));
+        if !runtime.is_available() {
+            sink.println("not running (skipping image build)".to_string());
+            summary.audit = StepStatus::Skipped("declined".into());
+            summary.image_build =
+                StepStatus::Skipped(format!("{} not running", runtime.name()));
+        } else {
+            sink.println("OK".to_string());
+
+            sink.println(format!("Building image {}...", image_tag));
+            match launcher.build_image(&image_tag, &dockerfile_path, &git_root, sink) {
+                Ok(()) => {
+                    sink.println(format!("Image {} built successfully.", image_tag));
+
+                    sink.println(format!("Building agent image {}...", agent_image_tag_val));
+                    match launcher.build_image(
+                        &agent_image_tag_val,
+                        &agent_df_path,
+                        &git_root,
+                        sink,
+                    ) {
+                        Ok(()) => {
+                            sink.println(format!(
+                                "Agent image {} built successfully.",
+                                agent_image_tag_val
+                            ));
+                            summary.audit = StepStatus::Skipped("declined".into());
+                            summary.image_build = StepStatus::Ok("built".into());
+                        }
+                        Err(e) => {
+                            sink.println(format!(
+                                "Warning: failed to build agent image: {}",
+                                e
+                            ));
+                            summary.audit = StepStatus::Skipped("declined".into());
+                            summary.image_build =
+                                StepStatus::Failed("agent build failed".into());
+                        }
+                    }
+                }
+                Err(e) => {
+                    sink.println(format!("Warning: failed to build image: {}", e));
+                    summary.audit = StepStatus::Skipped("declined".into());
+                    summary.image_build = StepStatus::Failed("build failed".into());
+                }
+            }
+        }
+    } else {
+        // Existing Dockerfiles, user declined audit — skip build.
+        summary.audit = StepStatus::Skipped("declined".into());
+        summary.image_build = StepStatus::Skipped("no changes".into());
+    }
+
+    // Stage 9: Work items setup (no audit path — use pre-collected answer).
+    run_init_work_items_setup(&git_root, aspec, work_items, sink, &mut summary)?;
+
+    print_init_summary(sink, &summary, agent.as_str());
+    print_whats_next(sink);
+    Ok(InitPreAuditResult::Done { summary })
+}
+
+/// Run the post-audit phase of the init flow (stages 7d-9).
+///
+/// Called by the TUI after the PTY audit container exits. Rebuilds images,
+/// runs work-items setup, and prints the final summary.
+/// `audit_exit_code = 0` means the audit succeeded; non-zero is treated as a
+/// warning (the audit may still have modified Dockerfile.dev).
+pub async fn execute_init_post_audit<L>(
+    sink: &OutputSink,
+    mut handoff: InitAuditHandoff,
+    audit_exit_code: i32,
+    launcher: &L,
+) -> Result<InitSummary>
+where
+    L: InitContainerLauncher,
+{
+    let image_tag = &handoff.image_tag;
+    let agent_image_tag_val = &handoff.agent_image_tag;
+    let dockerfile_path = handoff.git_root.join("Dockerfile.dev");
+    let agent_df_path = handoff
+        .git_root
+        .join(".amux")
+        .join(format!("Dockerfile.{}", handoff.agent.as_str()));
+
+    if audit_exit_code == 0 {
+        handoff.summary.audit = StepStatus::Ok("completed".into());
+    } else {
+        handoff.summary.audit =
+            StepStatus::Failed(format!("agent exited with code {}", audit_exit_code));
+    }
+
+    // Stage 7d: Rebuild project base after audit.
+    sink.println(format!("Rebuilding image {} after audit...", image_tag));
+    match launcher.build_image(image_tag, &dockerfile_path, &handoff.git_root, sink) {
+        Ok(()) => {
+            sink.println(format!("Image {} rebuilt successfully.", image_tag));
+        }
+        Err(e) => {
+            sink.println(format!("Warning: failed to rebuild image: {}", e));
+            handoff.summary.image_build = StepStatus::Failed("rebuild failed".into());
+            handoff.summary.work_items_setup = StepStatus::Skipped("build failed".into());
+            print_init_summary(sink, &handoff.summary, handoff.agent.as_str());
+            print_whats_next(sink);
+            return Ok(handoff.summary);
+        }
+    }
+
+    // Stage 7e: Rebuild agent image after audit.
+    sink.println(format!(
+        "Rebuilding agent image {} after audit...",
+        agent_image_tag_val
+    ));
+    match launcher.build_image(
+        agent_image_tag_val,
+        &agent_df_path,
+        &handoff.git_root,
+        sink,
+    ) {
+        Ok(()) => {
+            sink.println(format!(
+                "Agent image {} rebuilt successfully.",
+                agent_image_tag_val
+            ));
+            handoff.summary.image_build = StepStatus::Ok("built".into());
+        }
+        Err(e) => {
+            sink.println(format!("Warning: failed to rebuild agent image: {}", e));
+            handoff.summary.image_build = StepStatus::Failed("agent rebuild failed".into());
+        }
+    }
+
+    // Stage 9: Work items setup.
+    run_init_work_items_setup(
+        &handoff.git_root,
+        handoff.aspec,
+        handoff.work_items.take(),
+        sink,
+        &mut handoff.summary,
+    )?;
+
+    print_init_summary(sink, &handoff.summary, handoff.agent.as_str());
+    print_whats_next(sink);
+    Ok(handoff.summary)
+}
+
+/// Process the work-items setup step (stage 9) using a pre-collected answer.
+fn run_init_work_items_setup(
+    git_root: &Path,
+    aspec: bool,
+    work_items: Option<crate::config::WorkItemsConfig>,
+    sink: &OutputSink,
+    summary: &mut InitSummary,
+) -> Result<()> {
+    let current_config = load_repo_config(git_root).unwrap_or_default();
+    let work_items_already_set = current_config
+        .work_items
+        .as_ref()
+        .and_then(|w| w.dir.as_deref())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    let aspec_dir_now = git_root.join("aspec");
+    if !aspec && !aspec_dir_now.exists() && !work_items_already_set {
+        match work_items {
+            None => {
+                summary.work_items_setup = StepStatus::Skipped("declined".into());
+            }
+            Some(wi_config) => {
+                let dir = wi_config.dir.as_deref().unwrap_or("").to_string();
+                if dir.is_empty() {
+                    summary.work_items_setup =
+                        StepStatus::Skipped("no path provided".into());
+                } else {
+                    match crate::commands::config::validate_path_within_git_root(&dir, git_root) {
+                        Err(e) => {
+                            sink.println(format!(
+                                "Invalid path: {}. Skipping work items setup.",
+                                e
+                            ));
+                            summary.work_items_setup =
+                                StepStatus::Failed("invalid path".into());
+                        }
+                        Ok(()) => {
+                            let mut updated = load_repo_config(git_root).unwrap_or_default();
+                            let wi = updated.work_items.get_or_insert_with(WorkItemsConfig::default);
+                            wi.dir = Some(dir.clone());
+                            if let Some(tmpl) = &wi_config.template {
+                                if !tmpl.is_empty() {
+                                    match crate::commands::config::validate_path_within_git_root(
+                                        tmpl, git_root,
+                                    ) {
+                                        Ok(()) => {
+                                            wi.template = Some(tmpl.clone());
+                                        }
+                                        Err(e) => {
+                                            sink.println(format!(
+                                                "Invalid template path: {}. Skipping template.",
+                                                e
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            save_repo_config(git_root, &updated)?;
+                            sink.println(format!(
+                                "Work items directory configured: {}",
+                                dir
+                            ));
+                            summary.work_items_setup = StepStatus::Ok("configured".into());
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        summary.work_items_setup = StepStatus::Skipped("not needed".into());
+    }
+    Ok(())
 }
 
 // ─── execute() ────────────────────────────────────────────────────────────────
