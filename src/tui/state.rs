@@ -246,6 +246,9 @@ pub enum Dialog {
         agent: String,
         /// The configured default agent name, used to offer a fallback when the user declines.
         default_agent: String,
+        /// `true` when triggered by a workflow step (`implement --workflow`);
+        /// `false` when triggered by `chat` or a non-workflow `implement`.
+        from_workflow: bool,
     },
 }
 

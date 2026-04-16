@@ -190,7 +190,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         Dialog::ClawsReadySudoConfirm { password } => {
             return handle_claws_sudo_confirm(app.active_tab_mut(), key, password)
         }
-        Dialog::AgentSetupConfirm { agent, default_agent } => {
+        Dialog::AgentSetupConfirm { agent, default_agent, from_workflow: _ } => {
             return handle_agent_setup_confirm(app.active_tab_mut(), key, agent, default_agent)
         }
         Dialog::WorkflowStepConfirm { completed_step, next_steps } => {

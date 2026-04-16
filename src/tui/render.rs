@@ -1069,14 +1069,20 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
                 input
             ),
         ),
-        Dialog::AgentSetupConfirm { agent, default_agent } => (
+        Dialog::AgentSetupConfirm { agent, default_agent, from_workflow } => (
             " Agent Setup Required ",
-            if agent != default_agent {
+            if !from_workflow {
                 format!(
-                    "  Workflow step requires the '{}' agent, but its Dockerfile is not present.\n\
-                     \n\
-                     Download the Dockerfile template from GitHub and build the agent image?\n\
-                     \n\
+                    "  The '{}' agent is not set up. Its Dockerfile is not present.\n\n  \
+                     Download the Dockerfile template from GitHub and build the agent image?\n\n  \
+                     [y/Enter] Yes, download and build\n  \
+                     [n/Esc]   No, cancel  ",
+                    agent
+                )
+            } else if agent != default_agent {
+                format!(
+                    "  Workflow step requires the '{}' agent, but its Dockerfile is not present.\n\n  \
+                     Download the Dockerfile template from GitHub and build the agent image?\n\n  \
                      [y/Enter] Yes, download and build\n  \
                      [f]       Use '{}' instead (default agent)\n  \
                      [n/Esc]   No, cancel workflow  ",
@@ -1084,10 +1090,8 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
                 )
             } else {
                 format!(
-                    "  Workflow step requires the '{}' agent, but its Dockerfile is not present.\n\
-                     \n\
-                     Download the Dockerfile template from GitHub and build the agent image?\n\
-                     \n\
+                    "  Workflow step requires the '{}' agent, but its Dockerfile is not present.\n\n  \
+                     Download the Dockerfile template from GitHub and build the agent image?\n\n  \
                      [y/Enter] Yes, download and build\n  \
                      [n/Esc]   No, cancel workflow  ",
                     agent

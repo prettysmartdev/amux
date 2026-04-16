@@ -120,6 +120,11 @@ where
         }
     };
 
+    // Substitute the {{AMUX_BASE_IMAGE}} placeholder with the project's base image tag
+    // so the downloaded Dockerfile builds on top of this project's customised base image.
+    let project_base = project_image_tag(git_root);
+    let content = content.replace("{{AMUX_BASE_IMAGE}}", &project_base);
+
     // Save the Dockerfile.
     if let Some(parent) = agent_dockerfile.parent() {
         std::fs::create_dir_all(parent)
@@ -130,11 +135,10 @@ where
     out.println(format!("Saved {}", agent_dockerfile.display()));
 
     // Build the agent image.
-    let project_tag = project_image_tag(git_root);
-    if !runtime.image_exists(&project_tag) {
+    if !runtime.image_exists(&project_base) {
         anyhow::bail!(
             "Project base image {} is not built. Run `amux ready` first.",
-            project_tag
+            project_base
         );
     }
     let agent_tag = agent_image_tag(git_root, agent_name);
@@ -181,7 +185,7 @@ pub async fn prepare_agent_cli(
         |name| {
             use std::io::{BufRead, Write};
             print!(
-                "Agent '{}' has no Dockerfile. Download and build it? [y/N]: ",
+                "Agent '{}' Dockerfile is missing. Download and build the agent image? [y/N]: ",
                 name
             );
             std::io::stdout().flush()?;
@@ -731,6 +735,68 @@ mod tests {
         assert!(
             !amux_dir.join("Dockerfile.codex").exists(),
             "partial Dockerfile must be removed on build failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_available_substitutes_amux_base_image_placeholder() {
+        // When the downloaded Dockerfile contains {{AMUX_BASE_IMAGE}}, the saved file
+        // must have that placeholder replaced with the project image tag derived from
+        // the git root, so the agent image layers on top of the correct base image.
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let amux_dir = tmp.path().join(".amux");
+        std::fs::create_dir_all(&amux_dir).unwrap();
+
+        // Serve a Dockerfile template that uses the {{AMUX_BASE_IMAGE}} placeholder.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}/Dockerfile.codex", addr);
+
+        let _server = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let body = b"FROM {{AMUX_BASE_IMAGE}}\nRUN echo hello\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.write_all(body).await;
+            }
+        });
+
+        let runtime = MockRuntime::with_project_image();
+        let (tx, _rx) = unbounded_channel();
+        let sink = OutputSink::Channel(tx);
+
+        let result = ensure_agent_available_inner(
+            tmp.path(),
+            "codex",
+            &sink,
+            &runtime,
+            |_| Ok(true),
+            &[("codex", url.as_str())],
+        )
+        .await;
+
+        assert!(result.is_ok(), "substitution must not return Err; got: {:?}", result);
+        assert_eq!(result.unwrap(), true, "must return Ok(true) on success");
+
+        // The saved Dockerfile must have {{AMUX_BASE_IMAGE}} replaced with the
+        // project base image tag (amux-{project_name}:latest).
+        let saved = std::fs::read_to_string(amux_dir.join("Dockerfile.codex")).unwrap();
+        let expected_base = crate::runtime::project_image_tag(tmp.path());
+        assert!(
+            saved.contains(&expected_base),
+            "saved Dockerfile must contain project image tag '{}'; got:\n{}",
+            expected_base, saved
+        );
+        assert!(
+            !saved.contains("{{AMUX_BASE_IMAGE}}"),
+            "saved Dockerfile must not retain the placeholder; got:\n{}",
+            saved
         );
     }
 
