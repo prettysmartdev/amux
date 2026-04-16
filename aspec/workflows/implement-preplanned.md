@@ -21,6 +21,7 @@ Prompt: Write comprehensive documentation for work item {{work_item_number}}, fo
 
 ## Step: review
 Depends-on: docs,tests
+Agent: codex
 Prompt: Review the changes made for work item {{work_item_number}} in the previous steps for correctness, completeness, security, and style. Suggest improvements if needed, but ask before changing anything. Ensure all edge cases are considered:
 
 {{work_item_section:[Edge Case Considerations]}}
