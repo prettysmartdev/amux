@@ -248,12 +248,34 @@ where
             check_workflow_step_completion(&mut app).await;
         }
 
-        // Check if a yolo countdown expired and auto-advance the workflow step.
-        if app.active_tab().yolo_countdown_expired {
-            app.active_tab_mut().yolo_countdown_expired = false;
+        // Check every tab (active first, then background) for an expired yolo countdown
+        // and advance the workflow step.  Background tabs were previously skipped because
+        // the check only looked at active_tab(), causing the timer to reset instead of
+        // actually advancing the workflow.
+        let active_idx = app.active_tab_idx;
+        let tab_count = app.tabs.len();
+        for raw_i in 0..tab_count {
+            // Process the active tab first so its advancement is never delayed by
+            // background-tab work.
+            let i = if raw_i == 0 {
+                active_idx
+            } else if raw_i <= active_idx {
+                raw_i - 1
+            } else {
+                raw_i
+            };
+            if !app.tabs[i].yolo_countdown_expired {
+                continue;
+            }
+            app.tabs[i].yolo_countdown_expired = false;
+
+            // Temporarily treat tab `i` as the active tab so all advance helpers work
+            // without modification.
+            app.active_tab_idx = i;
             let is_last = app.active_tab().is_last_workflow_step();
             if is_last {
                 // On the final step, present the control board instead of auto-finishing.
+                // For a background tab this will be visible when the user switches to it.
                 let step = app.active_tab().workflow_current_step.clone().unwrap_or_default();
                 app.active_tab_mut().dialog = Dialog::WorkflowControlBoard {
                     current_step: step,
@@ -263,6 +285,8 @@ where
                 advance_workflow_next_new_container(&mut app).await;
             }
         }
+        // Restore the real active tab index after processing all expired countdowns.
+        app.active_tab_idx = active_idx;
 
         if app.should_quit {
             break;
@@ -5268,6 +5292,106 @@ mod tests {
             app.active_tab().workflow_current_step.is_some(),
             "workflow_current_step must be preserved so user can finish from the control board"
         );
+    }
+
+    // ─── Background-tab yolo countdown auto-advance ───────────────────────────
+
+    #[tokio::test]
+    async fn yolo_countdown_expiry_advances_background_tab_workflow() {
+        // When a background tab's yolo_countdown_expired flag is set, the event-loop
+        // logic must advance the workflow even though the tab is not active.
+        let mut app = new_app();
+
+        // Tab 0 is the active tab (idle).
+        // Tab 1 is a background tab running a two-step yolo workflow.
+        app.tabs.push(state::TabState::new(std::path::PathBuf::new()));
+        let tmp = tempfile::tempdir().unwrap();
+        let wf = make_workflow(vec![
+            make_step_state("plan", &[], StepStatus::Running),
+            make_step_state("impl", &["plan"], StepStatus::Pending),
+        ]);
+        app.tabs[1].workflow = Some(wf);
+        app.tabs[1].workflow_current_step = Some("plan".to_string());
+        app.tabs[1].workflow_git_root = Some(tmp.path().to_path_buf());
+        app.tabs[1].yolo_mode = true;
+        app.tabs[1].phase = state::ExecutionPhase::Running { command: "implement 0001".into() };
+        // Trigger the expired flag (as tick_all() would after 60s).
+        app.tabs[1].yolo_countdown_expired = true;
+
+        // Run the same expiry-dispatch logic as the event loop.
+        let active_idx = app.active_tab_idx;
+        let tab_count = app.tabs.len();
+        for raw_i in 0..tab_count {
+            let i = if raw_i == 0 { active_idx } else if raw_i <= active_idx { raw_i - 1 } else { raw_i };
+            if !app.tabs[i].yolo_countdown_expired { continue; }
+            app.tabs[i].yolo_countdown_expired = false;
+            app.active_tab_idx = i;
+            let is_last = app.active_tab().is_last_workflow_step();
+            if is_last {
+                let step = app.active_tab().workflow_current_step.clone().unwrap_or_default();
+                app.active_tab_mut().dialog = Dialog::WorkflowControlBoard { current_step: step, error: None };
+            } else {
+                advance_workflow_next_new_container(&mut app).await;
+            }
+        }
+        app.active_tab_idx = active_idx;
+
+        // Active tab must be unchanged.
+        assert_eq!(app.active_tab_idx, 0, "active_tab_idx must be restored");
+
+        // The background tab's 'plan' step must now be Done.
+        assert_eq!(
+            app.tabs[1].workflow.as_ref().unwrap().get_step("plan").unwrap().status,
+            StepStatus::Done,
+            "background tab: yolo countdown expiry must mark the running step Done"
+        );
+
+        // yolo_countdown_expired flag must have been consumed.
+        assert!(
+            !app.tabs[1].yolo_countdown_expired,
+            "yolo_countdown_expired must be cleared after dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn yolo_countdown_expiry_shows_control_board_on_last_step_for_background_tab() {
+        // When a background tab's last workflow step has an expired countdown, the
+        // event-loop must set WorkflowControlBoard on that tab (visible when user switches).
+        let mut app = new_app();
+        app.tabs.push(state::TabState::new(std::path::PathBuf::new()));
+        let tmp = tempfile::tempdir().unwrap();
+        let wf = make_workflow(vec![make_step_state("impl", &[], StepStatus::Running)]);
+        app.tabs[1].workflow = Some(wf);
+        app.tabs[1].workflow_current_step = Some("impl".to_string());
+        app.tabs[1].workflow_git_root = Some(tmp.path().to_path_buf());
+        app.tabs[1].yolo_mode = true;
+        app.tabs[1].phase = state::ExecutionPhase::Running { command: "implement 0001".into() };
+        app.tabs[1].yolo_countdown_expired = true;
+
+        let active_idx = app.active_tab_idx;
+        let tab_count = app.tabs.len();
+        for raw_i in 0..tab_count {
+            let i = if raw_i == 0 { active_idx } else if raw_i <= active_idx { raw_i - 1 } else { raw_i };
+            if !app.tabs[i].yolo_countdown_expired { continue; }
+            app.tabs[i].yolo_countdown_expired = false;
+            app.active_tab_idx = i;
+            let is_last = app.active_tab().is_last_workflow_step();
+            if is_last {
+                let step = app.active_tab().workflow_current_step.clone().unwrap_or_default();
+                app.active_tab_mut().dialog = Dialog::WorkflowControlBoard { current_step: step, error: None };
+            } else {
+                advance_workflow_next_new_container(&mut app).await;
+            }
+        }
+        app.active_tab_idx = active_idx;
+
+        assert_eq!(app.active_tab_idx, 0);
+        assert!(
+            matches!(app.tabs[1].dialog, Dialog::WorkflowControlBoard { .. }),
+            "background tab: last-step expiry must set WorkflowControlBoard, got {:?}",
+            app.tabs[1].dialog
+        );
+        assert!(!app.tabs[1].yolo_countdown_expired);
     }
 
     // ── TuiInitQa unit tests ──────────────────────────────────────────────────

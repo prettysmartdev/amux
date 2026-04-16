@@ -811,7 +811,8 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
     if let Dialog::WorkflowControlBoard { current_step, error } = &tab.dialog {
         let container_minimized = tab.container_window == ContainerWindowState::Minimized;
         let is_last_step = tab.is_last_workflow_step();
-        draw_workflow_control_board(frame, area, current_step, error.as_deref(), container_minimized, is_last_step);
+        let next_step_agent = tab.next_step_different_agent();
+        draw_workflow_control_board(frame, area, current_step, error.as_deref(), container_minimized, is_last_step, next_step_agent.as_deref());
         return;
     }
     if let Dialog::WorkflowYoloCountdown { current_step } = &tab.dialog {
@@ -1509,7 +1510,9 @@ fn draw_worktree_pre_commit_message(
     frame.render_widget(footer, footer_area);
 }
 
-fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, error: Option<&str>, container_minimized: bool, is_last_step: bool) {
+fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, error: Option<&str>, container_minimized: bool, is_last_step: bool, next_step_agent: Option<&str>) {
+    // When the next step requires a different agent, "same container" is unavailable.
+    let same_container_blocked = next_step_agent.is_some() && !is_last_step;
     let popup_width = 52u16.min(area.width.saturating_sub(4));
     let base_height: u16 = if is_last_step { 13 } else { 11 };
     let popup_height = (if error.is_some() { base_height + 2 } else { base_height }).min(area.height.saturating_sub(4));
@@ -1543,11 +1546,32 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
         step_name.to_string()
     };
 
-    // Right/down arrows are dimmed and inactive on the last step.
-    let (right_arrow_style, right_label_style, down_arrow_style, down_label_style) = if is_last_step {
-        (dimmed_style, dimmed_style, dimmed_style, dimmed_style)
+    // Right arrow is dimmed and inactive on the last step.
+    let (right_arrow_style, right_label_style) = if is_last_step {
+        (dimmed_style, dimmed_style)
     } else {
-        (arrow_style, label_style, arrow_style, label_style)
+        (arrow_style, label_style)
+    };
+
+    // Down arrow is dimmed when on the last step or when the next step requires a different agent.
+    let (down_arrow_style, down_label_style) = if is_last_step || same_container_blocked {
+        (dimmed_style, dimmed_style)
+    } else {
+        (arrow_style, label_style)
+    };
+
+    // The line after the down arrow: blank normally, or a note explaining the block.
+    let down_note_line = if same_container_blocked {
+        if let Some(agent) = next_step_agent {
+            Line::from(vec![Span::styled(
+                format!("           next step uses agent '{}'", agent),
+                dimmed_style,
+            )])
+        } else {
+            Line::raw("")
+        }
+    } else {
+        Line::raw("")
     };
 
     let mut lines: Vec<Line> = vec![
@@ -1575,7 +1599,7 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
             Span::styled("↓", down_arrow_style),
             Span::styled(" Next: same container", down_label_style),
         ]),
-        Line::raw(""),
+        down_note_line,
     ];
 
     if is_last_step {
@@ -2763,6 +2787,54 @@ mod tests {
         );
         // But the dialog itself must still render.
         assert!(text.contains("Workflow Control"), "Popup should still render without error");
+    }
+
+    #[test]
+    fn workflow_control_board_down_arrow_dimmed_with_note_when_next_step_uses_different_agent() {
+        let mut app = new_app();
+        app.active_tab_mut().phase = ExecutionPhase::Running { command: "implement 0001".into() };
+
+        // Two-step workflow where step "a" uses claude and step "b" uses codex.
+        let steps = vec![
+            crate::workflow::parser::WorkflowStep {
+                name: "a".to_string(),
+                depends_on: vec![],
+                prompt_template: "Step A".to_string(),
+                agent: None,
+            },
+            crate::workflow::parser::WorkflowStep {
+                name: "b".to_string(),
+                depends_on: vec!["a".to_string()],
+                prompt_template: "Step B".to_string(),
+                agent: None,
+            },
+        ];
+        let wf = crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
+        app.active_tab_mut().workflow = Some(wf);
+        app.active_tab_mut().workflow_current_step = Some("a".to_string());
+        app.active_tab_mut().workflow_step_agents.insert("a".to_string(), "claude".to_string());
+        app.active_tab_mut().workflow_step_agents.insert("b".to_string(), "codex".to_string());
+
+        app.active_tab_mut().dialog = crate::tui::state::Dialog::WorkflowControlBoard {
+            current_step: "a".to_string(),
+            error: None,
+        };
+
+        let text = render_all_text(&mut app, 80, 30);
+
+        // The ↓ arrow must still appear (dimmed in terminal, but the glyph is present).
+        assert!(text.contains('↓'), "Down arrow should still be rendered");
+        // The note explaining why same-container is blocked must appear.
+        assert!(
+            text.contains("codex"),
+            "Agent name 'codex' should appear in the note explaining the block. Got: {:?}",
+            text
+        );
+        assert!(
+            text.contains("next step uses agent"),
+            "Note text should explain that the next step uses a different agent. Got: {:?}",
+            text
+        );
     }
 
     #[test]

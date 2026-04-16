@@ -1483,8 +1483,12 @@ impl App {
 
             if tab.yolo_mode && tab.workflow_current_step.is_some() {
                 if stuck {
-                    // Start the countdown timer if not already running.
-                    if tab.yolo_countdown_started_at.is_none() {
+                    // Start the countdown timer if not already running and no expiry is
+                    // pending consumption by the event loop.  Without this guard, the
+                    // timer restarts on the very next tick after expiring for a background
+                    // tab, because yolo_countdown_started_at is None and is_stuck() is
+                    // still true while the container is being killed.
+                    if tab.yolo_countdown_started_at.is_none() && !tab.yolo_countdown_expired {
                         tab.yolo_countdown_started_at = Some(Instant::now());
                     }
 
@@ -2832,6 +2836,27 @@ mod tests {
             app.tabs[1].dialog,
             Dialog::None,
             "no dialog must be opened for the expired background tab"
+        );
+    }
+
+    #[test]
+    fn tick_all_yolo_does_not_restart_timer_while_expiry_is_pending() {
+        // After a background-tab countdown expires, tick_all must NOT restart the timer
+        // while yolo_countdown_expired is still true (i.e. before the event loop has
+        // consumed the flag and actually advanced the workflow).
+        let mut app = setup_background_yolo_tab_app();
+        // Simulate an already-expired countdown.
+        app.tabs[1].yolo_countdown_started_at =
+            Some(Instant::now() - YOLO_COUNTDOWN_DURATION);
+        app.tick_all(); // sets expired=true, clears started_at
+        assert!(app.tabs[1].yolo_countdown_expired);
+        assert!(app.tabs[1].yolo_countdown_started_at.is_none());
+
+        // Another tick while expired flag is still set — timer must NOT restart.
+        app.tick_all();
+        assert!(
+            app.tabs[1].yolo_countdown_started_at.is_none(),
+            "yolo_countdown_started_at must not be restarted while yolo_countdown_expired is pending"
         );
     }
 
