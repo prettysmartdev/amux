@@ -141,8 +141,11 @@ amux init                        # set up a project for amux
 amux ready [--refresh]           # verify environment; refresh and rebuild Dockerfile.dev
 amux specs new [--interview]     # create a work item; --interview has the agent fill it out
 amux specs amend <nnnn>          # update a spec to match what was actually built
-amux implement <nnnn> [--plan] [--auto] [--yolo] [--workflow <path>] [--worktree] [--mount-ssh]  # launch an agent to implement a work item
-amux chat [--plan] [--auto] [--yolo]  # start a freeform agent session
+amux implement <nnnn> [--agent <name>] [--plan] [--auto] [--yolo] [--workflow <path>] [--worktree] [--mount-ssh]  # launch an agent to implement a work item
+amux chat [--agent <name>] [--plan] [--auto] [--yolo]  # start a freeform agent session
+amux config show                 # display all config fields with effective values and override indicators
+amux config get <field>          # show global, repo, and effective value for one field
+amux config set [--global] <field> <value>  # write a config value at repo or global scope
 amux status [--watch]            # live dashboard of all running agent containers
 amux claws init                  # interactive setup of containerized nanoclaw
 amux claws ready                 # check/start the persistent nanoclaw container
