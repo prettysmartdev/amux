@@ -545,7 +545,7 @@ impl AgentRuntime for DockerRuntime {
 
     fn remove_container(&self, container_id: &str) -> Result<()> {
         let output = Command::new("docker")
-            .args(["rm", "-f", container_id])
+            .args(["rm", container_id])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output()
