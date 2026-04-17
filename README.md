@@ -1,7 +1,6 @@
 <p align="center">
-  <strong>Multi-agent manager for secure code and claw agents.</strong> <br>
-  Run and coordinate agents in parallel from your terminal. <br>
-  Keep your machine safe with containers.<br>
+  <strong>Run and coordinate AI code agents from your terminal.</strong> <br>
+  Multiple sessions, multi-step workflows, full container isolation.<br>
   <br>
   <img src="./docs/amux_logo_v3.svg" width="320" alt="AMUX">
 </p>
@@ -10,11 +9,9 @@
   <img src="https://github.com/prettysmartdev/amux/actions/workflows/test.yml/badge.svg">
 </p>
 
-## What is `amux`?
+---
 
-`amux` is a terminal multiplexer for AI code and claw agents. It gives you an interactive TUI where you can launch, monitor, and coordinate multiple agent sessions at the same time — each running safely inside its own container, isolated from your host machine.
-
-Think of it like tmux, but agents: tabs, terminal emulator, multiple parallel sessions, container stats, and stuck-agent detection, all in your terminal.
+`amux` is a terminal multiplexer for AI code agents. Open multiple agent sessions in parallel, run them through structured multi-step workflows, and keep your machine safe — every agent runs inside a container, never on the host.
 
 ![amux TUI](./docs/blog/images/tui-screenshot.png)
 
@@ -26,7 +23,7 @@ Think of it like tmux, but agents: tabs, terminal emulator, multiple parallel se
 curl -s https://prettysmart.dev/install/amux.sh | sh
 ```
 
-That's it. The installer detects your platform and puts `amux` on your `PATH`.
+The installer detects your platform and puts `amux` on your `PATH`.
 
 <details>
 <summary>Other installation options</summary>
@@ -56,121 +53,150 @@ sudo make install
 ## Quick Start
 
 ```sh
-# 1. Initialize your repo (only once)
+# 1. Initialize your repo (once per project)
 amux init
 
-# 2. Open the TUI for multi-agent coordination
+# 2. Open the TUI
 amux
 
-# 3. (optional) run the Dockerfile.dev refresh agent
-# to scan your codebase and configure every tool you need
-ready --refresh
-
-# 4. Starts a containerized agent chat session
+# 3. Start an agent session
 chat
 
-# 5. Quit the agent container and then amux
-ctrl-c # twice to quit agent, twice again to quit amux
+# 4. Or implement a specific work item
+implement 0027
 ```
 
-See the [Getting Started Guide](docs/getting-started.md) for a full walkthrough. All commands are available directly via the CLI in addition to the TUI.
+See the [Getting Started Guide](docs/00-getting-started.md) for a full walkthrough.
 
 ---
 
-## Why `amux`?
+## What you can do
 
-Running agents one at a time is a waste. Running them directly on your machine is risky. `amux` solves both:
+### Run multiple agents at once
 
-- **Parallel sessions** — open multiple tabs, each running a different agent against the same or different projects simultaneously
-- **Hard isolation** — every agent runs in a container; your filesystem, credentials, and environment are never exposed to agent-generated code execution
-- **Secure claw agents** — `amux` sets up and manages a fully containerized nanoclaw install that lives securely on your machine for 24/7 subagents, workflows, and messaging app chat.
-- **Agent-agnostic** — supports Claude Code, Nanoclaw, Codex, OpenCode, Maki, and Gemini out of the box
-- **Pluggable runtimes** — use Docker (default, all platforms) or Apple Containers (macOS 26+, no Docker Desktop required)
+Open a new tab with **Ctrl+T**. Each tab is independent — its own working directory, its own container, running in the background while you work in another tab. Switch between tabs with **Ctrl+A** / **Ctrl+D**.
 
----
+If a running agent goes quiet, the tab turns yellow so you know to check in. For workflow steps, amux opens a control panel automatically.
 
-### Multi-tab agent coordination
+### Run structured workflows
 
-Each tab is fully independent — its own working directory, running command, and container session. Tabs continue running in the background when you switch away. Move between them with Ctrl+A and Ctrl+D
+![amux workflows](./docs/blog/images/tui-workflow.png)
 
-**Stuck agent detection**: amux detects when an agent is stuck and needs help, it will alert you with a yellow tab so you can intervene.
+A workflow breaks a task into phases — for example, plan → implement → review → docs. Each phase is a separate agent session. You review the output between phases and decide whether to continue, retry, or redirect.
 
-### Interactive container terminal
+Workflows are plain Markdown files in your repo:
 
-When an agent container starts, a dedicated terminal appears with:
-- Full interactive terminal emulator (every agent runs fullscreen as it normally would)
-- Mouse scroll for terminal scrollback history
-- Live container stats: CPU, memory, total runtime
-- Press **Esc** to minimize (agent keeps running); **c** to maximize
+```markdown
+## Step: plan
+Prompt: Read work item {{work_item_content}} and produce an implementation plan.
 
----
+## Step: implement
+Depends-on: plan
+Prompt: Implement work item {{work_item_number}} according to the plan.
 
-## Claw agent management
-
-`amux claws` commands set up and manage a persistent [nanoclaw](https://github.com/qwibitai/nanoclaw) container — a machine-global background agent with Docker socket access, designed for long-running, scheduled, or cross-project work. Accessible via your messaging app of choice.
+## Step: review
+Depends-on: implement
+Prompt: Review the implementation for correctness and style.
+```
 
 ```sh
-amux claws ready    # guided setup and status
+amux implement 0027 --workflow aspec/workflows/implement-feature.md
 ```
 
-The nanoclaw container:
-- Runs persistently in the background across `amux` sessions
-- Survives reboots (check status with `claws ready`)
-- Has Docker socket access to build and run containers on your behalf
-- Manage seamlessly via the amux TUI
+### Use different agents per step
+
+Each workflow step can specify which agent runs it:
+
+```markdown
+## Step: implement
+Depends-on: plan
+Agent: codex
+Prompt: Implement the plan.
+
+## Step: review
+Depends-on: implement
+Agent: claude
+Prompt: Review for correctness and style.
+```
+
+Supported agents: `claude`, `codex`, `opencode`, `maki`, `gemini`. Steps without an `Agent:` field use your configured default.
+
+
+### Hand off to the agent completely (yolo mode)
+
+![amux yolo mode](./docs/blog/images/tui-yolo-mode.png)
+
+`--yolo` removes all permission prompts and auto-advances stuck workflow steps. Use it when you have a well-specified task and want to return to a finished result.
+
+```sh
+# Implement fully autonomously, changes isolated to a branch
+amux implement 0027 --yolo --workflow aspec/workflows/implement-feature.md
+```
+
+When a workflow step completes, a 60-second yolo countdown starts. If the agent doesn't resume, the workflow advances automatically. The countdown is visible in the tab bar across all tabs — you can monitor multiple autonomous sessions without switching to each one.
+
+`--yolo --workflow` automatically runs in an isolated Git worktree, so you can review and discard the result if it isn't right.
+
+For lighter autonomy, `--auto` approves file edits automatically but still requires permission for other commands.
+
+### Keep a persistent background agent
+
+`amux claws` manages a long-lived [nanoclaw](https://github.com/qwibitai/nanoclaw) container — a machine-global background agent accessible via your messaging app (Slack, Discord, WhatsApp). Unlike per-project sessions, it survives reboots and accumulates context across sessions.
+
+```sh
+amux claws init    # guided first-time setup
+amux claws ready   # check status / restart after reboot
+amux claws chat    # attach for an interactive session (Ctrl+C to detach)
+```
 
 ---
 
 ## Security
 
-`amux` enforces a hard boundary: **agents never execute on the host machine**.
+Every agent runs inside a Docker container built from `Dockerfile.dev` — agent-generated code never executes on your host machine.
 
-- All agent code runs inside containers built from `Dockerfile.dev`
-- `amux` will automatically scan your project to create a `Dockerfile.dev` with every tool needed for your workflow
-- Only the current Git repository is mounted — never parent directories
-- Your code agent is automatically configured and authenticated with secure copies of config files and OAuth tokens from your host installation.
-- `amux` itself is a statically compiled Rust binary — memory-safe and unmodifiable by agents
-- Every Docker command is printed in full before execution so you can see exactly what runs
+- Only the current Git repository is mounted into the container
+- Credentials are passed as environment variables and masked in all displayed commands — never written to files inside containers
+- `amux ready --refresh` scans your project and updates `Dockerfile.dev` with exactly the tools your workflow needs
+- amux itself is a statically compiled Rust binary — it cannot be modified by anything running inside a container
+
+Apple Containers (macOS 26+) is also supported as an alternative to Docker Desktop.
+
+![amux TUI status](./docs/blog/images/tui-status.png)
 
 ---
 
 ## Commands
 
 ```sh
-amux init                        # set up a project for amux
-amux ready [--refresh]           # verify environment; refresh and rebuild Dockerfile.dev
-amux specs new [--interview]     # create a work item; --interview has the agent fill it out
-amux specs amend <nnnn>          # update a spec to match what was actually built
-amux implement <nnnn> [--agent <name>] [--plan] [--auto] [--yolo] [--workflow <path>] [--worktree] [--mount-ssh]  # launch an agent to implement a work item
-amux chat [--agent <name>] [--plan] [--auto] [--yolo]  # start a freeform agent session
-amux config show                 # display all config fields with effective values and override indicators
-amux config get <field>          # show global, repo, and effective value for one field
-amux config set [--global] <field> <value>  # write a config value at repo or global scope
-amux status [--watch]            # live dashboard of all running agent containers
-amux claws init                  # interactive setup of containerized nanoclaw
-amux claws ready                 # check/start the persistent nanoclaw container
+amux                                  # open the TUI
+amux init [--agent <name>]            # set up a project
+amux ready [--refresh]                # verify environment; rebuild Dockerfile.dev
+amux chat [--agent <name>] [--plan] [--auto] [--yolo]
+amux implement <nnnn> [--agent <name>] [--plan] [--auto] [--yolo] [--workflow <path>] [--worktree]
+amux specs new [--interview]          # create a work item
+amux specs amend <nnnn>               # update a spec to match what was built
+amux status [--watch]                 # dashboard of all running agent containers
+amux config show                      # view all config values
+amux claws init                       # set up the persistent nanoclaw container
+amux claws ready                      # check / restart nanoclaw
 ```
 
-All commands work in both TUI mode (type without `amux` prefix) and CLI mode.
+All commands work in both TUI mode (without the `amux` prefix) and CLI mode.
 
 ---
 
-## Development
+## Documentation
 
-```sh
-make all      # build the amux binary
-make install  # build + install to /usr/local/bin/
-make test     # run all tests
-make clean    # clean build artifacts
-```
-
----
-
-## Full Documentation
-
-- [Getting Started](docs/getting-started.md) — installation and first workflow
-- [Usage Guide](docs/usage.md) — all commands, flags, TUI reference, and configuration
-- [Architecture](docs/architecture.md) — code structure, design patterns, and testing strategy
+- [Getting Started](docs/00-getting-started.md)
+- [Using the TUI](docs/01-using-the-tui.md)
+- [Agent Sessions](docs/02-agent-sessions.md)
+- [Security & Isolation](docs/03-security-and-isolation.md)
+- [Workflows](docs/04-workflows.md)
+- [Yolo Mode](docs/05-yolo-mode.md)
+- [Nanoclaw](docs/06-nanoclaw.md)
+- [Configuration](docs/07-configuration.md)
+- [Architecture](docs/architecture.md)
 
 ---
 
