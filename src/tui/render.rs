@@ -618,26 +618,25 @@ fn build_stats_title(tab: &TabState) -> String {
 
 fn draw_status_bar(frame: &mut Frame, tab: &TabState, area: Rect) {
     let spans: Vec<Span> = match (&tab.phase, &tab.focus, &tab.container_window) {
-        // Container maximized + window focused: Esc to minimize, scroll for history.
-        // When a workflow step is running, add a hint to use Ctrl+w after minimizing.
+        // Container maximized + window focused: ctrl-m to toggle, ctrl-w for workflow controls.
         (ExecutionPhase::Running { .. }, Focus::ExecutionWindow, ContainerWindowState::Maximized) => {
             if tab.workflow.is_some() && tab.workflow_current_step.is_some() {
                 vec![Span::styled(
-                    " Esc minimize  ·  then ctrl-w for workflow controls ",
+                    " ctrl-m minimize  ·  ctrl-w workflow controls ",
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 )]
             } else {
                 vec![Span::styled(
-                    " Esc minimize  ·  scroll ↕ history ",
+                    " ctrl-m minimize  ·  scroll ↕ history ",
                     Style::default().fg(Color::Yellow),
                 )]
             }
         }
 
-        // Container minimized + window focused: hints for scrolling + c to restore.
+        // Container minimized + window focused: hints for scrolling + ctrl-m to restore.
         (ExecutionPhase::Running { .. }, Focus::ExecutionWindow, ContainerWindowState::Minimized) => {
             vec![Span::styled(
-                " ↑/↓ scroll  ·  b/e jump  ·  c restore container  ·  Esc deselect ",
+                " ↑/↓ scroll  ·  b/e jump  ·  ctrl-m restore container  ·  Esc deselect ",
                 Style::default().fg(Color::DarkGray),
             )]
         }

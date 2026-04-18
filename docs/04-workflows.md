@@ -192,7 +192,7 @@ All flags available on `implement` work with `--workflow`:
 
 ## Workflow control board (TUI only)
 
-While a workflow step is **running**, press **Ctrl+W** (with the container window minimized) to open the **workflow control board** — a popup that lets you redirect execution without waiting for the current step to finish.
+While a workflow step is **running**, press **Ctrl+W** to open the **workflow control board** — a popup that lets you redirect execution without waiting for the current step to finish. Ctrl+W works regardless of whether the container window is maximized or minimized.
 
 ```
 ╭──────── Workflow Control ────────╮
@@ -236,14 +236,7 @@ In command mode, the "same container" prompt is skipped entirely and the explana
 Ctrl+W requires:
 - A workflow active in the current tab
 - A step currently running
-- Container window **minimized**
 - No other dialog open
-
-When the container is maximized, the hint changes to remind you to minimize first:
-
-```
-Press Esc to minimize container, then Ctrl+w for workflow controls
-```
 
 ---
 
@@ -347,7 +340,6 @@ Steps that share the same `Depends-on` set form a **parallel group**. amux execu
 | Large number of parallel steps | Capped at 3 visible rows; extra shown as `+ N more…` |
 | Large number of sequential steps | `+ N more…` box at the far right of the strip |
 | **d** pressed; auto-popup suppressed | Auto-open skipped until workflow advances; Ctrl+W still works |
-| Container window maximized (manual Ctrl+W) | Ctrl+W suppressed; hint guides you to minimize first |
 | Container window maximized (auto-open) | Dialog opens over the maximized terminal; input routes to dialog |
 | Another dialog already open | Both Ctrl+W and auto-open suppressed until open dialog is dismissed |
 | Step silent on a background tab (non-yolo) | Auto-open deferred; control board appears when you switch to that tab |

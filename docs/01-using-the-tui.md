@@ -24,7 +24,7 @@ This guide covers TUI mode.
 │  │                                                          ││
 │  ╰──────────────────────────────────────────────────────────╯│
 │                                                             │
-│  Press Esc to minimize the container window                 │
+│  Ctrl-M toggle · Ctrl-W workflow · Ctrl-, config            │
 └─────────────────────────────────────────────────────────────┘
 ┌─── command ──────────────────────────────────────────────────┐
 │ > _                                                           │
@@ -137,22 +137,26 @@ Whenever amux launches a container to run a code agent, a **container window** a
 │  [agent output — full terminal emulation]                    │
 │                                                               │
 ╰───────────────────────────────────────────────────────────────╯
-  Esc minimize  ·  scroll ↕ history  ·  drag select  ·  Ctrl+Y copy
+  Ctrl-M toggle  ·  scroll ↕ history  ·  drag select  ·  Ctrl+Y copy
 ```
 
 The title bar shows the container name, live CPU usage, memory, and total runtime. Stats are polled from the container runtime every 5 seconds.
 
 ### Keyboard and mouse
 
-When the container window is visible and maximized, all keyboard input is forwarded to the agent:
+When the container window is visible and maximized, almost all keyboard input is forwarded to the agent:
 
 | Key / Action | Effect |
 |---|---|
 | Type | Sent directly to the agent |
-| **Esc** | Minimize the container window (agent keeps running) |
+| **Esc** | Forwarded to the agent (`\x1b`) — for vim, fzf, REPLs, and other interactive programs |
+| **Tab / Shift+Tab** | Forwarded to the agent |
+| **Ctrl+M** | Toggle: minimize the container window (agent keeps running) |
 | Mouse scroll | Scroll terminal scrollback (5 lines per tick) |
 | Mouse drag | Select text (highlighted with inverted colours) |
 | **Ctrl+Y** | Copy the current selection to clipboard (ANSI stripped) |
+
+> **Note on Ctrl+M:** `Ctrl+M` produces the same byte (`\r`) as carriage return in many terminals. amux intercepts Ctrl+M before it reaches the agent, so agents cannot receive a raw `\r` from this key combination. In practice this is not a problem — agents use Enter (which produces `\r\n` or `\n`) for line input, not Ctrl+M.
 
 Scrollback holds up to 10,000 lines by default. While scrolled, the title bar shows `↑ scrollback (N / M lines)` where `N` is your current offset and `M` is the total depth. Scroll back to the bottom to return to the live view.
 
@@ -160,7 +164,7 @@ Scrollback holds up to 10,000 lines by default. While scrolled, the title bar sh
 
 ### Minimizing and restoring
 
-Press **Esc** to minimize the container window. The agent keeps running. The window collapses to a 1-line status bar:
+Press **Ctrl+M** to minimize the container window. The agent keeps running. The window collapses to a 1-line status bar:
 
 ```
 ─ 🔒 claude | myproject | 5% | 200mb | 1m 23s ─────────────────
@@ -170,7 +174,7 @@ From the minimized state:
 
 | Key | Effect |
 |-----|--------|
-| **c** | Restore the container window |
+| **Ctrl+M** | Restore the container window |
 | **↑ / ↓** | Scroll the execution window (behind the status bar) |
 | **b / e** | Jump to beginning / end of execution window |
 | **Esc** | Return focus to command box |
@@ -189,7 +193,7 @@ This summary persists until a new container is launched.
 
 ## Config dialog
 
-Type `config show` in the command box and press **Enter** to open the config dialog — a large centered modal overlay that lets you view and edit all configuration fields without leaving the TUI.
+Press **Ctrl+,** from anywhere in the TUI to open the config dialog instantly — even while an agent is running or the container window is maximized. You can also type `config show` in the command box and press **Enter**. Either way opens the same large centered modal overlay for viewing and editing all configuration fields without leaving the TUI.
 
 ```
 ╭─── Configuration ────────────────────────────────────────────────────────╮
@@ -221,6 +225,7 @@ Type `config show` in the command box and press **Enter** to open the config dia
 | **Esc** (edit mode) | Cancel edit without saving |
 | **Ctrl+Enter** | Save all pending changes to the appropriate config files |
 | **Esc** (navigation) | Close the dialog and return to the previous view |
+| **Ctrl+,** | Close the dialog (same as Esc in navigation mode) |
 
 When a row is selected, a hint line below the table shows the accepted values for that field (e.g. `claude | codex | opencode | maki | gemini`).
 
@@ -279,14 +284,15 @@ For workflow tabs, amux goes further: the [workflow control board](04-workflows.
 | **Ctrl+A** | Anywhere | Switch to previous tab |
 | **Ctrl+D** | Anywhere | Switch to next tab |
 | **Ctrl+A / Ctrl+D** | Yolo countdown dialog | Close dialog and continue countdown in background |
+| **Ctrl+M** | Anywhere (container running) | Toggle container window (minimize / restore) |
 | **Ctrl+C** | Command box, multiple tabs | Close current tab |
-| **Ctrl+W** | Workflow running, container minimized | Open workflow control board |
+| **Ctrl+W** | Workflow running | Open workflow control board |
+| **Ctrl+,** | Anywhere | Open / close config dialog |
 | **Enter** | Command box | Execute command |
 | **Shift+Enter** | Command box | Insert newline |
 | **↑** | Command box | Focus execution window |
 | **q** | Command box (empty) | Quit confirmation |
-| **Esc** | Container window maximized | Minimize container window |
-| **c** | Container minimized | Restore container window |
+| **Esc** | Container window maximized | Forwarded to agent (`\x1b`) |
 | **↑ / ↓** | Execution window selected | Scroll output |
 | **b / e** | Execution window selected | Jump to beginning / end |
 | **Ctrl+Y** | Container window, text selected | Copy selection to clipboard |

@@ -1,5 +1,5 @@
 use crate::commands::new::WorkItemKind;
-use crate::tui::state::{App, TabState, ContainerWindowState, Dialog, ExecutionPhase, Focus};
+use crate::tui::state::{App, TabState, ConfigDialogState, ContainerWindowState, Dialog, ExecutionPhase, Focus};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 use strsim::levenshtein;
@@ -143,6 +143,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     app.active_tab_mut().acknowledge_stuck();
     app.active_tab_mut().record_user_activity();
 
+    // Ctrl-, closes ConfigShow when it is the active dialog (toggle behavior).
+    // This must run before the dialog dispatch below; otherwise handle_config_show
+    // would consume the key and the dialog would never close via Ctrl-,.
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char(',')
+        && matches!(app.active_tab().dialog, Dialog::ConfigShow(_))
+    {
+        app.active_tab_mut().dialog = Dialog::None;
+        return Action::None;
+    }
+
     // Modal dialogs intercept all input.
     let dialog = app.active_tab().dialog.clone();
     match dialog {
@@ -263,18 +274,67 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             KeyCode::Char('d') => return Action::SwitchTabRight,
             KeyCode::Char('w') => {
                 let tab = app.active_tab();
-                // Guard: only open when workflow is running, not maximized, no other dialog.
+                // Guard: only open when workflow is running, no other dialog.
                 if tab.dialog == Dialog::None
                     && tab.workflow.is_some()
                     && tab.workflow_current_step.is_some()
                     && matches!(tab.phase, ExecutionPhase::Running { .. })
-                    && tab.container_window != ContainerWindowState::Maximized
                 {
                     let step = tab.workflow_current_step.clone().unwrap();
                     app.active_tab_mut().dialog = Dialog::WorkflowControlBoard {
                         current_step: step,
                         error: None,
                     };
+                }
+                return Action::None;
+            }
+            KeyCode::Char('m') => {
+                let tab = app.active_tab_mut();
+                match tab.container_window {
+                    ContainerWindowState::Maximized => {
+                        tab.container_window = ContainerWindowState::Minimized;
+                        tab.clear_terminal_selection();
+                    }
+                    ContainerWindowState::Minimized => {
+                        tab.container_window = ContainerWindowState::Maximized;
+                        tab.focus = Focus::ExecutionWindow;
+                    }
+                    ContainerWindowState::Hidden => {}
+                }
+                return Action::None;
+            }
+            KeyCode::Char(',') => {
+                // Toggle the config dialog: open if closed, close if already open.
+                let tab = app.active_tab();
+                if matches!(tab.dialog, Dialog::ConfigShow(_)) {
+                    app.active_tab_mut().dialog = Dialog::None;
+                } else if app.active_tab().dialog == Dialog::None {
+                    let cwd = app.active_tab().cwd.clone();
+                    let git_root = crate::commands::init_flow::find_git_root_from(&cwd);
+                    let global_config = crate::config::load_global_config().unwrap_or_default();
+                    let repo_config = git_root
+                        .as_deref()
+                        .and_then(|r| {
+                            let _ = crate::config::migrate_legacy_repo_config(r);
+                            crate::config::load_repo_config(r).ok()
+                        })
+                        .unwrap_or_default();
+                    use crate::commands::config::{ALL_FIELDS, FieldScope};
+                    let initial_col = match ALL_FIELDS[0].scope {
+                        FieldScope::RepoOnly => 1,
+                        _ => 0,
+                    };
+                    app.active_tab_mut().dialog = Dialog::ConfigShow(ConfigDialogState {
+                        selected_row: 0,
+                        selected_col: initial_col,
+                        edit_mode: false,
+                        edit_value: String::new(),
+                        edit_cursor: 0,
+                        git_root,
+                        global_config,
+                        repo_config,
+                        error_msg: None,
+                    });
                 }
                 return Action::None;
             }
@@ -295,13 +355,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
 fn handle_window_key(tab: &mut TabState, key: KeyEvent) -> Action {
     match &tab.phase {
         ExecutionPhase::Running { .. } => {
-            // Container window maximized: Esc minimizes instead of going to command box.
+            // Container window maximized: forward all keys to PTY for full interactivity.
+            // Use Ctrl-M to toggle the window (see handle_key global block).
             if tab.container_window == ContainerWindowState::Maximized {
-                if key.code == KeyCode::Esc {
-                    tab.container_window = ContainerWindowState::Minimized;
-                    tab.clear_terminal_selection();
-                    return Action::None;
-                }
                 // Ctrl+Y: copy terminal selection to clipboard (Ctrl+C is reserved for PTY interrupt).
                 if key.code == KeyCode::Char('y') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     if tab.terminal_selection_start.is_some() {
@@ -319,10 +375,6 @@ fn handle_window_key(tab: &mut TabState, key: KeyEvent) -> Action {
             // Container window minimized: outer window is in focus for scrolling.
             if tab.container_window == ContainerWindowState::Minimized {
                 match key.code {
-                    KeyCode::Char('c') => {
-                        tab.container_window = ContainerWindowState::Maximized;
-                        return Action::None;
-                    }
                     KeyCode::Up => {
                         let max = tab.output_lines.len();
                         if tab.scroll_offset < max {
@@ -423,13 +475,6 @@ fn handle_input_key(tab: &mut TabState, key: KeyEvent, num_tabs: usize) -> Actio
 
     // When a command is running, the command box is view-only (block editing input).
     if matches!(tab.phase, ExecutionPhase::Running { .. }) {
-        // 'c' restores the minimized container window from any focus state.
-        if key.code == KeyCode::Char('c')
-            && tab.container_window == ContainerWindowState::Minimized
-        {
-            tab.container_window = ContainerWindowState::Maximized;
-            tab.focus = Focus::ExecutionWindow;
-        }
         return Action::None;
     }
 
@@ -2152,7 +2197,7 @@ mod tests {
     // --- Container window input tests ---
 
     #[test]
-    fn esc_minimizes_container_window_when_maximized() {
+    fn esc_forwarded_to_pty_when_container_maximized() {
         let mut app = new_app();
         app.active_tab_mut().phase = ExecutionPhase::Running { command: "implement 0001".into() };
         app.active_tab_mut().focus = Focus::ExecutionWindow;
@@ -2160,14 +2205,16 @@ mod tests {
 
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
         let action = handle_key(&mut app, key);
-        assert!(matches!(action, Action::None));
-        assert_eq!(app.active_tab().container_window, ContainerWindowState::Minimized);
-        // Focus stays on ExecutionWindow (outer window), not CommandBox
-        assert_eq!(app.active_tab().focus, Focus::ExecutionWindow);
+        // Esc is forwarded to the PTY as \x1b — use Ctrl-M to toggle the window.
+        assert!(
+            matches!(action, Action::ForwardToPty(ref b) if b == b"\x1b"),
+            "Esc should be forwarded to PTY when container is maximized"
+        );
+        assert_eq!(app.active_tab().container_window, ContainerWindowState::Maximized);
     }
 
     #[test]
-    fn c_key_restores_container_window_when_minimized() {
+    fn c_key_does_not_restore_container_window_when_minimized() {
         let mut app = new_app();
         app.active_tab_mut().phase = ExecutionPhase::Running { command: "implement 0001".into() };
         app.active_tab_mut().focus = Focus::ExecutionWindow;
@@ -2176,7 +2223,8 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty());
         let action = handle_key(&mut app, key);
         assert!(matches!(action, Action::None));
-        assert_eq!(app.active_tab().container_window, ContainerWindowState::Maximized);
+        // bare 'c' no longer restores — use Ctrl-M instead.
+        assert_eq!(app.active_tab().container_window, ContainerWindowState::Minimized);
     }
 
     #[test]
@@ -2512,12 +2560,16 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_w_does_not_open_dialog_when_container_is_maximized() {
+    fn ctrl_w_opens_dialog_when_container_is_maximized() {
         let mut app = setup_running_workflow_app();
         app.active_tab_mut().container_window = ContainerWindowState::Maximized;
         let key = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
         handle_key(&mut app, key);
-        assert_eq!(app.active_tab().dialog, Dialog::None);
+        // Ctrl-W opens the workflow control board regardless of container window state.
+        assert!(
+            matches!(app.active_tab().dialog, Dialog::WorkflowControlBoard { .. }),
+            "expected WorkflowControlBoard dialog"
+        );
     }
 
     #[test]
@@ -2624,7 +2676,7 @@ mod tests {
     /// 'c' from CommandBox focus (e.g. after pressing Esc from minimized container)
     /// must restore the container window even when no dialog is open.
     #[test]
-    fn c_key_from_command_box_restores_minimized_container_during_workflow() {
+    fn c_key_from_command_box_does_not_restore_minimized_container_during_workflow() {
         let mut app = setup_running_workflow_app();
         // Simulate user having pressed Esc to move focus to CommandBox
         app.active_tab_mut().focus = Focus::CommandBox;
@@ -2634,15 +2686,142 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty());
         handle_key(&mut app, key);
 
+        // bare 'c' no longer restores the container — use Ctrl-M instead.
         assert_eq!(
             app.active_tab().container_window,
-            ContainerWindowState::Maximized,
-            "'c' should restore the minimized container"
+            ContainerWindowState::Minimized,
+            "'c' should not restore the minimized container"
         );
         assert_eq!(
             app.active_tab().focus,
-            Focus::ExecutionWindow,
-            "focus should move back to ExecutionWindow"
+            Focus::CommandBox,
+            "focus should remain on CommandBox"
+        );
+    }
+
+    // ─── Ctrl-M container window toggle ──────────────────────────────────────
+
+    #[test]
+    fn ctrl_m_maximized_to_minimized_clears_terminal_selection() {
+        let mut app = new_app();
+        app.active_tab_mut().phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.active_tab_mut().focus = Focus::ExecutionWindow;
+        app.active_tab_mut().container_window = ContainerWindowState::Maximized;
+        // Set a terminal selection to verify it is cleared on minimize.
+        app.active_tab_mut().terminal_selection_start = Some((0, 0));
+        app.active_tab_mut().terminal_selection_end = Some((0, 5));
+
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL);
+        let action = handle_key(&mut app, key);
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.active_tab().container_window, ContainerWindowState::Minimized);
+        assert!(
+            app.active_tab().terminal_selection_start.is_none(),
+            "terminal_selection_start should be cleared on minimize"
+        );
+        assert!(
+            app.active_tab().terminal_selection_end.is_none(),
+            "terminal_selection_end should be cleared on minimize"
+        );
+    }
+
+    #[test]
+    fn ctrl_m_minimized_to_maximized_focuses_execution_window() {
+        let mut app = new_app();
+        app.active_tab_mut().phase = ExecutionPhase::Running { command: "implement 0001".into() };
+        app.active_tab_mut().focus = Focus::CommandBox;
+        app.active_tab_mut().container_window = ContainerWindowState::Minimized;
+
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL);
+        let action = handle_key(&mut app, key);
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.active_tab().container_window, ContainerWindowState::Maximized);
+        assert_eq!(app.active_tab().focus, Focus::ExecutionWindow);
+    }
+
+    #[test]
+    fn ctrl_m_hidden_is_noop() {
+        let mut app = new_app();
+        app.active_tab_mut().phase = ExecutionPhase::Idle;
+        app.active_tab_mut().focus = Focus::CommandBox;
+        app.active_tab_mut().container_window = ContainerWindowState::Hidden;
+
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL);
+        let action = handle_key(&mut app, key);
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.active_tab().container_window, ContainerWindowState::Hidden);
+        assert_eq!(app.active_tab().focus, Focus::CommandBox);
+    }
+
+    // ─── Ctrl-, config show toggle ────────────────────────────────────────────
+
+    #[test]
+    fn ctrl_comma_opens_config_show_when_idle() {
+        let mut app = new_app();
+        // Default state: Idle, CommandBox, Hidden, no dialog.
+        assert_eq!(app.active_tab().dialog, Dialog::None);
+
+        let key = KeyEvent::new(KeyCode::Char(','), KeyModifiers::CONTROL);
+        let action = handle_key(&mut app, key);
+
+        assert!(matches!(action, Action::None));
+        assert!(
+            matches!(app.active_tab().dialog, Dialog::ConfigShow(_)),
+            "Ctrl-, should open ConfigShow when idle; got {:?}",
+            app.active_tab().dialog,
+        );
+    }
+
+    #[test]
+    fn ctrl_comma_opens_config_show_when_container_maximized() {
+        let mut app = setup_running_workflow_app();
+        app.active_tab_mut().container_window = ContainerWindowState::Maximized;
+
+        let key = KeyEvent::new(KeyCode::Char(','), KeyModifiers::CONTROL);
+        let action = handle_key(&mut app, key);
+
+        assert!(matches!(action, Action::None));
+        assert!(
+            matches!(app.active_tab().dialog, Dialog::ConfigShow(_)),
+            "Ctrl-, should open ConfigShow even when container is maximized; got {:?}",
+            app.active_tab().dialog,
+        );
+    }
+
+    #[test]
+    fn ctrl_comma_toggles_off_config_show() {
+        let mut app = new_app();
+        let key = KeyEvent::new(KeyCode::Char(','), KeyModifiers::CONTROL);
+        // First press opens ConfigShow.
+        handle_key(&mut app, key);
+        assert!(
+            matches!(app.active_tab().dialog, Dialog::ConfigShow(_)),
+            "first Ctrl-, should open ConfigShow"
+        );
+        // Second press closes it.
+        handle_key(&mut app, key);
+        assert_eq!(
+            app.active_tab().dialog,
+            Dialog::None,
+            "second Ctrl-, should close ConfigShow"
+        );
+    }
+
+    #[test]
+    fn ctrl_comma_noop_when_other_dialog_active() {
+        let mut app = new_app();
+        app.active_tab_mut().dialog = Dialog::QuitConfirm;
+
+        let key = KeyEvent::new(KeyCode::Char(','), KeyModifiers::CONTROL);
+        handle_key(&mut app, key);
+
+        assert_eq!(
+            app.active_tab().dialog,
+            Dialog::QuitConfirm,
+            "Ctrl-, should not affect other active dialogs"
         );
     }
 }
