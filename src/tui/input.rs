@@ -68,6 +68,8 @@ pub enum Action {
     WorkflowFinish,
     /// Workflow control board: disable auto-popup of stuck dialog for the current step.
     DisableAutoWorkflowForStep,
+    /// Workflow: cancel execution — kill container, revert step to Pending, return tab to idle.
+    WorkflowCancelExecution,
     /// Worktree merge prompt: merge the worktree branch into the current branch.
     WorktreeMerge,
     /// Worktree merge prompt: discard the worktree branch and remove the worktree.
@@ -215,6 +217,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         Dialog::WorkflowYoloCountdown { .. } => {
             return handle_workflow_yolo_countdown(app.active_tab_mut(), key)
+        }
+        Dialog::WorkflowCancelConfirm => {
+            return handle_workflow_cancel_confirm(app.active_tab_mut(), key)
         }
         Dialog::WorktreeMergePrompt { .. } => {
             return handle_worktree_merge_prompt(app.active_tab_mut(), key)
@@ -374,6 +379,15 @@ fn handle_window_key(tab: &mut TabState, key: KeyEvent) -> Action {
 
             // Container window minimized: outer window is in focus for scrolling.
             if tab.container_window == ContainerWindowState::Minimized {
+                // Ctrl-C while a workflow step is running: ask to cancel.
+                if key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && tab.workflow.is_some()
+                    && tab.workflow_current_step.is_some()
+                {
+                    tab.dialog = Dialog::WorkflowCancelConfirm;
+                    return Action::None;
+                }
                 match key.code {
                     KeyCode::Up => {
                         let max = tab.output_lines.len();
@@ -1175,8 +1189,13 @@ fn handle_workflow_control_board(tab: &mut TabState, key: KeyEvent) -> Action {
             tab.dismiss_stuck_dialog();
             Action::None
         }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl-C: open the workflow cancel confirmation dialog.
+            tab.dialog = Dialog::WorkflowCancelConfirm;
+            Action::None
+        }
         KeyCode::Char('c') => {
-            // Dismiss the dialog (with backoff) and restore the container window if minimized.
+            // Plain 'c': dismiss the dialog (with backoff) and restore the container window.
             tab.dismiss_stuck_dialog();
             if tab.container_window == ContainerWindowState::Minimized {
                 tab.container_window = ContainerWindowState::Maximized;
@@ -1213,6 +1232,19 @@ fn handle_workflow_yolo_countdown(tab: &mut TabState, key: KeyEvent) -> Action {
     }
 }
 
+fn handle_workflow_cancel_confirm(tab: &mut TabState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            tab.dialog = Dialog::None;
+            Action::WorkflowCancelExecution
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
 
 fn handle_worktree_merge_prompt(tab: &mut TabState, key: KeyEvent) -> Action {
     match key.code {

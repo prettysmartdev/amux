@@ -497,6 +497,10 @@ async fn handle_action(app: &mut App, action: Action) {
             app.active_tab_mut().auto_workflow_disabled_for_step = true;
         }
 
+        Action::WorkflowCancelExecution => {
+            cancel_workflow_execution(app).await;
+        }
+
         Action::WorktreeMerge => {
             handle_worktree_merge(app).await;
         }
@@ -4083,6 +4087,47 @@ fn abort_workflow(app: &mut App) {
     app.active_tab_mut().push_output("Workflow paused. Run again to resume.".to_string());
     app.active_tab_mut().workflow_current_step = None;
     // Keep `workflow` state so the user can resume later.
+}
+
+/// Cancel the currently running workflow step: kill the container, revert the step to
+/// Pending in the state file, and return the tab to idle so the user can resume later.
+async fn cancel_workflow_execution(app: &mut App) {
+    let current_step = match app.active_tab().workflow_current_step.clone() {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Revert the current step to Pending so it can be restarted on next run.
+    if let Some(ref mut wf) = app.active_tab_mut().workflow {
+        wf.set_status(&current_step, StepStatus::Pending);
+    }
+    if let (Some(wf), Some(git_root)) = (
+        app.active_tab().workflow.clone(),
+        app.active_tab().workflow_git_root.clone(),
+    ) {
+        let _ = workflow::save_workflow_state(&git_root, &wf);
+    }
+
+    // Kill the running container (non-blocking; container will stop in the background).
+    if let Some(name) = app
+        .active_tab()
+        .container_info
+        .as_ref()
+        .map(|i| i.container_name.clone())
+    {
+        let stop_runtime = app.runtime.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = stop_runtime.stop_container(&name);
+        });
+    }
+
+    // Clear the active step before resetting so check_workflow_step_completion ignores
+    // the PTY exit event that arrives when the container eventually stops.
+    app.active_tab_mut().workflow_current_step = None;
+    app.active_tab_mut()
+        .push_output("Workflow cancelled. Run again to resume from this step.".to_string());
+    // Tear down the PTY channels and container window, returning the tab to idle.
+    app.active_tab_mut().reset_to_idle();
 }
 
 /// Retry the failed workflow step.

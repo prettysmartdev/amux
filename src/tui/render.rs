@@ -846,6 +846,10 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
             " Ctrl+C pressed ",
             " Press ctrl-c again to quit amux, or esc to cancel  ".to_string(),
         ),
+        Dialog::WorkflowCancelConfirm => (
+            " Cancel Workflow Execution ",
+            "  Cancel workflow execution?\n\n  The running container will be killed and the\n  current step returned to Pending for resumption.\n\n  [y] cancel execution   [n / Esc] keep running  ".to_string(),
+        ),
         Dialog::MountScope { git_root, cwd } => (
             " Mount Scope ",
             format!(
@@ -1119,7 +1123,7 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
 
     let popup_width = 72u16.min(area.width.saturating_sub(4));
     // Height = line count + 2 border rows, capped to terminal height.
-    let line_count = body.chars().filter(|&c| c == '\n').count() as u16 + 1;
+    let line_count: u16 = body.chars().filter(|&c| c == '\n').count() as u16 + 1;
     let popup_height = (line_count + 2).max(5).min(area.height.saturating_sub(4));
     let popup = centered_rect(popup_width, popup_height, area);
 
@@ -1513,7 +1517,9 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
     // When the next step requires a different agent, "same container" is unavailable.
     let same_container_blocked = next_step_agent.is_some() && !is_last_step;
     let popup_width = 52u16.min(area.width.saturating_sub(4));
-    let base_height: u16 = if is_last_step { 13 } else { 11 };
+    // base_height accounts for 8 content lines + 1 cancel line + 1 hint + 2 border rows.
+    // Last step adds 2 more lines for the Ctrl+Enter finish action.
+    let base_height: u16 = if is_last_step { 15 } else { 13 };
     let popup_height = (if error.is_some() { base_height + 2 } else { base_height }).min(area.height.saturating_sub(4));
     let popup = centered_rect(popup_width, popup_height, area);
 
@@ -1573,6 +1579,8 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
         Line::raw("")
     };
 
+    let cancel_style = Style::default().fg(Color::Red);
+
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
             Span::raw(" Step: "),
@@ -1599,6 +1607,11 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
             Span::styled(" Next: same container", down_label_style),
         ]),
         down_note_line,
+        Line::from(vec![
+            Span::raw("         "),
+            Span::styled("^C", cancel_style),
+            Span::styled(" Cancel workflow execution", cancel_style),
+        ]),
     ];
 
     if is_last_step {
@@ -1620,14 +1633,14 @@ fn draw_workflow_control_board(frame: &mut Frame, area: Rect, step_name: &str, e
 
     let hint = if is_last_step {
         if container_minimized {
-            " [↑←] select  [Ctrl+Enter] finish  [c] restore  [d]isable auto-popup  [Esc] dismiss"
+            " [↑←] select  [Ctrl+Enter] finish  [c] restore  [^C] cancel  [d]isable  [Esc] dismiss"
         } else {
-            " [↑←] select  [Ctrl+Enter] finish  [d]isable auto-popup  [Esc] dismiss"
+            " [↑←] select  [Ctrl+Enter] finish  [^C] cancel  [d]isable auto-popup  [Esc] dismiss"
         }
     } else if container_minimized {
-        " [Arrow] select  [c] restore container  [d]isable auto-popup  [Esc] dismiss"
+        " [Arrow] select  [c] restore container  [^C] cancel  [d]isable auto-popup  [Esc] dismiss"
     } else {
-        " [Arrow] select  [d]isable controls auto-popup for this step  [Esc] dismiss"
+        " [Arrow] select  [^C] cancel  [d]isable auto-popup for this step  [Esc] dismiss"
     };
     lines.push(Line::from(vec![Span::styled(hint, hint_style)]));
 

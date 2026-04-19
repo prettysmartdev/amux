@@ -153,6 +153,9 @@ pub enum Dialog {
         /// Name of the currently running step.
         current_step: String,
     },
+    /// Confirm cancellation of the running workflow execution (y/n).
+    /// On confirmation: kills the container, reverts the step to Pending, returns tab to idle.
+    WorkflowCancelConfirm,
     /// After `implement --worktree` completes: ask whether to merge, discard, or keep the branch.
     WorktreeMergePrompt {
         branch: String,
@@ -872,6 +875,46 @@ impl TabState {
             self.vt100_parser = None;
             self.stats_rx = None;
         }
+    }
+
+    /// Forcibly terminate the running process and return the tab to idle state.
+    ///
+    /// Used when the user cancels a workflow execution mid-step.  Preserves the
+    /// `workflow` state (and output lines) so the user can resume later, but tears
+    /// down the PTY channels so no further PTY exit events are processed and the
+    /// container info / window are cleaned up.
+    pub fn reset_to_idle(&mut self) {
+        self.phase = ExecutionPhase::Idle;
+        self.focus = Focus::CommandBox;
+        // Drop PTY resources so tick() won't call finish_command when the container
+        // exit event eventually arrives.
+        self.pty = None;
+        self.pty_rx = None;
+        self.pty_line_buffer.clear();
+        self.pty_live_line = false;
+        self.pty_pending_cr = false;
+        self.exit_rx = None;
+        // Clear stuck-detection state.
+        self.last_output_time = None;
+        self.workflow_stuck_dialog_opened = false;
+        self.workflow_stuck_dialog_dismissed_at = None;
+        self.auto_workflow_disabled_for_step = false;
+        self.yolo_countdown_expired = false;
+        self.yolo_countdown_started_at = None;
+        // Close any workflow-related dialogs that no longer apply.
+        if matches!(
+            self.dialog,
+            Dialog::WorkflowYoloCountdown { .. }
+                | Dialog::WorkflowControlBoard { .. }
+                | Dialog::WorkflowCancelConfirm
+        ) {
+            self.dialog = Dialog::None;
+        }
+        // Hide the container window and release associated resources.
+        self.container_window = ContainerWindowState::Hidden;
+        self.vt100_parser = None;
+        self.stats_rx = None;
+        self.container_info = None;
     }
 
     /// Whether PTY output should be routed to the vt100 terminal emulator.
