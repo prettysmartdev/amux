@@ -54,7 +54,11 @@ Before implementing, confirm the exact model-selection flag for each supported a
 | `opencode` | `--model <name>`                         | Confirm; fallback to warning if unsupported     |
 | `maki`     | `--model <name>`                         | Confirm; fallback to warning if unsupported     |
 
-Add a new function `append_model_flag(args: &mut Vec<String>, agent: &str, model: &str)` in `src/commands/agent.rs`, following the same structure as `append_autonomous_flags`. Emit a `WARNING:` to stderr for agents where the flag is unconfirmed or unsupported, then proceed without the flag (do not abort the session).
+Add a new function `append_model_flag(args: &mut Vec<String>, agent: &str, model: &str)` in `src/commands/agent.rs`, following the same structure as `append_autonomous_flags`. The flag-appending behaviour differs by agent tier:
+
+- **Confirmed agents** (`claude`, `codex`, `gemini`): append `--model <name>` silently.
+- **Unconfirmed agents** (`opencode`, `maki`): emit a `WARNING:` to stderr that `--model` support is unconfirmed, then append the flag anyway. The agent will surface its own error if the flag is unsupported. Do not abort the session.
+- **Unknown agents**: emit a `WARNING:` to stderr and **do not** append the flag. An unrecognised agent may use entirely different flag syntax, so passing `--model` would likely corrupt its argument list.
 
 ### 2. CLI struct changes (`src/cli.rs`)
 
@@ -78,11 +82,11 @@ The existing CLI/spec parity tests in `src/cli.rs` will enforce this automatical
 
 ### 4. Entrypoint builder changes
 
-`chat_entrypoint`, `chat_entrypoint_non_interactive`, `agent_entrypoint`, `agent_entrypoint_non_interactive`, and `workflow_step_entrypoint` in `src/commands/chat.rs` and `src/commands/implement.rs` all build a `Vec<String>` that is passed to the Docker runtime. Add an `effective_model: Option<&str>` parameter to each. After the autonomous-flags are appended, call `append_model_flag` when `effective_model` is `Some`.
+The five entrypoint builder functions (`chat_entrypoint`, `chat_entrypoint_non_interactive`, `agent_entrypoint`, `agent_entrypoint_non_interactive`, `workflow_step_entrypoint`) in `src/commands/chat.rs` and `src/commands/implement.rs` are **not** modified. They continue to return a base `Vec<String>` that does not include model flags. Model flag appending is handled downstream (see steps 5 and 9c), which keeps the builders simple and single-purpose.
 
 ### 5. `run_agent_with_sink` signature (`src/commands/agent.rs`)
 
-Add `model: Option<&str>` to `run_agent_with_sink`. Thread it through to the entrypoint builder call. This keeps model selection co-located with the rest of the per-launch configuration.
+Add `model: Option<&str>` to `run_agent_with_sink`. After the entrypoint is received (which already contains any autonomous and plan flags built by the caller), call `append_model_flag` when `model` is `Some`. This ensures model is appended last. The TUI launch functions (`launch_implement`, `launch_chat`) perform the equivalent call directly before spawning the container, since they manage Docker themselves without going through `run_agent_with_sink`.
 
 ### 6. Workflow parser changes (`src/workflow/parser.rs`)
 
@@ -148,7 +152,7 @@ Add `model: Option<String>` to the `launch_chat` and `launch_implement` function
 - **`--model` flag on single-step `implement` (no workflow)**: behaves identically to `chat --model`; model is passed to the single agent launch.
 - **Workflow resume**: `WorkflowStepState.model` is persisted in the JSON state file. On resume, the persisted per-step model is used, not any `--model` flag that may differ on the resumed invocation. This matches the existing behaviour for `agent` field.
 - **Empty string `Model:`**: treat the same as absent — `None`. A `Model:` line with no value should be a no-op, not an empty string passed to the agent.
-- **`--model` with `--plan` or `--yolo`/`--auto`**: these flags are orthogonal. `append_model_flag` is called independently of `append_plan_flags` and `append_autonomous_flags`; order in the args list should be: autonomous flags first, plan flags next, model flag last (matching the natural CLI ergonomics of agent tools).
+- **`--model` with `--plan` or `--yolo`/`--auto`**: these flags are orthogonal. `append_model_flag` is called independently of `append_plan_flags` and `append_autonomous_flags`; the resulting arg order is: plan flags first (appended inside the entrypoint builder), autonomous flags next (appended in `run_with_sink` / TUI launch before calling `run_agent_with_sink`), model flag last. All supported agent CLIs parse flags in an order-independent manner, so the exact position of `--model` relative to other flags has no effect on behaviour.
 
 
 ## Test Considerations:
