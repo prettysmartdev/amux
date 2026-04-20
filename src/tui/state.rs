@@ -279,6 +279,8 @@ pub enum PendingCommand {
     Implement {
         /// Override the configured agent for this session.
         agent: Option<String>,
+        /// Override the model used by the agent.
+        model: Option<String>,
         work_item: u32,
         non_interactive: bool,
         plan: bool,
@@ -297,6 +299,8 @@ pub enum PendingCommand {
     Chat {
         /// Override the configured agent for this session.
         agent: Option<String>,
+        /// Override the model used by the agent.
+        model: Option<String>,
         non_interactive: bool,
         plan: bool,
         allow_docker: bool,
@@ -2927,12 +2931,14 @@ mod tests {
                 depends_on: vec![],
                 prompt_template: "Step A".to_string(),
                 agent: None,
+                model: None,
             },
             crate::workflow::parser::WorkflowStep {
                 name: "b".to_string(),
                 depends_on: vec!["a".to_string()],
                 prompt_template: "Step B".to_string(),
                 agent: None,
+                model: None,
             },
         ];
         crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into())
@@ -2983,6 +2989,7 @@ mod tests {
             depends_on: vec![],
             prompt_template: "Only step".to_string(),
             agent: None,
+            model: None,
         }];
         let wf = crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
         tab.workflow = Some(wf);

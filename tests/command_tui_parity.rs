@@ -1208,9 +1208,9 @@ fn autocomplete_chat_shows_hints() {
 fn pending_command_chat_variant() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false };
-    assert_eq!(cmd, PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
-    assert_ne!(cmd, PendingCommand::Chat { agent: None, non_interactive: true, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
+    let cmd = PendingCommand::Chat { agent: None, model: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false };
+    assert_eq!(cmd, PendingCommand::Chat { agent: None, model: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
+    assert_ne!(cmd, PendingCommand::Chat { agent: None, model: None, non_interactive: true, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
     assert_ne!(cmd, PendingCommand::None);
 }
 
@@ -1558,18 +1558,18 @@ fn plan_false_does_not_add_flags() {
 fn pending_command_chat_plan_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Chat { agent: None, non_interactive: false, plan: true, allow_docker: false, mount_ssh: false, yolo: false, auto: false };
-    assert_eq!(cmd, PendingCommand::Chat { agent: None, non_interactive: false, plan: true, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
-    assert_ne!(cmd, PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
+    let cmd = PendingCommand::Chat { agent: None, model: None, non_interactive: false, plan: true, allow_docker: false, mount_ssh: false, yolo: false, auto: false };
+    assert_eq!(cmd, PendingCommand::Chat { agent: None, model: None, non_interactive: false, plan: true, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
+    assert_ne!(cmd, PendingCommand::Chat { agent: None, model: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
 }
 
 #[test]
 fn pending_command_implement_plan_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: true, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false };
-    assert_eq!(cmd, PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: true, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
-    assert_ne!(cmd, PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: false, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
+    let cmd = PendingCommand::Implement { agent: None, model: None, work_item: 1, non_interactive: false, plan: true, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false };
+    assert_eq!(cmd, PendingCommand::Implement { agent: None, model: None, work_item: 1, non_interactive: false, plan: true, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
+    assert_ne!(cmd, PendingCommand::Implement { agent: None, model: None, work_item: 1, non_interactive: false, plan: false, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
 }
 
 // ---------------------------------------------------------------------------
@@ -1739,18 +1739,18 @@ fn cli_ready_allow_docker_with_refresh() {
 fn pending_command_chat_allow_docker_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: true, mount_ssh: false, yolo: false, auto: false };
-    assert_eq!(cmd, PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: true, mount_ssh: false, yolo: false, auto: false });
-    assert_ne!(cmd, PendingCommand::Chat { agent: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
+    let cmd = PendingCommand::Chat { agent: None, model: None, non_interactive: false, plan: false, allow_docker: true, mount_ssh: false, yolo: false, auto: false };
+    assert_eq!(cmd, PendingCommand::Chat { agent: None, model: None, non_interactive: false, plan: false, allow_docker: true, mount_ssh: false, yolo: false, auto: false });
+    assert_ne!(cmd, PendingCommand::Chat { agent: None, model: None, non_interactive: false, plan: false, allow_docker: false, mount_ssh: false, yolo: false, auto: false });
 }
 
 #[test]
 fn pending_command_implement_allow_docker_field() {
     use amux::tui::state::PendingCommand;
 
-    let cmd = PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: false, allow_docker: true, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false };
-    assert_eq!(cmd, PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: false, allow_docker: true, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
-    assert_ne!(cmd, PendingCommand::Implement { agent: None, work_item: 1, non_interactive: false, plan: false, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
+    let cmd = PendingCommand::Implement { agent: None, model: None, work_item: 1, non_interactive: false, plan: false, allow_docker: true, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false };
+    assert_eq!(cmd, PendingCommand::Implement { agent: None, model: None, work_item: 1, non_interactive: false, plan: false, allow_docker: true, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
+    assert_ne!(cmd, PendingCommand::Implement { agent: None, model: None, work_item: 1, non_interactive: false, plan: false, allow_docker: false, workflow: None, worktree: false, mount_ssh: false, yolo: false, auto: false });
 }
 
 #[test]
@@ -2452,6 +2452,7 @@ fn workflow_resume_loads_correct_ready_steps() {
             status: WfStepStatus::Done,
             container_id: Some("amux-plan-container".to_string()),
             agent: None,
+            model: None,
         },
         WorkflowStepState {
             name: "implement".to_string(),
@@ -2460,6 +2461,7 @@ fn workflow_resume_loads_correct_ready_steps() {
             status: WfStepStatus::Pending,
             container_id: None,
             agent: None,
+            model: None,
         },
     ];
     let wf = WorkflowState {
@@ -2492,6 +2494,7 @@ fn workflow_state_file_removed_on_completion() {
             status: WfStepStatus::Done,
             container_id: Some("amux-abc".to_string()),
             agent: None,
+            model: None,
         },
     ];
     let wf = WorkflowState {
@@ -2530,6 +2533,7 @@ fn workflow_set_container_id_overwrites_on_retry() {
             status: WfStepStatus::Pending,
             container_id: None,
             agent: None,
+            model: None,
         },
     ];
     let mut wf = WorkflowState {
@@ -2583,6 +2587,7 @@ async fn run_agent_with_sink_mount_ssh_emits_warning() {
         true, // mount_ssh = true
         None,
         None, // agent_override
+        None,  // model
         &runtime,
     )
     .await;
@@ -2624,6 +2629,7 @@ async fn run_agent_with_sink_no_mount_ssh_no_warning() {
         false, // mount_ssh = false
         None,
         None, // agent_override
+        None,  // model
         &runtime,
     )
     .await;
@@ -2666,6 +2672,7 @@ async fn run_agent_with_sink_mount_ssh_display_cmd_includes_ssh_path() {
         true, // mount_ssh = true
         None,
         None, // agent_override
+        None,  // model
         &runtime,
     )
     .await;
@@ -2713,6 +2720,7 @@ async fn run_agent_with_sink_no_mount_ssh_display_cmd_excludes_ssh_path() {
         false, // mount_ssh = false
         None,
         None, // agent_override
+        None,  // model
         &runtime,
     )
     .await;
@@ -2761,6 +2769,7 @@ async fn run_agent_with_sink_mount_ssh_missing_ssh_dir_errors() {
         true, // mount_ssh = true, but ~/.ssh does not exist
         None,
         None, // agent_override
+        None,  // model
         &runtime,
     )
     .await;
@@ -2849,6 +2858,7 @@ async fn e2e_implement_mount_ssh_displays_warning_and_docker_mount() {
         false, // yolo
         false, // auto
         None,  // agent_override
+        None,  // model
         &runtime,
     )
     .await;
@@ -2904,6 +2914,7 @@ async fn e2e_chat_mount_ssh_displays_warning_and_docker_mount() {
         false, // yolo
         false, // auto
         None,  // agent_override
+        None,  // model
         &runtime,
     )
     .await;

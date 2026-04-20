@@ -69,6 +69,39 @@ Passing an unknown agent name exits immediately with a list of valid options:
 error: unknown agent "foo"; available agents: claude, codex, opencode, maki, gemini
 ```
 
+### `--model <NAME>`
+
+Override the model used by the launched agent for this session.
+
+```sh
+# CLI
+amux chat --model claude-opus-4-6
+amux implement 0050 --model claude-haiku-4-5
+amux chat --model=gpt-4o               # --flag=value form is also accepted
+
+# TUI command box
+chat --model claude-opus-4-6
+implement 0042 --model=claude-haiku-4-5
+```
+
+Both `--model NAME` and `--model=NAME` forms are accepted in both the CLI and the TUI command box.
+
+The model name is passed verbatim to the agent's own model flag — amux does not validate the value. If the name is not recognised by the agent, the agent surfaces its own error. This means any model the agent supports can be used without amux needing updates when providers release new models.
+
+Per-agent translation:
+
+| Agent | Flag appended |
+|-------|--------------|
+| `claude` | `--model <NAME>` |
+| `codex` | `--model <NAME>` |
+| `gemini` | `--model <NAME>` |
+| `opencode` | `--model <NAME>` |
+| `maki` | `--model <NAME>` |
+
+If an agent does not support `--model`, a `WARNING:` is printed to stderr and the session launches without the flag — it is not aborted.
+
+`--model` can be combined freely with `--agent`, `--yolo`, `--auto`, and all other flags. When used with `--workflow` on `implement`, the flag value acts as the default model for every workflow step that does not define its own `Model:` field. See [Per-step model overrides](04-workflows.md#per-step-model-overrides).
+
 ### `--non-interactive`
 
 Run the agent in print/batch mode — no interactivity required. The agent executes, produces output, and exits.
@@ -378,6 +411,7 @@ Run `amux ready` to migrate to the modular Dockerfile layout, or pass `--no-migr
 | Flag | `chat` | `implement` | Description |
 |------|--------|-------------|-------------|
 | `--agent=<name>` | ✓ | ✓ | Override the agent for this session |
+| `--model=<NAME>` | ✓ | ✓ | Override the model used by the agent |
 | `--non-interactive` | ✓ | ✓ | Print/batch mode |
 | `--plan` | ✓ | ✓ | Read-only analysis mode |
 | `--allow-docker` | ✓ | ✓ | Mount host Docker socket |

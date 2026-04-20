@@ -37,6 +37,11 @@ pub struct WorkflowStepState {
     /// so existing state files without this field deserialize without error.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Optional model override for this step (from `Model:` field).
+    /// `None` means use the workflow-level --model flag or the agent's default.
+    /// Uses `serde(default)` for backward compatibility with existing state files.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 // ─── Workflow state ───────────────────────────────────────────────────────────
@@ -74,6 +79,7 @@ impl WorkflowState {
                 container_id: None,
                 name: s.name,
                 agent: s.agent,
+                model: s.model,
             })
             .collect();
 
@@ -108,6 +114,7 @@ impl WorkflowState {
                 depends_on: s.depends_on.clone(),
                 prompt_template: s.prompt_template.clone(),
                 agent: s.agent.clone(),
+                model: s.model.clone(),
             })
             .collect();
 
@@ -350,6 +357,7 @@ mod tests {
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             prompt_template: prompt.to_string(),
             agent: None,
+            model: None,
         }
     }
 
@@ -571,12 +579,14 @@ mod tests {
                 depends_on: vec![],
                 prompt_template: "p".to_string(),
                 agent: Some("codex".to_string()),
+                model: None,
             },
             WorkflowStep {
                 name: "impl".to_string(),
                 depends_on: vec!["plan".to_string()],
                 prompt_template: "i".to_string(),
                 agent: None,
+                model: None,
             },
         ];
         let state = WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
@@ -598,6 +608,7 @@ mod tests {
             depends_on: vec![],
             prompt_template: "p".to_string(),
             agent: Some("gemini".to_string()),
+            model: None,
         }];
         let state = WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
         let json = serde_json::to_string(&state).unwrap();
@@ -633,6 +644,52 @@ mod tests {
         assert!(
             state.get_step("plan").unwrap().agent.is_none(),
             "missing agent field must default to None"
+        );
+    }
+
+    #[test]
+    fn workflow_state_serde_round_trip_preserves_model() {
+        let steps = vec![WorkflowStep {
+            name: "plan".to_string(),
+            depends_on: vec![],
+            prompt_template: "p".to_string(),
+            agent: None,
+            model: Some("claude-opus-4-6".to_string()),
+        }];
+        let state = WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: WorkflowState = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.get_step("plan").unwrap().model,
+            Some("claude-opus-4-6".to_string()),
+            "model field must survive a serde round-trip"
+        );
+    }
+
+    #[test]
+    fn workflow_state_serde_old_json_without_model_deserializes_ok() {
+        // State JSON produced before the `model` field was added must deserialize
+        // without error thanks to `#[serde(default)]` on `WorkflowStepState.model`.
+        let json = r#"{
+            "title": null,
+            "steps": [
+                {
+                    "name": "plan",
+                    "depends_on": [],
+                    "prompt_template": "p",
+                    "status": "Pending",
+                    "container_id": null
+                }
+            ],
+            "workflow_hash": "abc123",
+            "work_item": 1,
+            "workflow_name": "wf"
+        }"#;
+        let state: WorkflowState = serde_json::from_str(json)
+            .expect("old state JSON without model field must deserialize");
+        assert!(
+            state.get_step("plan").unwrap().model.is_none(),
+            "missing model field must default to None"
         );
     }
 

@@ -2454,6 +2454,7 @@ mod tests {
                 depends_on: vec![],
                 prompt_template: "do step one".to_string(),
                 agent: None,
+                model: None,
             }],
             "hash".to_string(),
             1,

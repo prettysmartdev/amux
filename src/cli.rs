@@ -102,6 +102,10 @@ pub enum Command {
         /// Available agents: claude, codex, opencode, maki, gemini.
         #[arg(long, value_name = "NAME")]
         agent: Option<String>,
+
+        /// Override the model used by the launched agent (e.g. claude-opus-4-6).
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
     },
 
     /// Start a freeform chat session with the configured agent in a container.
@@ -137,6 +141,10 @@ pub enum Command {
         /// Available agents: claude, codex, opencode, maki, gemini.
         #[arg(long, value_name = "NAME")]
         agent: Option<String>,
+
+        /// Override the model used by the launched agent (e.g. claude-opus-4-6).
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
     },
 
     /// Manage work item specs (create, interview, amend).
@@ -1215,6 +1223,70 @@ mod tests {
         let agent_space = match space_form.command.unwrap() { Command::Implement { agent, .. } => agent, _ => panic!() };
         let agent_eq    = match eq_form.command.unwrap()    { Command::Implement { agent, .. } => agent, _ => panic!() };
         assert_eq!(agent_space, agent_eq, "--agent opencode and --agent=opencode must parse identically");
+    }
+
+    // ─── --model flag on chat / implement (work item 0055) ────────────────────
+
+    #[test]
+    fn chat_model_both_forms_produce_identical_result() {
+        let space_form = parse(&["amux", "chat", "--model", "claude-opus-4-6"]);
+        let eq_form    = parse(&["amux", "chat", "--model=claude-opus-4-6"]);
+        let model_space = match space_form.command.unwrap() { Command::Chat { model, .. } => model, _ => panic!() };
+        let model_eq    = match eq_form.command.unwrap()    { Command::Chat { model, .. } => model, _ => panic!() };
+        assert_eq!(model_space, model_eq, "--model claude-opus-4-6 and --model=claude-opus-4-6 must parse identically");
+    }
+
+    #[test]
+    fn implement_model_both_forms_produce_identical_result() {
+        let space_form = parse(&["amux", "implement", "0042", "--model", "claude-haiku-4-5"]);
+        let eq_form    = parse(&["amux", "implement", "0042", "--model=claude-haiku-4-5"]);
+        let model_space = match space_form.command.unwrap() { Command::Implement { model, .. } => model, _ => panic!() };
+        let model_eq    = match eq_form.command.unwrap()    { Command::Implement { model, .. } => model, _ => panic!() };
+        assert_eq!(model_space, model_eq, "--model claude-haiku-4-5 and --model=claude-haiku-4-5 must parse identically");
+    }
+
+    #[test]
+    fn chat_without_model_is_none() {
+        let cli = parse(&["amux", "chat"]);
+        match cli.command.unwrap() {
+            Command::Chat { model, .. } => {
+                assert!(model.is_none(), "chat without --model should produce None");
+            }
+            _ => panic!("expected chat"),
+        }
+    }
+
+    #[test]
+    fn implement_without_model_is_none() {
+        let cli = parse(&["amux", "implement", "0001"]);
+        match cli.command.unwrap() {
+            Command::Implement { model, .. } => {
+                assert!(model.is_none(), "implement without --model should produce None");
+            }
+            _ => panic!("expected implement"),
+        }
+    }
+
+    #[test]
+    fn model_appears_in_chat_flags_spec() {
+        use crate::commands::spec;
+        let spec_flags: Vec<&str> = spec::CHAT_FLAGS.iter().map(|f| f.name).collect();
+        assert!(
+            spec_flags.contains(&"model"),
+            "`model` must be present in CHAT_FLAGS; got: {:?}",
+            spec_flags
+        );
+    }
+
+    #[test]
+    fn model_appears_in_implement_flags_spec() {
+        use crate::commands::spec;
+        let spec_flags: Vec<&str> = spec::IMPLEMENT_FLAGS.iter().map(|f| f.name).collect();
+        assert!(
+            spec_flags.contains(&"model"),
+            "`model` must be present in IMPLEMENT_FLAGS; got: {:?}",
+            spec_flags
+        );
     }
 
     // ─── --agent flag on chat / validate_agent_name (work item 0049) ─────────

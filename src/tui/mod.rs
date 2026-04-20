@@ -1080,6 +1080,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
             let yolo = flag_parser::flag_bool(&flags, "yolo");
             let auto = flag_parser::flag_bool(&flags, "auto");
             let agent = flag_parser::flag_string(&flags, "agent").map(str::to_string);
+            let model = flag_parser::flag_string(&flags, "model").map(str::to_string);
             let workflow = flag_parser::flag_string(&flags, "workflow").map(std::path::PathBuf::from);
             // --yolo/--auto + --workflow implies --worktree.
             if yolo && workflow.is_some() && !worktree {
@@ -1104,11 +1105,11 @@ async fn execute_command(app: &mut App, cmd: &str) {
                 Some(n) => n,
                 None => {
                     app.active_tab_mut().input_error =
-                        Some("Usage: implement <work-item-number> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>] [--worktree] [--mount-ssh] [--yolo] [--auto] [--agent=<NAME>]".into());
+                        Some("Usage: implement <work-item-number> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>] [--worktree] [--mount-ssh] [--yolo] [--auto] [--agent=<NAME>] [--model=<NAME>]".into());
                     return;
                 }
             };
-            app.active_tab_mut().pending_command = PendingCommand::Implement { agent, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto };
+            app.active_tab_mut().pending_command = PendingCommand::Implement { agent, model, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto };
             show_pre_command_dialogs(app).await;
         }
 
@@ -1122,7 +1123,8 @@ async fn execute_command(app: &mut App, cmd: &str) {
             let yolo = flag_parser::flag_bool(&flags, "yolo");
             let auto = flag_parser::flag_bool(&flags, "auto");
             let agent = flag_parser::flag_string(&flags, "agent").map(str::to_string);
-            app.active_tab_mut().pending_command = PendingCommand::Chat { agent, non_interactive, plan, allow_docker, mount_ssh, yolo, auto };
+            let model = flag_parser::flag_string(&flags, "model").map(str::to_string);
+            app.active_tab_mut().pending_command = PendingCommand::Chat { agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto };
             show_pre_command_dialogs(app).await;
         }
 
@@ -1291,11 +1293,11 @@ async fn launch_pending_command(app: &mut App) {
         PendingCommand::Ready { .. } => {
             launch_ready(app).await;
         }
-        PendingCommand::Implement { agent, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto } => {
-            launch_implement(app, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto, agent).await;
+        PendingCommand::Implement { agent, model, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto } => {
+            launch_implement(app, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto, agent, model).await;
         }
-        PendingCommand::Chat { agent, non_interactive, plan, allow_docker, mount_ssh, yolo, auto } => {
-            launch_chat(app, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent).await;
+        PendingCommand::Chat { agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto } => {
+            launch_chat(app, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model).await;
         }
         PendingCommand::ClawsReady => {
             // Claws ready is launched directly from dialog actions (ClawsReadyProceed /
@@ -1603,7 +1605,7 @@ async fn launch_init(
 
 /// Actually spawn the docker container for `implement` via PTY.
 #[allow(clippy::too_many_arguments)]
-async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, plan: bool, allow_docker: bool, workflow_path: Option<std::path::PathBuf>, worktree: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>) {
+async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, plan: bool, allow_docker: bool, workflow_path: Option<std::path::PathBuf>, worktree: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>, model: Option<String>) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
         Some(r) => r,
@@ -1688,6 +1690,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
                     // Save parameters so the dialog can resume the command after resolution.
                     app.active_tab_mut().pending_command = PendingCommand::Implement {
                         agent: agent_override.clone(),
+                        model: model.clone(),
                         work_item,
                         non_interactive,
                         plan,
@@ -1750,6 +1753,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
             let config_default = agent_name.clone();
             app.active_tab_mut().pending_command = PendingCommand::Implement {
                 agent: agent_override.clone(),
+                model: model.clone(),
                 work_item,
                 non_interactive,
                 plan,
@@ -1813,6 +1817,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
     // If a workflow is specified, initialise/load its state and derive the step prompt.
     let mut effective_entrypoint: Vec<String>;
     let command_display: String;
+    let effective_model: Option<String>;
     if let Some(ref wf_path) = workflow_path {
         // Resolve relative paths against the tab's working directory so that
         // paths like ./aspec/workflows/implement-feature.md work as expected.
@@ -1853,6 +1858,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
                 // (or after the user accepts a fallback via AgentSetupFallbackAccepted).
                 app.active_tab_mut().pending_command = PendingCommand::Implement {
                     agent: agent_override.clone(),
+                    model: model.clone(),
                     work_item,
                     non_interactive,
                     plan,
@@ -1957,6 +1963,8 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         app.active_tab_mut().auto_workflow_disabled_for_step = false;
         app.active_tab_mut().workflow_current_step = Some(step_name);
         app.active_tab_mut().workflow_git_root = Some(git_root.clone());
+        // Step model overrides CLI model; fall back to CLI model when step has none.
+        effective_model = step_state.model.clone().or_else(|| model.clone());
     } else {
         effective_entrypoint = if non_interactive {
             agent_entrypoint_non_interactive(&agent_name, work_item, plan)
@@ -1964,11 +1972,18 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
             agent_entrypoint(&agent_name, work_item, plan)
         };
         command_display = format!("implement {:04}", work_item);
+        effective_model = model.clone();
     }
 
     // Apply autonomous-mode flags to the entrypoint.
     use crate::commands::agent::append_autonomous_flags;
     append_autonomous_flags(&mut effective_entrypoint, &effective_agent, yolo, auto, &disallowed_tools);
+
+    // Append model-selection flag last (after autonomous flags).
+    if let Some(ref m) = effective_model {
+        use crate::commands::agent::append_model_flag;
+        append_model_flag(&mut effective_entrypoint, &effective_agent, m);
+    }
 
     let entrypoint = effective_entrypoint;
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
@@ -2022,9 +2037,10 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
         let tx = app.active_tab().output_tx.clone();
         let mount_str = mount_path.to_str().unwrap().to_string();
         let impl_runtime = app.runtime.clone();
+        // Clone the fully-built entrypoint (including model flag) for the closure.
+        let ni_entrypoint = entrypoint.clone();
         spawn_text_command(tx, exit_tx, move |sink| async move {
-            let entrypoint = agent_entrypoint_non_interactive(&agent_name, work_item, plan);
-            let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+            let entrypoint_refs: Vec<&str> = ni_entrypoint.iter().map(String::as_str).collect();
             let (_cmd, output) = impl_runtime.run_container_captured(
                 &image_tag,
                 &mount_str,
@@ -2082,7 +2098,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
 }
 
 /// Actually spawn the docker container for `chat` via PTY.
-async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>) {
+async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>, model: Option<String>) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
         Some(r) => r,
@@ -2144,6 +2160,7 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
         // Dockerfile missing — prompt to download and build, then re-launch.
         app.active_tab_mut().pending_command = PendingCommand::Chat {
             agent: agent_override.clone(),
+            model: model.clone(),
             non_interactive,
             plan,
             allow_docker,
@@ -2195,6 +2212,12 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
     };
     use crate::commands::agent::append_autonomous_flags;
     append_autonomous_flags(&mut entrypoint, &agent_name, yolo, auto, &chat_disallowed_tools);
+
+    // Append model-selection flag last (after autonomous flags).
+    if let Some(ref m) = model {
+        use crate::commands::agent::append_model_flag;
+        append_model_flag(&mut entrypoint, &agent_name, m);
+    }
 
     let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
 
@@ -2248,9 +2271,10 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
         let tx = app.active_tab().output_tx.clone();
         let mount_str = mount_path.to_str().unwrap().to_string();
         let chat_runtime = app.runtime.clone();
+        // Clone the fully-built entrypoint (including model flag) for the closure.
+        let ni_entrypoint = entrypoint.clone();
         spawn_text_command(tx, exit_tx, move |sink| async move {
-            let entrypoint = chat_entrypoint_non_interactive(&agent_name, plan);
-            let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+            let entrypoint_refs: Vec<&str> = ni_entrypoint.iter().map(String::as_str).collect();
             let (_cmd, output) = chat_runtime.run_container_captured(
                 &image_tag,
                 &mount_str,
@@ -4556,6 +4580,84 @@ mod tests {
         }
     }
 
+    // ── TUI --model flag tests (work item 0055) ──────────────────────────────
+
+    /// `chat --model claude-opus-4-6` (space form) sets `PendingCommand::Chat { model: Some("claude-opus-4-6"), .. }`.
+    #[tokio::test]
+    async fn tui_chat_model_space_form_sets_pending_command() {
+        let mut app = app_no_git();
+        execute_command(&mut app, "chat --model claude-opus-4-6").await;
+        match &app.active_tab().pending_command {
+            PendingCommand::Chat { model, .. } => {
+                assert_eq!(
+                    model.as_deref(),
+                    Some("claude-opus-4-6"),
+                    "expected model Some(\"claude-opus-4-6\"), got {:?}",
+                    model,
+                );
+            }
+            other => panic!("expected PendingCommand::Chat, got {:?}", other),
+        }
+    }
+
+    /// `chat --model=claude-opus-4-6` (= form) sets the same `PendingCommand::Chat`.
+    #[tokio::test]
+    async fn tui_chat_model_eq_form_sets_pending_command() {
+        let mut app = app_no_git();
+        execute_command(&mut app, "chat --model=claude-opus-4-6").await;
+        match &app.active_tab().pending_command {
+            PendingCommand::Chat { model, .. } => {
+                assert_eq!(
+                    model.as_deref(),
+                    Some("claude-opus-4-6"),
+                    "expected model Some(\"claude-opus-4-6\"), got {:?}",
+                    model,
+                );
+            }
+            other => panic!("expected PendingCommand::Chat, got {:?}", other),
+        }
+    }
+
+    /// `implement 0042 --model claude-haiku-4-5` (space form) sets
+    /// `PendingCommand::Implement { model: Some("claude-haiku-4-5"), work_item: 42, .. }`.
+    #[tokio::test]
+    async fn tui_implement_model_space_form_sets_pending_command() {
+        let mut app = app_no_git();
+        execute_command(&mut app, "implement 0042 --model claude-haiku-4-5").await;
+        match &app.active_tab().pending_command {
+            PendingCommand::Implement { model, work_item, .. } => {
+                assert_eq!(
+                    model.as_deref(),
+                    Some("claude-haiku-4-5"),
+                    "expected model Some(\"claude-haiku-4-5\"), got {:?}",
+                    model,
+                );
+                assert_eq!(*work_item, 42u32);
+            }
+            other => panic!("expected PendingCommand::Implement, got {:?}", other),
+        }
+    }
+
+    /// `implement 0042 --model=claude-haiku-4-5` (= form) sets the same
+    /// `PendingCommand::Implement`.
+    #[tokio::test]
+    async fn tui_implement_model_eq_form_sets_pending_command() {
+        let mut app = app_no_git();
+        execute_command(&mut app, "implement 0042 --model=claude-haiku-4-5").await;
+        match &app.active_tab().pending_command {
+            PendingCommand::Implement { model, work_item, .. } => {
+                assert_eq!(
+                    model.as_deref(),
+                    Some("claude-haiku-4-5"),
+                    "expected model Some(\"claude-haiku-4-5\"), got {:?}",
+                    model,
+                );
+                assert_eq!(*work_item, 42u32);
+            }
+            other => panic!("expected PendingCommand::Implement, got {:?}", other),
+        }
+    }
+
     /// `implement 0007 --workflow my-workflow.md` extracts the workflow path alongside
     /// other flag defaults (agent stays None, work_item = 7).
     #[tokio::test]
@@ -4585,6 +4687,7 @@ mod tests {
             status,
             container_id: None,
             agent: None,
+            model: None,
         }
     }
 

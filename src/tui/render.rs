@@ -1873,6 +1873,7 @@ fn build_workflow_columns(wf: &WorkflowState) -> Vec<Vec<String>> {
             depends_on: s.depends_on.clone(),
             prompt_template: String::new(),
             agent: None,
+            model: None,
         }).collect::<Vec<_>>(),
     );
 
@@ -2600,6 +2601,7 @@ mod tests {
                 status: StepStatus::Done,
                 container_id: None,
                 agent: None,
+                model: None,
             },
             WorkflowStepState {
                 name: "implement".to_string(),
@@ -2608,6 +2610,7 @@ mod tests {
                 status: StepStatus::Running,
                 container_id: Some("abc123".to_string()),
                 agent: None,
+                model: None,
             },
             WorkflowStepState {
                 name: "review".to_string(),
@@ -2616,6 +2619,7 @@ mod tests {
                 status: StepStatus::Pending,
                 container_id: None,
                 agent: None,
+                model: None,
             },
         ];
 
@@ -2665,6 +2669,7 @@ mod tests {
                 status: StepStatus::Pending,
                 container_id: None,
                 agent: None,
+                model: None,
             },
             WorkflowStepState {
                 name: "b".to_string(),
@@ -2673,6 +2678,7 @@ mod tests {
                 status: StepStatus::Pending,
                 container_id: None,
                 agent: None,
+                model: None,
             },
         ];
         let wf_linear = WorkflowState {
@@ -2694,6 +2700,7 @@ mod tests {
                 status: StepStatus::Pending,
                 container_id: None,
                 agent: None,
+                model: None,
             },
             WorkflowStepState {
                 name: "b".to_string(),
@@ -2702,6 +2709,7 @@ mod tests {
                 status: StepStatus::Pending,
                 container_id: None,
                 agent: None,
+                model: None,
             },
             WorkflowStepState {
                 name: "c".to_string(),
@@ -2710,6 +2718,7 @@ mod tests {
                 status: StepStatus::Pending,
                 container_id: None,
                 agent: None,
+                model: None,
             },
         ];
         let wf_parallel = WorkflowState {
@@ -2813,12 +2822,14 @@ mod tests {
                 depends_on: vec![],
                 prompt_template: "Step A".to_string(),
                 agent: None,
+                model: None,
             },
             crate::workflow::parser::WorkflowStep {
                 name: "b".to_string(),
                 depends_on: vec!["a".to_string()],
                 prompt_template: "Step B".to_string(),
                 agent: None,
+                model: None,
             },
         ];
         let wf = crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
@@ -2863,6 +2874,7 @@ mod tests {
                 depends_on: vec![],
                 prompt_template: "do it".to_string(),
                 agent: None,
+                model: None,
             }],
             "hash".to_string(),
             1,

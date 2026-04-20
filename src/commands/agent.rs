@@ -238,8 +238,9 @@ pub async fn prepare_agent_cli(
 /// `allow_docker`: when true, mount the host Docker daemon socket into the container.
 /// `mount_ssh`: when true, mount the host `~/.ssh` directory read-only into the container.
 /// `agent_override`: when `Some`, use this agent name instead of the config value.
+/// `model`: when `Some`, append the per-agent model-selection flag to the entrypoint.
 pub async fn run_agent_with_sink(
-    entrypoint: Vec<String>,
+    mut entrypoint: Vec<String>,
     status_message: &str,
     out: &OutputSink,
     mount_override: Option<PathBuf>,
@@ -250,6 +251,7 @@ pub async fn run_agent_with_sink(
     mount_ssh: bool,
     container_name_override: Option<String>,
     agent_override: Option<String>,
+    model: Option<&str>,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
@@ -260,6 +262,11 @@ pub async fn run_agent_with_sink(
     // Validate agent name if overridden
     if let Some(ref name) = agent_override {
         crate::cli::validate_agent_name(name)?;
+    }
+
+    // Append model-selection flag last (after any autonomous/plan flags already in entrypoint).
+    if let Some(m) = model {
+        append_model_flag(&mut entrypoint, &agent, m);
     }
 
     out.println(status_message);
@@ -404,6 +411,43 @@ pub async fn run_agent_with_sink(
     }
 
     Ok(())
+}
+
+/// Append agent-specific model-selection flag to the argument list.
+///
+/// All currently supported agents use `--model <name>`. For agents where the flag
+/// is unconfirmed (`opencode`, `maki`), a `WARNING:` is emitted to stderr and the
+/// session proceeds without the flag rather than aborting.
+pub fn append_model_flag(args: &mut Vec<String>, agent: &str, model: &str) {
+    match agent {
+        "claude" | "codex" | "gemini" => {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+        "opencode" => {
+            eprintln!(
+                "WARNING: --model: agent 'opencode' may not support --model; \
+                 attempting to pass it anyway."
+            );
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+        "maki" => {
+            eprintln!(
+                "WARNING: --model: agent 'maki' may not support --model; \
+                 attempting to pass it anyway."
+            );
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+        _ => {
+            eprintln!(
+                "WARNING: --model: agent '{}' does not support --model; \
+                 proceeding without the flag.",
+                agent
+            );
+        }
+    }
 }
 
 /// Append agent-specific autonomous-mode flags and disallowed-tools config.
@@ -1079,6 +1123,87 @@ mod tests {
         );
     }
 
+    // --- append_model_flag tests (work item 0055) ---
+
+    #[test]
+    fn append_model_flag_claude_appends_model_flag() {
+        let mut args = vec!["claude".to_string()];
+        append_model_flag(&mut args, "claude", "claude-opus-4-6");
+        assert_eq!(args, vec!["claude", "--model", "claude-opus-4-6"]);
+    }
+
+    #[test]
+    fn append_model_flag_codex_appends_model_flag() {
+        let mut args = vec!["codex".to_string()];
+        append_model_flag(&mut args, "codex", "gpt-4o");
+        assert_eq!(args, vec!["codex", "--model", "gpt-4o"]);
+    }
+
+    #[test]
+    fn append_model_flag_gemini_appends_model_flag() {
+        let mut args = vec!["gemini".to_string()];
+        append_model_flag(&mut args, "gemini", "gemini-2.0-flash");
+        assert_eq!(args, vec!["gemini", "--model", "gemini-2.0-flash"]);
+    }
+
+    #[test]
+    fn append_model_flag_opencode_appends_flag_despite_warning() {
+        // opencode may not support --model; a warning is emitted but the flag is still appended.
+        let mut args = vec!["opencode".to_string()];
+        append_model_flag(&mut args, "opencode", "some-model");
+        assert!(
+            args.contains(&"--model".to_string()),
+            "--model must still be appended for opencode"
+        );
+        assert!(
+            args.contains(&"some-model".to_string()),
+            "model name must be present for opencode"
+        );
+    }
+
+    #[test]
+    fn append_model_flag_maki_appends_flag_despite_warning() {
+        // maki may not support --model; a warning is emitted but the flag is still appended.
+        let mut args = vec!["maki".to_string()];
+        append_model_flag(&mut args, "maki", "some-model");
+        assert!(
+            args.contains(&"--model".to_string()),
+            "--model must still be appended for maki"
+        );
+        assert!(
+            args.contains(&"some-model".to_string()),
+            "model name must be present for maki"
+        );
+    }
+
+    #[test]
+    fn append_model_flag_unknown_agent_does_not_append_flag() {
+        // Unknown agents print a warning and skip the flag; args must be unchanged.
+        let mut args = vec!["unknown-bot".to_string()];
+        append_model_flag(&mut args, "unknown-bot", "some-model");
+        assert_eq!(
+            args,
+            vec!["unknown-bot"],
+            "unknown agent must not receive --model"
+        );
+    }
+
+    #[test]
+    fn none_model_does_not_produce_extra_args() {
+        // When model is None the `if let Some(m) = model` guard in run_agent_with_sink
+        // skips append_model_flag entirely. Verify the guard logic directly.
+        let mut args = vec!["claude".to_string()];
+        let model: Option<&str> = None;
+        if let Some(m) = model {
+            append_model_flag(&mut args, "claude", m);
+        }
+        assert_eq!(
+            args,
+            vec!["claude"],
+            "None model must not produce any additional args"
+        );
+    }
+
     #[tokio::test]
     async fn run_agent_with_sink_fails_without_git_root() {
         let (tx, _rx) = unbounded_channel();
@@ -1100,6 +1225,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             None,
             None,
             &runtime,

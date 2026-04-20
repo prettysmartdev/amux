@@ -31,6 +31,7 @@ pub static READY_FLAGS: &[FlagSpec] = &[
 
 pub static IMPLEMENT_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "agent",           takes_value: true,  value_name: "NAME", hint: "override configured agent" },
+    FlagSpec { name: "model",           takes_value: true,  value_name: "NAME", hint: "override agent model (e.g. claude-opus-4-6)" },
     FlagSpec { name: "non-interactive", takes_value: false, value_name: "",     hint: "run without interactive prompt" },
     FlagSpec { name: "plan",            takes_value: false, value_name: "",     hint: "plan mode" },
     FlagSpec { name: "allow-docker",    takes_value: false, value_name: "",     hint: "allow Docker access" },
@@ -43,6 +44,7 @@ pub static IMPLEMENT_FLAGS: &[FlagSpec] = &[
 
 pub static CHAT_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "agent",           takes_value: true,  value_name: "NAME", hint: "override configured agent" },
+    FlagSpec { name: "model",           takes_value: true,  value_name: "NAME", hint: "override agent model (e.g. claude-opus-4-6)" },
     FlagSpec { name: "non-interactive", takes_value: false, value_name: "",     hint: "run without interactive prompt" },
     FlagSpec { name: "plan",            takes_value: false, value_name: "",     hint: "plan mode" },
     FlagSpec { name: "allow-docker",    takes_value: false, value_name: "",     hint: "allow Docker access" },

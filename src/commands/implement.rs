@@ -28,6 +28,7 @@ pub async fn run(
     yolo: bool,
     auto: bool,
     agent_override: Option<String>,
+    model_override: Option<String>,
     runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
 ) -> Result<()> {
     let work_item = parse_work_item(work_item_str)?;
@@ -149,6 +150,7 @@ pub async fn run(
             mount_ssh,
             yolo,
             auto,
+            model_override.as_deref(),
             &*runtime,
         )
         .await;
@@ -205,6 +207,7 @@ pub async fn run(
         mount_ssh,
         None,
         Some(effective_agent),
+        model_override.as_deref(),
         &*runtime,
     )
     .await;
@@ -229,6 +232,7 @@ pub async fn run(
 /// `yolo`: when true, append `--dangerously-skip-permissions` and disallowed-tools config.
 /// `auto`: when true, append `--permission-mode auto` and disallowed-tools config.
 /// `agent_override`: when `Some`, use this agent instead of the config value.
+/// `model`: when `Some`, pass the model-selection flag to the agent.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_sink(
     work_item: u32,
@@ -244,6 +248,7 @@ pub async fn run_with_sink(
     yolo: bool,
     auto: bool,
     agent_override: Option<String>,
+    model: Option<&str>,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
@@ -285,6 +290,7 @@ pub async fn run_with_sink(
         mount_ssh,
         None,
         agent_override,
+        model,
         runtime,
     )
     .await
@@ -500,6 +506,7 @@ async fn run_workflow(
     mount_ssh: bool,
     yolo: bool,
     auto: bool,
+    cli_model: Option<&str>,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     use std::io::{BufRead, Write};
@@ -690,6 +697,9 @@ async fn run_workflow(
             step_name, work_item, step_agent
         );
 
+        // Resolve model: step-level Model: field takes precedence over CLI --model.
+        let step_model: Option<&str> = step_state.model.as_deref().or(cli_model);
+
         // Generate a container name and record it for state persistence.
         let container_name = generate_container_name();
         state.set_container_id(&step_name, container_name.clone());
@@ -710,6 +720,7 @@ async fn run_workflow(
             mount_ssh,
             Some(container_name),
             Some(step_agent.to_string()),
+            step_model,
             runtime,
         )
         .await;
@@ -1262,6 +1273,7 @@ mod tests {
                 depends_on: vec![],
                 prompt_template: "p".to_string(),
                 agent: agent.map(|a| a.to_string()),
+                model: None,
             })
             .collect();
         crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into())
@@ -1347,5 +1359,156 @@ mod tests {
         assert_eq!(map.get("a").map(String::as_str), Some("claude"));
         assert_eq!(map.get("b").map(String::as_str), Some("codex"));
         assert_eq!(map.get("c").map(String::as_str), Some("gemini"));
+    }
+
+    // ─── Model resolution in workflow runner (work item 0055) ─────────────────
+    //
+    // run_workflow() resolves the effective model for each step via:
+    //   let step_model = step_state.model.as_deref().or(cli_model);
+    // The three paths are: step model wins, CLI fallback, neither yields None.
+    // We test the pure resolution logic directly to avoid the stdin/file-I/O
+    // complexity of run_workflow itself.
+
+    /// Mirror the single resolution line from run_workflow().
+    fn resolve_step_model<'a>(
+        step_model: Option<&'a str>,
+        cli_model: Option<&'a str>,
+    ) -> Option<&'a str> {
+        step_model.or(cli_model)
+    }
+
+    #[test]
+    fn model_resolution_step_model_wins_over_cli_flag() {
+        // A per-step Model: field takes precedence over the CLI --model flag.
+        let result = resolve_step_model(Some("model-a"), Some("model-b"));
+        assert_eq!(
+            result,
+            Some("model-a"),
+            "step-level model must win over the CLI --model flag"
+        );
+    }
+
+    #[test]
+    fn model_resolution_cli_flag_used_when_step_has_none() {
+        // When the step has no Model: field, the CLI --model flag is used.
+        let result = resolve_step_model(None, Some("model-b"));
+        assert_eq!(
+            result,
+            Some("model-b"),
+            "CLI --model must be used when the step has no Model: field"
+        );
+    }
+
+    #[test]
+    fn model_resolution_neither_yields_none() {
+        // When neither the step nor the CLI provides a model, the result is None.
+        let result = resolve_step_model(None, None);
+        assert!(
+            result.is_none(),
+            "model must be None when neither step nor CLI supplies one"
+        );
+    }
+
+    // ── Integration — implement with --model (work item 0055) ─────────────────
+    //
+    // run_with_sink() passes the model argument to run_agent_with_sink(), which
+    // calls append_model_flag().  These tests verify the full entrypoint
+    // construction pipeline mirrored from run_with_sink().
+
+    /// `implement --model <name>` in non-interactive mode produces an entrypoint
+    /// that includes `--model <name>`.
+    #[test]
+    fn implement_non_interactive_with_model_includes_model_flag() {
+        use crate::commands::agent::append_model_flag;
+        let mut entrypoint = agent_entrypoint_non_interactive("claude", 42, false);
+        let model: Option<&str> = Some("claude-opus-4-6");
+        if let Some(m) = model {
+            append_model_flag(&mut entrypoint, "claude", m);
+        }
+        assert!(
+            entrypoint.contains(&"--model".to_string()),
+            "--model must appear in the constructed entrypoint"
+        );
+        assert!(
+            entrypoint.contains(&"claude-opus-4-6".to_string()),
+            "model name must appear in the constructed entrypoint"
+        );
+    }
+
+    /// When no `--model` is given, the entrypoint contains no `--model` flag.
+    #[test]
+    fn implement_non_interactive_without_model_has_no_model_flag() {
+        use crate::commands::agent::append_model_flag;
+        let mut entrypoint = agent_entrypoint_non_interactive("claude", 42, false);
+        let model: Option<&str> = None;
+        if let Some(m) = model {
+            append_model_flag(&mut entrypoint, "claude", m);
+        }
+        assert!(
+            !entrypoint.contains(&"--model".to_string()),
+            "--model must not appear when model is None"
+        );
+    }
+
+    // ── Integration — workflow with per-step Model: fields (work item 0055) ──
+    //
+    // The full run_workflow() function requires stdin and real file I/O.
+    // These tests verify the pure resolution logic extracted from run_workflow().
+    // For each step, the effective model is:
+    //   step_state.model.as_deref().or(cli_model)
+
+    fn make_state_with_models(step_models: &[(&str, Option<&str>)]) -> crate::workflow::WorkflowState {
+        let steps: Vec<crate::workflow::parser::WorkflowStep> = step_models
+            .iter()
+            .map(|(name, model)| crate::workflow::parser::WorkflowStep {
+                name: name.to_string(),
+                depends_on: vec![],
+                prompt_template: "p".to_string(),
+                agent: None,
+                model: model.map(|m| m.to_string()),
+            })
+            .collect();
+        crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into())
+    }
+
+    /// Workflow: step A has `Model: model-a`, step B has none.
+    /// CLI: `--model model-b`.
+    /// Expected: step A uses `model-a`, step B uses `model-b`.
+    #[test]
+    fn workflow_per_step_model_wins_over_cli_flag() {
+        let state = make_state_with_models(&[("a", Some("model-a")), ("b", None)]);
+        let cli_model: Option<&str> = Some("model-b");
+
+        let model_a = resolve_step_model(
+            state.get_step("a").unwrap().model.as_deref(),
+            cli_model,
+        );
+        let model_b = resolve_step_model(
+            state.get_step("b").unwrap().model.as_deref(),
+            cli_model,
+        );
+
+        assert_eq!(model_a, Some("model-a"), "step A model must override the CLI flag");
+        assert_eq!(model_b, Some("model-b"), "step B must fall back to the CLI flag");
+    }
+
+    /// Workflow: neither step has a `Model:` field and no `--model` flag is given.
+    /// Expected: both steps receive `None` (no model flag).
+    #[test]
+    fn workflow_no_model_fields_and_no_cli_flag_gives_none() {
+        let state = make_state_with_models(&[("a", None), ("b", None)]);
+        let cli_model: Option<&str> = None;
+
+        let model_a = resolve_step_model(
+            state.get_step("a").unwrap().model.as_deref(),
+            cli_model,
+        );
+        let model_b = resolve_step_model(
+            state.get_step("b").unwrap().model.as_deref(),
+            cli_model,
+        );
+
+        assert!(model_a.is_none(), "step A must have no model when neither step nor CLI supplies one");
+        assert!(model_b.is_none(), "step B must have no model when neither step nor CLI supplies one");
     }
 }

@@ -12,6 +12,10 @@ pub struct WorkflowStep {
     /// Optional agent override for this step (from `Agent:` field).
     /// When `None`, the workflow default agent (from config or `--agent` flag) is used.
     pub agent: Option<String>,
+    /// Optional model override for this step (from `Model:` field).
+    /// When `None`, the workflow-level --model flag (if any) is used; if that is also
+    /// absent the agent uses its default model.
+    pub model: Option<String>,
 }
 
 /// Parse a workflow Markdown file into an optional title and ordered list of steps.
@@ -31,6 +35,7 @@ pub fn parse_workflow(content: &str) -> Result<(Option<String>, Vec<WorkflowStep
     let mut current_name: Option<String> = None;
     let mut current_depends: Vec<String> = Vec::new();
     let mut current_agent: Option<String> = None;
+    let mut current_model: Option<String> = None;
     let mut current_body = String::new();
     let mut in_prompt = false;
 
@@ -48,6 +53,7 @@ pub fn parse_workflow(content: &str) -> Result<(Option<String>, Vec<WorkflowStep
                 &mut current_name,
                 &mut current_depends,
                 &mut current_agent,
+                &mut current_model,
                 &mut current_body,
                 &mut in_prompt,
             );
@@ -63,6 +69,7 @@ pub fn parse_workflow(content: &str) -> Result<(Option<String>, Vec<WorkflowStep
                 &mut current_name,
                 &mut current_depends,
                 &mut current_agent,
+                &mut current_model,
                 &mut current_body,
                 &mut in_prompt,
             );
@@ -92,6 +99,15 @@ pub fn parse_workflow(content: &str) -> Result<(Option<String>, Vec<WorkflowStep
                 continue;
             }
 
+            // Model: field — optional per-step model override.
+            if trimmed.starts_with("Model:") && !in_prompt {
+                let model_str = trimmed["Model:".len()..].trim().to_string();
+                if !model_str.is_empty() {
+                    current_model = Some(model_str);
+                }
+                continue;
+            }
+
             // Prompt: field — everything after this is the prompt body.
             if (trimmed == "Prompt:" || trimmed.starts_with("Prompt: ")) && !in_prompt {
                 in_prompt = true;
@@ -116,6 +132,7 @@ pub fn parse_workflow(content: &str) -> Result<(Option<String>, Vec<WorkflowStep
         &mut current_name,
         &mut current_depends,
         &mut current_agent,
+        &mut current_model,
         &mut current_body,
         &mut in_prompt,
     );
@@ -135,6 +152,7 @@ fn flush_step(
     current_name: &mut Option<String>,
     current_depends: &mut Vec<String>,
     current_agent: &mut Option<String>,
+    current_model: &mut Option<String>,
     current_body: &mut String,
     in_prompt: &mut bool,
 ) {
@@ -143,6 +161,7 @@ fn flush_step(
             name,
             depends_on: std::mem::take(current_depends),
             agent: current_agent.take(),
+            model: current_model.take(),
             prompt_template: current_body.trim().to_string(),
         });
         current_body.clear();
@@ -286,6 +305,80 @@ mod tests {
         assert!(
             steps[1].agent.is_none(),
             "step 'b' must have agent = None (no Agent: field)"
+        );
+    }
+
+    // ─── Model: field tests (work item 0055) ──────────────────────────────────
+
+    #[test]
+    fn parse_model_field_populates_model() {
+        let md = "## Step: plan\nModel: claude-opus-4-6\nPrompt: Do the thing.\n";
+        let (_, steps) = parse_workflow(md).unwrap();
+        assert_eq!(
+            steps[0].model,
+            Some("claude-opus-4-6".to_string()),
+            "Model: field must populate the model field on WorkflowStep"
+        );
+    }
+
+    #[test]
+    fn parse_step_without_model_field_gives_none() {
+        let md = "## Step: plan\nPrompt: Do the thing.\n";
+        let (_, steps) = parse_workflow(md).unwrap();
+        assert!(
+            steps[0].model.is_none(),
+            "model must be None when no Model: field is present"
+        );
+    }
+
+    #[test]
+    fn parse_model_after_prompt_is_body_not_directive() {
+        // A `Model:` line appearing after `Prompt:` belongs to the prompt body.
+        let md = "## Step: plan\nPrompt: Do the thing.\nModel: claude-opus-4-6\n";
+        let (_, steps) = parse_workflow(md).unwrap();
+        assert!(
+            steps[0].model.is_none(),
+            "`model` must be None when Model: appears after Prompt:"
+        );
+        assert!(
+            steps[0].prompt_template.contains("Model: claude-opus-4-6"),
+            "Model: line after Prompt: must appear verbatim in the prompt body"
+        );
+    }
+
+    #[test]
+    fn parse_empty_model_field_gives_none() {
+        // A `Model:` line with no value is treated as absent.
+        let md = "## Step: plan\nModel:\nPrompt: Do the thing.\n";
+        let (_, steps) = parse_workflow(md).unwrap();
+        assert!(
+            steps[0].model.is_none(),
+            "empty Model: field must produce model = None"
+        );
+    }
+
+    #[test]
+    fn parse_model_and_agent_in_same_step() {
+        // Model: and Agent: are independent fields.
+        let md = "## Step: plan\nAgent: codex\nModel: claude-haiku-4-5\nPrompt: Do the thing.\n";
+        let (_, steps) = parse_workflow(md).unwrap();
+        assert_eq!(steps[0].agent, Some("codex".to_string()));
+        assert_eq!(steps[0].model, Some("claude-haiku-4-5".to_string()));
+    }
+
+    #[test]
+    fn parse_model_field_isolated_per_step() {
+        // Only the step with a Model: field should have a non-None model.
+        let md = "## Step: a\nModel: big-model\nPrompt: A.\n\n## Step: b\nPrompt: B.\n";
+        let (_, steps) = parse_workflow(md).unwrap();
+        assert_eq!(
+            steps[0].model,
+            Some("big-model".to_string()),
+            "step 'a' must carry the Model: field"
+        );
+        assert!(
+            steps[1].model.is_none(),
+            "step 'b' must have model = None (no Model: field)"
         );
     }
 }

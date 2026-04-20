@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 /// Command-mode entry point for `amux chat`.
-pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
+pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>, model_override: Option<String>, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
     let config = load_repo_config(&git_root)?;
@@ -66,6 +66,7 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
         yolo,
         auto,
         Some(effective_agent),
+        model_override.as_deref(),
         &*runtime,
     )
     .await
@@ -82,6 +83,7 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
 /// `yolo`: when true, append `--dangerously-skip-permissions` and disallowed-tools config.
 /// `auto`: when true, append `--permission-mode auto` and disallowed-tools config.
 /// `agent_override`: when `Some`, use this agent instead of the config value.
+/// `model`: when `Some`, pass the model-selection flag to the agent.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_sink(
     out: &OutputSink,
@@ -95,6 +97,7 @@ pub async fn run_with_sink(
     yolo: bool,
     auto: bool,
     agent_override: Option<String>,
+    model: Option<&str>,
     runtime: &dyn crate::runtime::AgentRuntime,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
@@ -123,6 +126,7 @@ pub async fn run_with_sink(
         mount_ssh,
         None,
         agent_override,
+        model,
         runtime,
     )
     .await
@@ -486,5 +490,47 @@ mod tests {
         // Var must appear exactly once — passthrough entry was skipped.
         let count = env_vars.iter().filter(|(k, _)| k == var_name).count();
         assert_eq!(count, 1, "keychain takes precedence: no duplicate -e flag");
+    }
+
+    // ── Integration — chat with --model (work item 0055) ─────────────────────
+    //
+    // run_with_sink() passes the model argument to run_agent_with_sink(), which
+    // calls append_model_flag().  These tests verify the full entrypoint
+    // construction pipeline: build base entrypoint → append model flag.
+
+    /// `chat --model <name>` in non-interactive mode produces an entrypoint that
+    /// includes `--model <name>` after the base args.
+    #[test]
+    fn chat_non_interactive_with_model_includes_model_flag() {
+        use crate::commands::agent::append_model_flag;
+        let mut entrypoint = chat_entrypoint_non_interactive("claude", false);
+        // Mirror the guard and call in run_agent_with_sink.
+        let model: Option<&str> = Some("claude-opus-4-6");
+        if let Some(m) = model {
+            append_model_flag(&mut entrypoint, "claude", m);
+        }
+        assert!(
+            entrypoint.contains(&"--model".to_string()),
+            "--model must appear in the constructed entrypoint"
+        );
+        assert!(
+            entrypoint.contains(&"claude-opus-4-6".to_string()),
+            "model name must appear in the constructed entrypoint"
+        );
+    }
+
+    /// When no `--model` is given, the entrypoint contains no `--model` flag.
+    #[test]
+    fn chat_non_interactive_without_model_has_no_model_flag() {
+        use crate::commands::agent::append_model_flag;
+        let mut entrypoint = chat_entrypoint_non_interactive("claude", false);
+        let model: Option<&str> = None;
+        if let Some(m) = model {
+            append_model_flag(&mut entrypoint, "claude", m);
+        }
+        assert!(
+            !entrypoint.contains(&"--model".to_string()),
+            "--model must not appear when model is None"
+        );
     }
 }

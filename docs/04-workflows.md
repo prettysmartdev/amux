@@ -38,6 +38,7 @@ A workflow is a plain Markdown file. amux looks for:
 | `## Step: <name>` | Defines a step; names must be unique within the file |
 | `Depends-on: <step>[, <step>…]` | Declares upstream dependencies (omit for root steps) |
 | `Agent: <name>` | Optional. Run this step with a specific agent instead of the default. Valid values: `claude`, `codex`, `opencode`, `maki`, `gemini` |
+| `Model: <name>` | Optional. Run this step with a specific model instead of the default. Overrides any `--model` flag passed at the command line |
 | `Prompt:` | Everything after this keyword (until the next heading) is the step's prompt template |
 
 ### Example
@@ -133,6 +134,53 @@ When resuming a saved workflow, the per-step agent assignments from the original
 
 ---
 
+## Per-step model overrides
+
+Each step in a workflow can run against a different model by adding a `Model:` field to the step header block — between any `Agent:` line and the `Prompt:` line:
+
+```markdown
+## Step: plan
+Agent: claude
+Model: claude-opus-4-6
+Prompt: Produce a detailed implementation plan.
+
+## Step: implement
+Depends-on: plan
+Agent: claude
+Model: claude-haiku-4-5
+Prompt: Implement the plan from the previous step.
+
+## Step: review
+Depends-on: implement
+Prompt: Review the implementation for correctness and style.
+```
+
+In this example, `plan` uses a large model for deep reasoning, `implement` uses a smaller model for routine code generation, and `review` inherits whatever model is in effect from the `--model` flag (or the agent's built-in default if no flag was passed).
+
+### Model resolution order
+
+For each step, amux resolves the effective model using this priority:
+
+| Priority | Source | Applies when |
+|----------|--------|-------------|
+| 1 (highest) | Step's `Model:` field | The step explicitly declares a model |
+| 2 | `--model` flag on the command line | The step has no `Model:` field |
+| 3 (lowest) | Agent built-in default | Neither a step field nor a flag was provided |
+
+The `--model` flag acts as the **default** for all steps without a `Model:` field; it does **not** override steps that declare their own model.
+
+### Field placement
+
+`Model:` must appear in the step header block — after any `Depends-on:` and `Agent:` lines and before the `Prompt:` line. A `Model:` that appears after `Prompt:` is treated as prompt text, not as a directive. A `Model:` line with no value is treated as absent — it does not pass an empty string to the agent.
+
+`Agent:` and `Model:` are independent overrides. A step can specify one, both, or neither. When both are present, amux resolves the agent first (using the same logic as without `Model:`), then resolves the model.
+
+### Workflow resume and model persistence
+
+Per-step model values from `Model:` fields are persisted in the workflow state file. On resume, the persisted model is used, not any `--model` flag passed on the resumed invocation. This matches the existing behaviour for `Agent:` fields and ensures the resumed run is identical to the original.
+
+---
+
 ## Running a workflow
 
 ### In the TUI
@@ -181,6 +229,7 @@ All flags available on `implement` work with `--workflow`:
 | Flag | Description |
 |------|-------------|
 | `--agent=<name>` | Default agent for steps that do not specify an `Agent:` field. Does not override steps with an explicit `Agent:` directive |
+| `--model=<NAME>` | Default model for steps that do not specify a `Model:` field. Does not override steps with an explicit `Model:` directive |
 | `--non-interactive` | Run each step's agent in print/batch mode |
 | `--plan` | Run each step in read-only mode |
 | `--allow-docker` | Mount Docker socket into each step's container |
@@ -327,6 +376,13 @@ Steps that share the same `Depends-on` set form a **parallel group**. amux execu
 | Agent Dockerfile download fails during pre-flight | Error surfaced; workflow does not start |
 | Agent image build fails during pre-flight | Error surfaced; partial Dockerfile removed; workflow does not start |
 | `--agent` flag + step with explicit `Agent:` field | Step's `Agent:` directive wins; `--agent` is only the default for unspecified steps |
+| `--model` flag + step with explicit `Model:` field | Step's `Model:` directive wins; `--model` is only the default for steps without a `Model:` field |
+| `Model:` combined with `Agent:` in the same step | Independent overrides; agent resolved first, then model |
+| `Model:` field with no value | Treated as absent; agent launches with its built-in default or `--model` flag value |
+| `Model:` appearing after `Prompt:` | Treated as prompt text, not a directive |
+| Invalid model name in `Model:` field | Passed verbatim to the agent; the agent surfaces its own error |
+| `--model` flag on single-step `implement` (no workflow) | Behaves identically to `chat --model` |
+| Resume with a different `--model` flag | Persisted per-step model values take precedence; `--model` applies only to steps with no persisted model |
 | All steps specify non-default agents | Pre-flight still runs for each; default fallback offered only if setup is declined |
 | Parallel steps with different agents | Each step runs in its own container — no cross-step sharing |
 | Resume with a different `--agent` flag | Warning printed; persisted per-step agent assignments take precedence |
