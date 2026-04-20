@@ -1,4 +1,6 @@
 use anyhow::{bail, Result};
+use serde::Deserialize;
+use std::path::Path;
 
 /// A single step in a multi-agent workflow.
 #[derive(Debug, Clone)]
@@ -145,6 +147,127 @@ pub fn parse_workflow(content: &str) -> Result<(Option<String>, Vec<WorkflowStep
     }
 
     Ok((title, steps))
+}
+
+// ─── Format detection ─────────────────────────────────────────────────────────
+
+/// Supported workflow file formats, detected by file extension.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowFormat {
+    Markdown,
+    Toml,
+    Yaml,
+}
+
+/// Detect the workflow format from the file extension.
+///
+/// Returns an error for unknown or absent extensions.
+pub fn detect_format(path: &Path) -> Result<WorkflowFormat> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("md") => Ok(WorkflowFormat::Markdown),
+        Some("toml") => Ok(WorkflowFormat::Toml),
+        Some("yml") | Some("yaml") => Ok(WorkflowFormat::Yaml),
+        _ => bail!("unsupported workflow format: expected .md, .toml, .yml, or .yaml"),
+    }
+}
+
+// ─── Intermediate serde structs for TOML/YAML ─────────────────────────────────
+
+/// Raw, deserialized representation of a single workflow step.
+/// `name` and `prompt` are kept as `Option<String>` so that missing fields can
+/// be caught with a descriptive error that includes the step index.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawStep {
+    name: Option<String>,
+    prompt: Option<String>,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// Top-level TOML workflow document.  Steps live under the `[[step]]` array
+/// (TOML key `step`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlWorkflow {
+    #[serde(default)]
+    title: Option<String>,
+    /// TOML `[[step]]` arrays map to the key "step".
+    #[serde(rename = "step", default)]
+    steps: Vec<RawStep>,
+}
+
+/// Top-level YAML workflow document.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct YamlWorkflow {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    steps: Vec<RawStep>,
+}
+
+// ─── Shared helpers ───────────────────────────────────────────────────────────
+
+/// Strip a UTF-8 BOM (`U+FEFF`) from the start of the string, if present.
+fn strip_bom(s: &str) -> &str {
+    s.strip_prefix('\u{FEFF}').unwrap_or(s)
+}
+
+/// Validate and convert a `Vec<RawStep>` into `Vec<WorkflowStep>`.
+///
+/// Errors if the list is empty, or if any step is missing `name` or `prompt`.
+fn raw_steps_to_workflow_steps(raw: Vec<RawStep>) -> Result<Vec<WorkflowStep>> {
+    if raw.is_empty() {
+        bail!("workflow file contains no steps");
+    }
+    let mut steps = Vec::with_capacity(raw.len());
+    for (i, r) in raw.into_iter().enumerate() {
+        let name = r.name.ok_or_else(|| {
+            anyhow::anyhow!("step at index {} is missing the required 'name' field", i)
+        })?;
+        let prompt = r.prompt.ok_or_else(|| {
+            anyhow::anyhow!(
+                "step '{}' (index {}) is missing the required 'prompt' field",
+                name,
+                i
+            )
+        })?;
+        steps.push(WorkflowStep {
+            name,
+            depends_on: r.depends_on,
+            prompt_template: prompt.trim().to_string(),
+            agent: r.agent,
+            model: r.model,
+        });
+    }
+    Ok(steps)
+}
+
+// ─── TOML parser ─────────────────────────────────────────────────────────────
+
+/// Parse a TOML workflow file into an optional title and ordered list of steps.
+pub fn parse_workflow_toml(content: &str) -> Result<(Option<String>, Vec<WorkflowStep>)> {
+    let content = strip_bom(content);
+    let workflow: TomlWorkflow =
+        toml::from_str(content).map_err(|e| anyhow::anyhow!("TOML parse error: {}", e))?;
+    let steps = raw_steps_to_workflow_steps(workflow.steps)?;
+    Ok((workflow.title, steps))
+}
+
+// ─── YAML parser ─────────────────────────────────────────────────────────────
+
+/// Parse a YAML workflow file into an optional title and ordered list of steps.
+pub fn parse_workflow_yaml(content: &str) -> Result<(Option<String>, Vec<WorkflowStep>)> {
+    let content = strip_bom(content);
+    let workflow: YamlWorkflow =
+        serde_yaml::from_str(content).map_err(|e| anyhow::anyhow!("YAML parse error: {}", e))?;
+    let steps = raw_steps_to_workflow_steps(workflow.steps)?;
+    Ok((workflow.title, steps))
 }
 
 fn flush_step(
@@ -379,6 +502,340 @@ mod tests {
         assert!(
             steps[1].model.is_none(),
             "step 'b' must have model = None (no Model: field)"
+        );
+    }
+
+    // ─── TOML parser tests (work item 0056) ───────────────────────────────────
+
+    #[test]
+    fn toml_happy_path_all_fields() {
+        let toml = r#"
+title = "My Workflow"
+
+[[step]]
+name = "alpha"
+prompt = "Do alpha."
+
+[[step]]
+name = "beta"
+depends_on = ["alpha"]
+agent = "codex"
+model = "claude-opus-4-6"
+prompt = "Do beta."
+"#;
+        let (title, steps) = parse_workflow_toml(toml).unwrap();
+        assert_eq!(title.as_deref(), Some("My Workflow"));
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].name, "alpha");
+        assert!(steps[0].depends_on.is_empty());
+        assert_eq!(steps[0].prompt_template, "Do alpha.");
+        assert!(steps[0].agent.is_none());
+        assert!(steps[0].model.is_none());
+        assert_eq!(steps[1].name, "beta");
+        assert_eq!(steps[1].depends_on, vec!["alpha"]);
+        assert_eq!(steps[1].agent, Some("codex".to_string()));
+        assert_eq!(steps[1].model, Some("claude-opus-4-6".to_string()));
+        assert_eq!(steps[1].prompt_template, "Do beta.");
+    }
+
+    #[test]
+    fn toml_no_title_field_steps_still_parse() {
+        let toml = r#"
+[[step]]
+name = "only-step"
+prompt = "A prompt."
+"#;
+        let (title, steps) = parse_workflow_toml(toml).unwrap();
+        assert!(title.is_none(), "title must be None when not specified");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].name, "only-step");
+        assert_eq!(steps[0].prompt_template, "A prompt.");
+    }
+
+    #[test]
+    fn toml_multiline_prompt_preserves_newlines_and_template_vars() {
+        let toml = r#"
+[[step]]
+name = "go"
+prompt = """
+Line one.
+Line two with {{work_item_number}}.
+{{work_item_section:[Impl]}}
+"""
+"#;
+        let (_, steps) = parse_workflow_toml(toml).unwrap();
+        let p = &steps[0].prompt_template;
+        assert!(p.contains("Line one."), "first line must be present");
+        assert!(
+            p.contains("{{work_item_number}}"),
+            "work_item_number template var must survive parsing"
+        );
+        assert!(
+            p.contains("{{work_item_section:[Impl]}}"),
+            "section template var must survive parsing"
+        );
+        // Newline between the two content lines must be preserved.
+        let pos_one = p.find("Line one.").unwrap();
+        let pos_two = p.find("Line two with").unwrap();
+        assert!(
+            p[pos_one..pos_two].contains('\n'),
+            "newline between lines must be preserved; got: {p:?}"
+        );
+    }
+
+    #[test]
+    fn toml_missing_name_field_returns_error() {
+        let toml = r#"
+[[step]]
+prompt = "Do something."
+"#;
+        let result = parse_workflow_toml(toml);
+        assert!(result.is_err(), "missing name field must produce an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("name") || msg.contains("index 0"),
+            "error must mention missing name or step index; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn toml_missing_prompt_field_returns_error() {
+        let toml = r#"
+[[step]]
+name = "orphan"
+"#;
+        let result = parse_workflow_toml(toml);
+        assert!(result.is_err(), "missing prompt field must produce an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("prompt") || msg.contains("orphan"),
+            "error must mention missing prompt or step name; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn toml_empty_steps_returns_error() {
+        // A TOML file with a title but no [[step]] entries must error.
+        let toml = r#"title = "Empty""#;
+        let result = parse_workflow_toml(toml);
+        assert!(result.is_err(), "empty steps array must produce an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no steps"),
+            "error must mention no steps; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn toml_unknown_field_returns_error() {
+        // deny_unknown_fields must reject typos / extra keys.
+        let toml = r#"
+[[step]]
+name = "a"
+prompt = "Do it."
+typo_field = "oops"
+"#;
+        let result = parse_workflow_toml(toml);
+        assert!(
+            result.is_err(),
+            "unknown field must produce an error (deny_unknown_fields)"
+        );
+    }
+
+    // ─── YAML parser tests (work item 0056) ───────────────────────────────────
+
+    #[test]
+    fn yaml_happy_path_all_fields() {
+        let yaml = r#"
+title: "My Workflow"
+steps:
+  - name: alpha
+    prompt: "Do alpha."
+  - name: beta
+    depends_on: [alpha]
+    agent: codex
+    model: "claude-opus-4-6"
+    prompt: "Do beta."
+"#;
+        let (title, steps) = parse_workflow_yaml(yaml).unwrap();
+        assert_eq!(title.as_deref(), Some("My Workflow"));
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].name, "alpha");
+        assert!(steps[0].depends_on.is_empty());
+        assert_eq!(steps[0].prompt_template, "Do alpha.");
+        assert!(steps[0].agent.is_none());
+        assert!(steps[0].model.is_none());
+        assert_eq!(steps[1].name, "beta");
+        assert_eq!(steps[1].depends_on, vec!["alpha"]);
+        assert_eq!(steps[1].agent, Some("codex".to_string()));
+        assert_eq!(steps[1].model, Some("claude-opus-4-6".to_string()));
+        assert_eq!(steps[1].prompt_template, "Do beta.");
+    }
+
+    #[test]
+    fn yaml_depends_on_as_sequence() {
+        let yaml = r#"
+steps:
+  - name: a
+    prompt: "A."
+  - name: b
+    prompt: "B."
+  - name: c
+    depends_on: [a, b]
+    prompt: "C."
+"#;
+        let (_, steps) = parse_workflow_yaml(yaml).unwrap();
+        assert_eq!(
+            steps[2].depends_on,
+            vec!["a", "b"],
+            "flow-sequence depends_on must parse into a Vec"
+        );
+    }
+
+    #[test]
+    fn yaml_depends_on_omitted_gives_empty_vec() {
+        let yaml = r#"
+steps:
+  - name: root
+    prompt: "I have no deps."
+"#;
+        let (_, steps) = parse_workflow_yaml(yaml).unwrap();
+        assert!(
+            steps[0].depends_on.is_empty(),
+            "omitted depends_on must produce an empty Vec"
+        );
+    }
+
+    #[test]
+    fn yaml_literal_block_prompt_preserves_newlines_and_template_vars() {
+        let yaml = r#"
+steps:
+  - name: go
+    prompt: |
+      Line one.
+      Line two with {{work_item_number}}.
+      {{work_item_section:[Impl]}}
+"#;
+        let (_, steps) = parse_workflow_yaml(yaml).unwrap();
+        let p = &steps[0].prompt_template;
+        assert!(p.contains("Line one."), "first line must be present");
+        assert!(
+            p.contains("{{work_item_number}}"),
+            "work_item_number template var must survive parsing"
+        );
+        assert!(
+            p.contains("{{work_item_section:[Impl]}}"),
+            "section template var must survive parsing"
+        );
+        // Newline between the two content lines must be preserved.
+        let pos_one = p.find("Line one.").unwrap();
+        let pos_two = p.find("Line two with").unwrap();
+        assert!(
+            p[pos_one..pos_two].contains('\n'),
+            "newline between lines must be preserved; got: {p:?}"
+        );
+    }
+
+    #[test]
+    fn yaml_missing_name_field_returns_error() {
+        let yaml = r#"
+steps:
+  - prompt: "Do something."
+"#;
+        let result = parse_workflow_yaml(yaml);
+        assert!(result.is_err(), "missing name field must produce an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("name") || msg.contains("index 0"),
+            "error must mention missing name or step index; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn yaml_missing_prompt_field_returns_error() {
+        let yaml = r#"
+steps:
+  - name: orphan
+"#;
+        let result = parse_workflow_yaml(yaml);
+        assert!(result.is_err(), "missing prompt field must produce an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("prompt") || msg.contains("orphan"),
+            "error must mention missing prompt or step name; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn yaml_empty_steps_returns_error() {
+        let yaml = "title: \"Empty\"\nsteps: []\n";
+        let result = parse_workflow_yaml(yaml);
+        assert!(result.is_err(), "empty steps array must produce an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no steps"),
+            "error must mention no steps; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn yaml_unknown_field_returns_error() {
+        // deny_unknown_fields must reject typos / extra keys.
+        let yaml = r#"
+steps:
+  - name: a
+    prompt: "Do it."
+    typo_field: "oops"
+"#;
+        let result = parse_workflow_yaml(yaml);
+        assert!(
+            result.is_err(),
+            "unknown field must produce an error (deny_unknown_fields)"
+        );
+    }
+
+    // ─── Format detection tests (work item 0056) ──────────────────────────────
+
+    #[test]
+    fn detect_format_md_returns_markdown() {
+        assert_eq!(
+            detect_format(Path::new("workflow.md")).unwrap(),
+            WorkflowFormat::Markdown
+        );
+    }
+
+    #[test]
+    fn detect_format_toml_returns_toml() {
+        assert_eq!(
+            detect_format(Path::new("workflow.toml")).unwrap(),
+            WorkflowFormat::Toml
+        );
+    }
+
+    #[test]
+    fn detect_format_yml_returns_yaml() {
+        assert_eq!(
+            detect_format(Path::new("workflow.yml")).unwrap(),
+            WorkflowFormat::Yaml
+        );
+    }
+
+    #[test]
+    fn detect_format_yaml_returns_yaml() {
+        assert_eq!(
+            detect_format(Path::new("workflow.yaml")).unwrap(),
+            WorkflowFormat::Yaml
+        );
+    }
+
+    #[test]
+    fn detect_format_json_returns_error() {
+        let result = detect_format(Path::new("workflow.json"));
+        assert!(result.is_err(), ".json extension must return an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("unsupported") || msg.contains(".md"),
+            "error must describe supported formats; got: {msg}"
         );
     }
 }

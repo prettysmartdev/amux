@@ -2,7 +2,7 @@
 
 A workflow breaks a large implementation task into discrete phases — for example: plan → implement → review → docs. Each phase runs as its own agent session. You review the output between phases and decide whether to advance, retry, or redirect.
 
-Workflows are plain Markdown files that you write and commit to your repo. amux parses them into an execution plan and runs them inside Docker containers, pausing between steps for your input.
+Workflows are files you write and commit to your repo — in Markdown, TOML, or YAML. amux parses them into an execution plan and runs them inside Docker containers, pausing between steps for your input.
 
 ---
 
@@ -28,20 +28,46 @@ The TUI shows a **workflow status strip** between the execution window and the c
 
 ---
 
-## Workflow file format
+## Workflow file formats
 
-A workflow is a plain Markdown file. amux looks for:
+amux supports three workflow file formats: **Markdown** (`.md`), **TOML** (`.toml`), and **YAML** (`.yml` / `.yaml`). The format is detected automatically from the file extension. All three formats produce identical execution behaviour — you can pass any of them to `--workflow` interchangeably.
+
+| Extension | Format |
+|-----------|--------|
+| `.md` | Markdown |
+| `.toml` | TOML |
+| `.yml` or `.yaml` | YAML |
+
+Any other extension is rejected with:
+
+```
+unsupported workflow format: expected .md, .toml, .yml, or .yaml
+```
+
+All three formats support the same step fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Unique step identifier within the workflow |
+| `prompt` | string | yes | Prompt template sent to the agent |
+| `depends_on` | array of strings | no | Names of steps that must complete before this one runs |
+| `agent` | string | no | Run this step with a specific agent instead of the default. Valid values: `claude`, `codex`, `opencode`, `maki`, `gemini` |
+| `model` | string | no | Run this step with a specific model. Overrides any `--model` flag |
+
+Field names in TOML and YAML are **lowercase only** (`name`, `depends_on`, `agent`, `model`, `prompt`). Uppercase variants are not accepted. Unknown fields (e.g. `dependson`, `Prompt`) are rejected as errors so that typos do not silently take effect.
+
+### Markdown (`.md`)
+
+The original format. amux looks for:
 
 | Element | Description |
 |---------|-------------|
 | `# Title` | Optional heading used for display only |
 | `## Step: <name>` | Defines a step; names must be unique within the file |
 | `Depends-on: <step>[, <step>…]` | Declares upstream dependencies (omit for root steps) |
-| `Agent: <name>` | Optional. Run this step with a specific agent instead of the default. Valid values: `claude`, `codex`, `opencode`, `maki`, `gemini` |
-| `Model: <name>` | Optional. Run this step with a specific model instead of the default. Overrides any `--model` flag passed at the command line |
+| `Agent: <name>` | Optional. Run this step with a specific agent instead of the default |
+| `Model: <name>` | Optional. Run this step with a specific model |
 | `Prompt:` | Everything after this keyword (until the next heading) is the step's prompt template |
-
-### Example
 
 ```markdown
 # Implement Feature Workflow
@@ -68,7 +94,84 @@ Prompt: Write documentation for work item {{work_item_number}}.
 
 In this example, `review` and `docs` both depend on `implement` — they form a **parallel group** and are executed sequentially in file order. In the TUI they are rendered stacked vertically with slight indentation.
 
+### TOML (`.toml`)
+
+Steps are declared as an array of tables using `[[step]]`. The optional `title` string appears at the top level.
+
+```toml
+title = "Implement Feature Workflow"   # optional
+
+[[step]]
+name = "plan"
+prompt = """
+Read the following work item and produce an implementation plan.
+
+{{work_item_content}}
+"""
+
+[[step]]
+name = "implement"
+depends_on = ["plan"]
+prompt = """
+Implement work item {{work_item_number}} according to the plan.
+
+Follow the spec: {{work_item_section:[Implementation Details]}}
+"""
+
+[[step]]
+name = "review"
+depends_on = ["implement"]
+prompt = """
+Review the changes from the implement step for correctness and style.
+"""
+
+[[step]]
+name = "docs"
+depends_on = ["implement"]
+prompt = """
+Write documentation for work item {{work_item_number}}.
+"""
+```
+
+Use TOML triple-quoted strings (`"""…"""`) for multiline prompts. Newlines and `{{template_vars}}` are preserved exactly.
+
+### YAML (`.yml` / `.yaml`)
+
+Steps are declared as a sequence under the `steps` key. The optional `title` string appears at the top level.
+
+```yaml
+title: "Implement Feature Workflow"   # optional
+
+steps:
+  - name: plan
+    prompt: |
+      Read the following work item and produce an implementation plan.
+
+      {{work_item_content}}
+
+  - name: implement
+    depends_on: [plan]
+    prompt: |
+      Implement work item {{work_item_number}} according to the plan.
+
+      Follow the spec: {{work_item_section:[Implementation Details]}}
+
+  - name: review
+    depends_on: [implement]
+    prompt: |
+      Review the changes from the implement step for correctness and style.
+
+  - name: docs
+    depends_on: [implement]
+    prompt: |
+      Write documentation for work item {{work_item_number}}.
+```
+
+Use YAML literal blocks (`|`) for multiline prompts. `depends_on` must be a YAML sequence — not a bare string. Newlines and `{{template_vars}}` are preserved exactly.
+
 ### Prompt template variables
+
+All three formats support the same template variables in the `prompt` field:
 
 | Variable | Replaced with |
 |----------|--------------|
@@ -82,7 +185,7 @@ Unknown variables or missing sections are left in place with a warning.
 
 ## Multi-agent workflows
 
-Each step in a workflow can run in a different agent's container by adding an `Agent:` field to the step header block — between `Depends-on:` and `Prompt:`:
+Each step in a workflow can run in a different agent's container. In Markdown, add an `Agent:` line to the step header block — between `Depends-on:` and `Prompt:`. In TOML and YAML, add an `agent` key to the step object.
 
 ```markdown
 ## Step: plan
@@ -136,7 +239,7 @@ When resuming a saved workflow, the per-step agent assignments from the original
 
 ## Per-step model overrides
 
-Each step in a workflow can run against a different model by adding a `Model:` field to the step header block — between any `Agent:` line and the `Prompt:` line:
+Each step in a workflow can run against a different model. In Markdown, add a `Model:` line to the step header block — between any `Agent:` line and the `Prompt:` line. In TOML and YAML, add a `model` key to the step object.
 
 ```markdown
 ## Step: plan
@@ -358,9 +461,17 @@ Steps that share the same `Depends-on` set form a **parallel group**. amux execu
 
 ---
 
-## Bundled example
+## Bundled examples
 
-`aspec/workflows/implement-feature.md` defines a four-step plan → implement → review + docs workflow suitable for most feature work items. Copy and customise it for your project.
+`aspec/workflows/` contains ready-to-use example workflows in all three supported formats:
+
+| File | Format | Description |
+|------|--------|-------------|
+| `implement-preplanned.md` | Markdown | Four-step implement → tests + docs → review workflow |
+| `implement-preplanned.toml` | TOML | Identical workflow in TOML format |
+| `implement-preplanned.yaml` | YAML | Identical workflow in YAML format |
+
+All three files define the same four steps (`implement`, `tests`, `docs`, `review`) with the same prompts, dependencies, and agent assignments. Use whichever format best fits your tooling — for example, TOML or YAML if you generate or lint workflow files programmatically.
 
 ---
 
@@ -389,6 +500,13 @@ Steps that share the same `Depends-on` set form a **parallel group**. amux execu
 | Current step and next step use the same agent | "Same container" (**↓**) option available as usual |
 | Current step and next step use different agents | "Same container" option greyed out (TUI) or skipped (CLI) with explanation |
 | Empty workflow file | Rejected with a helpful message |
+| Unsupported file extension (e.g. `.json`) | Error: `unsupported workflow format: expected .md, .toml, .yml, or .yaml` |
+| TOML/YAML step missing `name` field | Parse error including the step index |
+| TOML/YAML step missing `prompt` field | Parse error including the step name (or index if unnamed) |
+| Empty `[[step]]` / `steps:` array | Error matching the Markdown `"workflow file contains no steps"` behaviour |
+| `depends_on` as bare YAML string instead of sequence | Parse error; must be a YAML sequence |
+| Unknown field in TOML/YAML step (e.g. `dependson`) | Parse error; typos are not silently dropped |
+| Uppercase field name in TOML/YAML (e.g. `Name:`) | Parse error; field names must be lowercase |
 | Work item file not found | Error before loading the workflow |
 | Workflow file not found / unreadable | Clear error with the file path |
 | Agent failure mid-workflow | Step marked Error; user prompted to retry or abort |

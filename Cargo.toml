@@ -30,6 +30,8 @@ flate2 = "1"
 tar = "0.4"
 sha2 = "0.10"
 arboard = "3"
+toml = "0.8"
+serde_yaml = "0.9"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub use dag::{detect_cycle, ready_steps, validate_references};
-pub use parser::parse_workflow;
+pub use parser::{detect_format, parse_workflow, parse_workflow_toml, parse_workflow_yaml, WorkflowFormat};
 
 // ─── Step status ─────────────────────────────────────────────────────────────
 
@@ -200,7 +200,12 @@ pub fn load_workflow_file(path: &Path) -> Result<(String, Option<String>, Vec<Wo
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Cannot read workflow file: {}", path.display()))?;
     let hash = sha256_hex(&content);
-    let (title, steps) = parse_workflow(&content)?;
+    let format = detect_format(path)?;
+    let (title, steps) = match format {
+        WorkflowFormat::Markdown => parse_workflow(&content)?,
+        WorkflowFormat::Toml => parse_workflow_toml(&content)?,
+        WorkflowFormat::Yaml => parse_workflow_yaml(&content)?,
+    };
     validate_references(&steps)?;
     detect_cycle(&steps)?;
     // Validate any per-step agent names.
@@ -712,5 +717,195 @@ mod tests {
             msg.contains("unknown-bot") || msg.contains("unknown agent") || msg.contains("plan"),
             "error message should reference the invalid agent name or step; got: {msg}"
         );
+    }
+
+    // ─── Integration tests: TOML and YAML loading (work item 0056) ───────────
+
+    #[test]
+    fn load_workflow_file_toml_produces_same_steps_as_md() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        std::fs::write(
+            tmp.path().join("wf.md"),
+            "# My Workflow\n\n## Step: alpha\nPrompt: Do alpha.\n\n## Step: beta\nDepends-on: alpha\nPrompt: Do beta.\n",
+        ).unwrap();
+        std::fs::write(
+            tmp.path().join("wf.toml"),
+            "title = \"My Workflow\"\n[[step]]\nname = \"alpha\"\nprompt = \"Do alpha.\"\n[[step]]\nname = \"beta\"\ndepends_on = [\"alpha\"]\nprompt = \"Do beta.\"\n",
+        ).unwrap();
+
+        let (_, md_title, md_steps) = load_workflow_file(&tmp.path().join("wf.md")).unwrap();
+        let (_, toml_title, toml_steps) = load_workflow_file(&tmp.path().join("wf.toml")).unwrap();
+
+        assert_eq!(md_title, toml_title, "titles must match");
+        assert_eq!(md_steps.len(), toml_steps.len(), "step counts must match");
+        for (i, (md, toml)) in md_steps.iter().zip(toml_steps.iter()).enumerate() {
+            assert_eq!(md.name, toml.name, "step {i} name mismatch");
+            assert_eq!(md.depends_on, toml.depends_on, "step {i} depends_on mismatch");
+            assert_eq!(md.prompt_template, toml.prompt_template, "step {i} prompt mismatch");
+            assert_eq!(md.agent, toml.agent, "step {i} agent mismatch");
+            assert_eq!(md.model, toml.model, "step {i} model mismatch");
+        }
+    }
+
+    #[test]
+    fn load_workflow_file_yaml_produces_same_steps_as_md() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        std::fs::write(
+            tmp.path().join("wf.md"),
+            "# My Workflow\n\n## Step: alpha\nPrompt: Do alpha.\n\n## Step: beta\nDepends-on: alpha\nPrompt: Do beta.\n",
+        ).unwrap();
+        std::fs::write(
+            tmp.path().join("wf.yaml"),
+            "title: \"My Workflow\"\nsteps:\n  - name: alpha\n    prompt: \"Do alpha.\"\n  - name: beta\n    depends_on: [alpha]\n    prompt: \"Do beta.\"\n",
+        ).unwrap();
+
+        let (_, md_title, md_steps) = load_workflow_file(&tmp.path().join("wf.md")).unwrap();
+        let (_, yaml_title, yaml_steps) = load_workflow_file(&tmp.path().join("wf.yaml")).unwrap();
+
+        assert_eq!(md_title, yaml_title, "titles must match");
+        assert_eq!(md_steps.len(), yaml_steps.len(), "step counts must match");
+        for (i, (md, yaml)) in md_steps.iter().zip(yaml_steps.iter()).enumerate() {
+            assert_eq!(md.name, yaml.name, "step {i} name mismatch");
+            assert_eq!(md.depends_on, yaml.depends_on, "step {i} depends_on mismatch");
+            assert_eq!(md.prompt_template, yaml.prompt_template, "step {i} prompt mismatch");
+            assert_eq!(md.agent, yaml.agent, "step {i} agent mismatch");
+            assert_eq!(md.model, yaml.model, "step {i} model mismatch");
+        }
+    }
+
+    #[test]
+    fn dag_cycle_detected_in_toml_workflow() {
+        // load_workflow_file must surface a cycle error from TOML-parsed steps.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("cyclic.toml");
+        std::fs::write(
+            &path,
+            "[[step]]\nname = \"a\"\ndepends_on = [\"b\"]\nprompt = \"A.\"\n[[step]]\nname = \"b\"\ndepends_on = [\"a\"]\nprompt = \"B.\"\n",
+        ).unwrap();
+        let result = load_workflow_file(&path);
+        assert!(result.is_err(), "cyclic TOML workflow must fail");
+        assert!(
+            result.unwrap_err().to_string().contains("cycle"),
+            "error must mention cycle"
+        );
+    }
+
+    #[test]
+    fn dag_cycle_detected_in_yaml_workflow() {
+        // load_workflow_file must surface a cycle error from YAML-parsed steps.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("cyclic.yaml");
+        std::fs::write(
+            &path,
+            "steps:\n  - name: a\n    depends_on: [b]\n    prompt: \"A.\"\n  - name: b\n    depends_on: [a]\n    prompt: \"B.\"\n",
+        ).unwrap();
+        let result = load_workflow_file(&path);
+        assert!(result.is_err(), "cyclic YAML workflow must fail");
+        assert!(
+            result.unwrap_err().to_string().contains("cycle"),
+            "error must mention cycle"
+        );
+    }
+
+    #[test]
+    fn substitute_prompt_works_on_steps_from_toml() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("wf.toml");
+        std::fs::write(
+            &path,
+            "[[step]]\nname = \"impl\"\nprompt = \"Implement {{work_item_number}}.\"\n",
+        ).unwrap();
+        let (_, _, steps) = load_workflow_file(&path).unwrap();
+        let result = substitute_prompt(&steps[0].prompt_template, 42, "");
+        assert_eq!(result, "Implement 0042.");
+    }
+
+    #[test]
+    fn substitute_prompt_works_on_steps_from_yaml() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("wf.yaml");
+        std::fs::write(
+            &path,
+            "steps:\n  - name: impl\n    prompt: \"Implement {{work_item_number}}.\"\n",
+        ).unwrap();
+        let (_, _, steps) = load_workflow_file(&path).unwrap();
+        let result = substitute_prompt(&steps[0].prompt_template, 42, "");
+        assert_eq!(result, "Implement 0042.");
+    }
+
+    // ─── Example file smoke tests (work item 0056) ────────────────────────────
+
+    #[test]
+    fn smoke_test_implement_preplanned_toml() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("aspec/workflows/implement-preplanned.toml");
+        let (_, title, steps) =
+            load_workflow_file(&path).expect("implement-preplanned.toml must parse without error");
+
+        assert_eq!(title.as_deref(), Some("Implement Feature Workflow"));
+        assert_eq!(steps.len(), 4, "must have 4 steps");
+        assert_eq!(steps[0].name, "implement");
+        assert_eq!(steps[1].name, "tests");
+        assert_eq!(steps[2].name, "docs");
+        assert_eq!(steps[3].name, "review");
+
+        assert!(steps[0].depends_on.is_empty(), "implement has no deps");
+        assert_eq!(steps[1].depends_on, vec!["implement"]);
+        assert_eq!(steps[2].depends_on, vec!["implement"]);
+        assert!(steps[3].depends_on.contains(&"docs".to_string()), "review must depend on docs");
+        assert!(steps[3].depends_on.contains(&"tests".to_string()), "review must depend on tests");
+
+        assert_eq!(steps[3].agent, Some("codex".to_string()), "review step must have agent=codex");
+    }
+
+    #[test]
+    fn smoke_test_implement_preplanned_yaml() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("aspec/workflows/implement-preplanned.yaml");
+        let (_, title, steps) =
+            load_workflow_file(&path).expect("implement-preplanned.yaml must parse without error");
+
+        assert_eq!(title.as_deref(), Some("Implement Feature Workflow"));
+        assert_eq!(steps.len(), 4, "must have 4 steps");
+        assert_eq!(steps[0].name, "implement");
+        assert_eq!(steps[1].name, "tests");
+        assert_eq!(steps[2].name, "docs");
+        assert_eq!(steps[3].name, "review");
+
+        assert!(steps[0].depends_on.is_empty(), "implement has no deps");
+        assert_eq!(steps[1].depends_on, vec!["implement"]);
+        assert_eq!(steps[2].depends_on, vec!["implement"]);
+        assert!(steps[3].depends_on.contains(&"docs".to_string()), "review must depend on docs");
+        assert!(steps[3].depends_on.contains(&"tests".to_string()), "review must depend on tests");
+
+        assert_eq!(steps[3].agent, Some("codex".to_string()), "review step must have agent=codex");
+    }
+
+    #[test]
+    fn smoke_test_all_three_formats_match_structure() {
+        // All three implement-preplanned files must yield identical step names,
+        // dependency graphs, and per-step agent values.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (_, _, md_steps) =
+            load_workflow_file(&root.join("aspec/workflows/implement-preplanned.md")).unwrap();
+        let (_, _, toml_steps) =
+            load_workflow_file(&root.join("aspec/workflows/implement-preplanned.toml")).unwrap();
+        let (_, _, yaml_steps) =
+            load_workflow_file(&root.join("aspec/workflows/implement-preplanned.yaml")).unwrap();
+
+        assert_eq!(md_steps.len(), toml_steps.len(), "md/toml step count must match");
+        assert_eq!(md_steps.len(), yaml_steps.len(), "md/yaml step count must match");
+
+        for i in 0..md_steps.len() {
+            assert_eq!(md_steps[i].name, toml_steps[i].name, "step {i} name (md vs toml)");
+            assert_eq!(md_steps[i].depends_on, toml_steps[i].depends_on, "step {i} deps (md vs toml)");
+            assert_eq!(md_steps[i].agent, toml_steps[i].agent, "step {i} agent (md vs toml)");
+
+            assert_eq!(md_steps[i].name, yaml_steps[i].name, "step {i} name (md vs yaml)");
+            assert_eq!(md_steps[i].depends_on, yaml_steps[i].depends_on, "step {i} deps (md vs yaml)");
+            assert_eq!(md_steps[i].agent, yaml_steps[i].agent, "step {i} agent (md vs yaml)");
+        }
     }
 }
