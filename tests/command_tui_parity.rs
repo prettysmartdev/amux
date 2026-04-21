@@ -2466,7 +2466,7 @@ fn workflow_resume_loads_correct_ready_steps() {
     ];
     let wf = WorkflowState {
         title: None,
-        work_item: 27,
+        work_item: Some(27),
         workflow_name: "test-workflow".to_string(),
         workflow_hash: "abc123".to_string(),
         steps,
@@ -2499,7 +2499,7 @@ fn workflow_state_file_removed_on_completion() {
     ];
     let wf = WorkflowState {
         title: None,
-        work_item: 27,
+        work_item: Some(27),
         workflow_name: "test-wf".to_string(),
         workflow_hash: "deadbeef".to_string(),
         steps,
@@ -2509,7 +2509,7 @@ fn workflow_state_file_removed_on_completion() {
     save_workflow_state(&git_root, &wf).unwrap();
 
     // Verify it was saved.
-    let state_path = workflow_state_path(&git_root, 27, "test-wf");
+    let state_path = workflow_state_path(&git_root, Some(27), "test-wf");
     let loaded = load_workflow_state(&state_path);
     assert!(loaded.is_ok(), "State should be loadable after save");
 
@@ -2538,7 +2538,7 @@ fn workflow_set_container_id_overwrites_on_retry() {
     ];
     let mut wf = WorkflowState {
         title: None,
-        work_item: 27,
+        work_item: Some(27),
         workflow_name: "test-wf".to_string(),
         workflow_hash: "deadbeef".to_string(),
         steps,

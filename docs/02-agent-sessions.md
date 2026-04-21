@@ -102,9 +102,9 @@ If an agent does not support `--model`, a `WARNING:` is printed to stderr and th
 
 `--model` can be combined freely with `--agent`, `--yolo`, `--auto`, and all other flags. When used with `--workflow` on `implement`, the flag value acts as the default model for every workflow step that does not define its own `Model:` field. See [Per-step model overrides](04-workflows.md#per-step-model-overrides).
 
-### `--non-interactive`
+### `--non-interactive` / `-n`
 
-Run the agent in print/batch mode — no interactivity required. The agent executes, produces output, and exits.
+Run the agent in print/batch mode — no interactivity required. The agent executes, produces output, and exits. `-n` is a short alias for `--non-interactive` and works on all commands that support the flag (`chat`, `implement`, `exec prompt`, `exec workflow`, `ready`, `specs amend`).
 
 | Agent | Flag used |
 |-------|-----------|
@@ -320,7 +320,7 @@ When `--aspec` is not passed and no `aspec/` folder exists, `init` offers to con
 ## Reference: `amux ready`
 
 ```sh
-amux ready [--refresh] [--build] [--no-cache] [--non-interactive] [--allow-docker]
+amux ready [--refresh] [--build] [--no-cache] [--non-interactive] [-n] [--allow-docker] [--json]
 ```
 
 Verifies your environment is ready for agent sessions.
@@ -330,8 +330,9 @@ Verifies your environment is ready for agent sessions.
 | `--refresh` | Run the Dockerfile agent audit, update `Dockerfile.dev`, and rebuild both images |
 | `--build` | Rebuild the project base image and agent images in `.amux/`. When multiple agent Dockerfiles exist, amux asks which to build |
 | `--no-cache` | Pass `--no-cache` to every `docker build` invocation, including the project base image and all agent images |
-| `--non-interactive` | Run the audit agent in print mode |
+| `--non-interactive` / `-n` | Run the audit agent in print mode |
 | `--allow-docker` | Give the audit container access to the host Docker socket |
+| `--json` | Emit machine-readable JSON instead of the human-readable table. Implies `--non-interactive`. See [`ready --json`](#ready---json) |
 
 Use `--refresh` after your project's toolchain changes to update `Dockerfile.dev` (the project base) and rebuild both images. The agent dockerfile is not touched by the audit.
 
@@ -404,22 +405,55 @@ Run `amux ready` to migrate to the modular Dockerfile layout, or pass `--no-migr
 
 `amux ready` also checks whether work item paths are configured. If neither `aspec/work-items/` exists nor `work_items.dir` is set, the summary shows a `⚠ not configured` warning (not a failure) for the `work items config` row, and prints a tip to run `amux config set work_items.dir <path>`.
 
+### `ready --json`
+
+When `--json` is set, `amux ready` suppresses the human-readable table and instead prints structured JSON summarising the environment check results. This is useful for CI pipelines and scripts that need to inspect readiness programmatically.
+
+```sh
+amux ready --json
+```
+
+```json
+{
+  "docker": { "available": true },
+  "dockerfile": { "exists": true, "path": "/home/user/my-project/Dockerfile.dev" },
+  "base_image": { "built": true, "tag": "amux-myproject:latest" },
+  "agent_image": { "built": true, "tag": "amux-myproject-claude:latest" },
+  "audit": { "ran": false }
+}
+```
+
+When `--refresh` is also set, the audit runs and its results are included once complete:
+
+```json
+{
+  "docker": { "available": true },
+  "dockerfile": { "exists": true, "path": "/home/user/my-project/Dockerfile.dev" },
+  "base_image": { "built": true, "tag": "amux-myproject:latest" },
+  "agent_image": { "built": true, "tag": "amux-myproject-claude:latest" },
+  "audit": { "ran": true, "exit_code": 0 }
+}
+```
+
+`--json` implies `--non-interactive` — no interactive prompts are shown regardless of environment state. Streaming audit output is buffered internally and not printed; only the final JSON is written to stdout.
+
 ---
 
-## Reference: all `implement` and `chat` flags
+## Reference: all `implement`, `chat`, and `exec` flags
 
-| Flag | `chat` | `implement` | Description |
-|------|--------|-------------|-------------|
-| `--agent=<name>` | ✓ | ✓ | Override the agent for this session |
-| `--model=<NAME>` | ✓ | ✓ | Override the model used by the agent |
-| `--non-interactive` | ✓ | ✓ | Print/batch mode |
-| `--plan` | ✓ | ✓ | Read-only analysis mode |
-| `--allow-docker` | ✓ | ✓ | Mount host Docker socket |
-| `--mount-ssh` | ✓ | ✓ | Mount `~/.ssh` read-only |
-| `--worktree` | — | ✓ | Run in isolated Git worktree |
-| `--auto` | ✓ | ✓ | Auto-approve file edits, prompt for shell commands |
-| `--yolo` | ✓ | ✓ | Fully autonomous mode |
-| `--workflow=<path>` | — | ✓ | Multi-step workflow file |
+| Flag | `chat` | `implement` | `exec prompt` | `exec workflow` | Description |
+|------|--------|-------------|---------------|-----------------|-------------|
+| `--agent=<name>` | ✓ | ✓ | ✓ | ✓ | Override the agent for this session |
+| `--model=<NAME>` | ✓ | ✓ | ✓ | ✓ | Override the model used by the agent |
+| `--non-interactive` / `-n` | ✓ | ✓ | ✓ | ✓ | Print/batch mode |
+| `--plan` | ✓ | ✓ | ✓ | ✓ | Read-only analysis mode |
+| `--allow-docker` | ✓ | ✓ | ✓ | ✓ | Mount host Docker socket |
+| `--mount-ssh` | ✓ | ✓ | ✓ | ✓ | Mount `~/.ssh` read-only |
+| `--worktree` | — | ✓ | — | ✓ | Run in isolated Git worktree |
+| `--auto` | ✓ | ✓ | ✓ | ✓ | Auto-approve file edits, prompt for shell commands |
+| `--yolo` | ✓ | ✓ | ✓ | ✓ | Fully autonomous mode |
+| `--workflow=<path>` | — | ✓ | — | — | Multi-step workflow file (use `exec workflow <path>` instead) |
+| `--work-item <N>` / `-w <N>` | — | — | — | ✓ | Work item number for template variable substitution |
 
 ---
 

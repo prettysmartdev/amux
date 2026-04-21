@@ -2941,7 +2941,7 @@ mod tests {
                 model: None,
             },
         ];
-        crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into())
+        crate::workflow::WorkflowState::new(None, steps, "hash".into(), Some(1), "wf".into())
     }
 
     #[test]
@@ -2991,7 +2991,7 @@ mod tests {
             agent: None,
             model: None,
         }];
-        let wf = crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
+        let wf = crate::workflow::WorkflowState::new(None, steps, "hash".into(), Some(1), "wf".into());
         tab.workflow = Some(wf);
         tab.workflow_current_step = Some("solo".to_string());
         tab.workflow_step_agents.insert("solo".to_string(), "claude".to_string());

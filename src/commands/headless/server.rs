@@ -120,7 +120,7 @@ fn error_json(msg: impl Into<String>) -> Json<ErrorResponse> {
 // ---------------------------------------------------------------------------
 
 const KNOWN_SUBCOMMANDS: &[&str] = &[
-    "implement", "chat", "ready", "init", "status", "specs", "config",
+    "implement", "chat", "ready", "init", "status", "specs", "config", "exec",
 ];
 
 fn is_valid_subcommand(name: &str) -> bool {
@@ -606,12 +606,19 @@ async fn execute_command(
     for arg in &args {
         cmd.arg(arg);
     }
-    // Add --non-interactive for subcommands that support it.
+    // The headless server has no TTY, so always run supported subcommands in
+    // non-interactive mode.  The `headless.alwaysNonInteractive` config option
+    // additionally applies this flag at the CLI dispatch layer (commands/mod.rs),
+    // so direct CLI invocations also honour the setting.
+    //
+    // Guard against duplicates: if the client already included --non-interactive
+    // in the args vector, don't append a second copy (clap tolerates it, but it
+    // is cleaner to avoid).
     let supports_non_interactive = matches!(
         subcommand.as_str(),
-        "implement" | "chat" | "ready"
+        "implement" | "chat" | "ready" | "exec"
     );
-    if supports_non_interactive {
+    if supports_non_interactive && !args.contains(&"--non-interactive".to_string()) {
         cmd.arg("--non-interactive");
     }
     cmd.current_dir(&workdir);
@@ -948,4 +955,45 @@ pub async fn start_server(
 
     tracing::info!("Headless server stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_valid_subcommand (work item 0058) ─────────────────────────────────
+    //
+    // Verify that "exec" was added to KNOWN_SUBCOMMANDS so that headless clients
+    // can dispatch `exec prompt` and `exec workflow` requests.
+
+    #[test]
+    fn is_valid_subcommand_exec_is_accepted() {
+        assert!(
+            is_valid_subcommand("exec"),
+            "'exec' must be in KNOWN_SUBCOMMANDS so headless clients can dispatch exec commands; \
+             current list: {KNOWN_SUBCOMMANDS:?}"
+        );
+    }
+
+    #[test]
+    fn is_valid_subcommand_all_known_subcommands_are_valid() {
+        for &name in KNOWN_SUBCOMMANDS {
+            assert!(
+                is_valid_subcommand(name),
+                "'{name}' is in KNOWN_SUBCOMMANDS but is_valid_subcommand returned false"
+            );
+        }
+    }
+
+    #[test]
+    fn is_valid_subcommand_unknown_name_is_rejected() {
+        assert!(!is_valid_subcommand("unknown"), "unknown subcommand must be rejected");
+        assert!(!is_valid_subcommand(""), "empty string must be rejected");
+        // Two-level paths like "exec prompt" are not valid at this layer;
+        // only the top-level "exec" token is validated here.
+        assert!(
+            !is_valid_subcommand("exec prompt"),
+            "two-level path must be rejected; the server splits on subcommand + args"
+        );
+    }
 }

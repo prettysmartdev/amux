@@ -72,6 +72,19 @@ impl RepoConfig {
     }
 }
 
+/// Headless server configuration nested within `GlobalConfig`.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HeadlessConfig {
+    /// Working directories allowlisted for headless mode sessions.
+    /// Each entry should be an absolute path. Resolved to canonical paths at server startup.
+    #[serde(rename = "workDirs", skip_serializing_if = "Option::is_none")]
+    pub work_dirs: Option<Vec<String>>,
+    /// When true, inject `--non-interactive` into every headless command dispatch
+    /// that supports the flag, even if the client did not pass it.
+    #[serde(rename = "alwaysNonInteractive", skip_serializing_if = "Option::is_none")]
+    pub always_non_interactive: Option<bool>,
+}
+
 /// Global configuration stored at `$HOME/.amux/config.json`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GlobalConfig {
@@ -93,10 +106,9 @@ pub struct GlobalConfig {
     /// Overridden by per-repo config when both are set.
     #[serde(rename = "envPassthrough", skip_serializing_if = "Option::is_none")]
     pub env_passthrough: Option<Vec<String>>,
-    /// Working directories allowlisted for headless mode sessions.
-    /// Each entry should be an absolute path. Resolved to canonical paths at server startup.
-    #[serde(rename = "headlessWorkDirs", skip_serializing_if = "Option::is_none")]
-    pub headless_work_dirs: Option<Vec<String>>,
+    /// Headless server configuration (work dirs, always-non-interactive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headless: Option<HeadlessConfig>,
 }
 
 /// Built-in default number of scrollback lines for the container terminal emulator.
@@ -133,6 +145,26 @@ pub fn effective_scrollback_lines(git_root: &Path) -> usize {
     }
     let global = load_global_config().unwrap_or_default();
     global.terminal_scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK_LINES)
+}
+
+/// Returns the effective headless work dirs list from global config.
+/// Falls back to an empty list when not configured.
+pub fn effective_headless_work_dirs() -> Vec<String> {
+    let global = load_global_config().unwrap_or_default();
+    global
+        .headless
+        .and_then(|h| h.work_dirs)
+        .unwrap_or_default()
+}
+
+/// Returns the effective `alwaysNonInteractive` setting from global config.
+/// Falls back to `false` when not configured.
+pub fn effective_always_non_interactive() -> bool {
+    let global = load_global_config().unwrap_or_default();
+    global
+        .headless
+        .and_then(|h| h.always_non_interactive)
+        .unwrap_or(false)
 }
 
 pub fn repo_config_path(git_root: &Path) -> PathBuf {
@@ -766,80 +798,192 @@ mod tests {
         assert_eq!(wi.template.as_deref(), Some("./work-items/0000-template.md"));
     }
 
-    // ─── GlobalConfig headlessWorkDirs ───────────────────────────────────────
+    // ─── GlobalConfig headless ────────────────────────────────────────────
 
     #[test]
     fn headless_work_dirs_deserializes_from_json() {
-        let json = r#"{"headlessWorkDirs": ["/workspace/a", "/workspace/b"]}"#;
+        let json = r#"{"headless": {"workDirs": ["/workspace/a", "/workspace/b"]}}"#;
         let config: GlobalConfig = serde_json::from_str(json).unwrap();
+        let headless = config.headless.unwrap();
         assert_eq!(
-            config.headless_work_dirs,
+            headless.work_dirs,
             Some(vec!["/workspace/a".to_string(), "/workspace/b".to_string()])
         );
     }
 
     #[test]
-    fn headless_work_dirs_absent_field_deserializes_to_none() {
+    fn headless_absent_field_deserializes_to_none() {
         let json = r#"{"default_agent": "claude"}"#;
         let config: GlobalConfig = serde_json::from_str(json).unwrap();
         assert!(
-            config.headless_work_dirs.is_none(),
-            "absent headlessWorkDirs must deserialize to None"
+            config.headless.is_none(),
+            "absent headless must deserialize to None"
         );
-        // Callers unwrap with unwrap_or_default() → empty Vec, not an error.
-        let dirs: Vec<String> = config.headless_work_dirs.unwrap_or_default();
-        assert!(dirs.is_empty());
     }
 
     #[test]
     fn headless_work_dirs_empty_array_field_deserializes_to_some_empty_vec() {
-        let json = r#"{"headlessWorkDirs": []}"#;
+        let json = r#"{"headless": {"workDirs": []}}"#;
         let config: GlobalConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.headless_work_dirs, Some(vec![]));
+        assert_eq!(config.headless.unwrap().work_dirs, Some(vec![]));
     }
 
     #[test]
-    fn headless_work_dirs_serializes_with_camel_case_key() {
+    fn headless_serializes_with_camel_case_keys() {
         let config = GlobalConfig {
-            headless_work_dirs: Some(vec!["/repo/proj".to_string()]),
+            headless: Some(HeadlessConfig {
+                work_dirs: Some(vec!["/repo/proj".to_string()]),
+                always_non_interactive: Some(true),
+            }),
             ..Default::default()
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(
-            json.contains("headlessWorkDirs"),
-            "expected camelCase key 'headlessWorkDirs' in JSON; got: {json}"
+            json.contains("workDirs"),
+            "expected camelCase key 'workDirs' in JSON; got: {json}"
         );
         assert!(
-            !json.contains("headless_work_dirs"),
-            "snake_case key must not appear in JSON; got: {json}"
+            json.contains("alwaysNonInteractive"),
+            "expected camelCase key 'alwaysNonInteractive' in JSON; got: {json}"
         );
     }
 
     #[test]
-    fn headless_work_dirs_absent_is_omitted_from_json() {
+    fn headless_absent_is_omitted_from_json() {
         let config = GlobalConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         assert!(
-            !json.contains("headlessWorkDirs"),
-            "absent headless_work_dirs must be omitted (skip_serializing_if); got: {json}"
+            !json.contains("headless"),
+            "absent headless must be omitted (skip_serializing_if); got: {json}"
         );
     }
 
     #[test]
-    fn headless_work_dirs_round_trips_through_json() {
+    fn headless_round_trips_through_json() {
         let original = GlobalConfig {
-            headless_work_dirs: Some(vec![
-                "/workspace/alpha".to_string(),
-                "/workspace/beta".to_string(),
-            ]),
+            headless: Some(HeadlessConfig {
+                work_dirs: Some(vec![
+                    "/workspace/alpha".to_string(),
+                    "/workspace/beta".to_string(),
+                ]),
+                always_non_interactive: Some(false),
+            }),
             ..Default::default()
         };
         let json = serde_json::to_string_pretty(&original).unwrap();
         let restored: GlobalConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(original, restored);
+        let headless = restored.headless.unwrap();
         assert_eq!(
-            restored.headless_work_dirs.as_deref(),
+            headless.work_dirs.as_deref(),
             Some(["/workspace/alpha".to_string(), "/workspace/beta".to_string()].as_slice())
+        );
+        assert_eq!(headless.always_non_interactive, Some(false));
+    }
+
+    #[test]
+    fn headless_always_non_interactive_defaults_to_none() {
+        let json = r#"{"headless": {"workDirs": ["/tmp"]}}"#;
+        let config: GlobalConfig = serde_json::from_str(json).unwrap();
+        let headless = config.headless.unwrap();
+        assert!(headless.always_non_interactive.is_none());
+    }
+
+    // ─── HeadlessConfig standalone round-trips ───────────────────────────────
+    //
+    // Tests 0058: verify HeadlessConfig JSON round-trips in all field combinations
+    // and document the intentional breaking change for the old flat key format.
+
+    #[test]
+    fn headless_config_round_trips_both_fields_set() {
+        let original = HeadlessConfig {
+            work_dirs: Some(vec!["/repo/a".to_string(), "/repo/b".to_string()]),
+            always_non_interactive: Some(true),
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        assert!(json.contains("workDirs"), "workDirs must appear in JSON; got: {json}");
+        assert!(json.contains("alwaysNonInteractive"), "alwaysNonInteractive must appear in JSON; got: {json}");
+        let restored: HeadlessConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(
+            restored.work_dirs.as_deref(),
+            Some(["/repo/a".to_string(), "/repo/b".to_string()].as_slice())
+        );
+        assert_eq!(restored.always_non_interactive, Some(true));
+    }
+
+    #[test]
+    fn headless_config_round_trips_only_work_dirs_set() {
+        let original = HeadlessConfig {
+            work_dirs: Some(vec!["/workspace/project".to_string()]),
+            always_non_interactive: None,
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        // skip_serializing_if = "Option::is_none" must suppress absent field.
+        assert!(
+            !json.contains("alwaysNonInteractive"),
+            "absent alwaysNonInteractive must not appear in JSON; got: {json}"
+        );
+        let restored: HeadlessConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(restored.always_non_interactive, None);
+        assert_eq!(
+            restored.work_dirs.as_deref(),
+            Some(["/workspace/project".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn headless_config_round_trips_only_always_non_interactive_set() {
+        let original = HeadlessConfig {
+            work_dirs: None,
+            always_non_interactive: Some(false),
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        assert!(
+            !json.contains("workDirs"),
+            "absent work_dirs must not appear in JSON; got: {json}"
+        );
+        let restored: HeadlessConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(restored.work_dirs, None);
+        assert_eq!(restored.always_non_interactive, Some(false));
+    }
+
+    #[test]
+    fn headless_config_round_trips_neither_field_set() {
+        let original = HeadlessConfig::default();
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        assert!(
+            !json.contains("workDirs"),
+            "absent workDirs must not appear in JSON; got: {json}"
+        );
+        assert!(
+            !json.contains("alwaysNonInteractive"),
+            "absent alwaysNonInteractive must not appear in JSON; got: {json}"
+        );
+        let restored: HeadlessConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(restored.work_dirs, None);
+        assert_eq!(restored.always_non_interactive, None);
+    }
+
+    /// Documents the intentional breaking change from work item 0058:
+    /// the old flat `headlessWorkDirs` key that existed directly on `GlobalConfig`
+    /// (before settings were nested under `headless: { ... }`) must NOT be
+    /// deserialized into the new `GlobalConfig.headless.work_dirs` field.
+    /// A config file written by an older binary with the flat key is silently
+    /// ignored rather than accidentally populating the new nested struct.
+    #[test]
+    fn headless_config_old_flat_headless_work_dirs_key_is_not_recognized() {
+        let old_json = r#"{"headlessWorkDirs": ["/workspace/a", "/workspace/b"]}"#;
+        let config: GlobalConfig = serde_json::from_str(old_json).unwrap();
+        assert!(
+            config.headless.is_none(),
+            "old flat 'headlessWorkDirs' key must not deserialize into GlobalConfig.headless; \
+             this documents the intentional breaking change in work item 0058; \
+             got: {:?}",
+            config.headless
         );
     }
 
@@ -848,7 +992,7 @@ mod tests {
     /// Uses a static mutex so only one test at a time may mutate the env var,
     /// preventing parallel tests from observing each other's temporary override.
     #[test]
-    fn headless_work_dirs_round_trips_through_save_load_global_config() {
+    fn headless_round_trips_through_save_load_global_config() {
         use std::sync::Mutex;
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
@@ -857,7 +1001,10 @@ mod tests {
         std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap());
 
         let original = GlobalConfig {
-            headless_work_dirs: Some(vec!["/srv/repo".to_string()]),
+            headless: Some(HeadlessConfig {
+                work_dirs: Some(vec!["/srv/repo".to_string()]),
+                always_non_interactive: Some(true),
+            }),
             default_agent: Some("claude".to_string()),
             ..Default::default()
         };
@@ -870,9 +1017,11 @@ mod tests {
             original, loaded,
             "GlobalConfig must survive a save/load round-trip"
         );
+        let headless = loaded.headless.unwrap();
         assert_eq!(
-            loaded.headless_work_dirs.as_deref(),
+            headless.work_dirs.as_deref(),
             Some(["/srv/repo".to_string()].as_slice())
         );
+        assert_eq!(headless.always_non_interactive, Some(true));
     }
 }

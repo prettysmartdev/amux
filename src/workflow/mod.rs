@@ -55,8 +55,10 @@ pub struct WorkflowState {
     pub steps: Vec<WorkflowStepState>,
     /// SHA-256 hex digest of the workflow file at the time this state was created.
     pub workflow_hash: String,
-    /// Work item number (e.g. 27 for work item 0027).
-    pub work_item: u32,
+    /// Work item number (e.g. 27 for work item 0027). `None` when running a
+    /// standalone workflow via `exec workflow`.
+    #[serde(default)]
+    pub work_item: Option<u32>,
     /// Filename stem of the workflow file (used as part of the state-file name).
     pub workflow_name: String,
 }
@@ -67,7 +69,7 @@ impl WorkflowState {
         title: Option<String>,
         steps_parsed: Vec<WorkflowStep>,
         workflow_hash: String,
-        work_item: u32,
+        work_item: Option<u32>,
         workflow_name: String,
     ) -> Self {
         let steps = steps_parsed
@@ -220,12 +222,15 @@ pub fn load_workflow_file(path: &Path) -> Result<(String, Option<String>, Vec<Wo
 
 /// Return the file-system path where the workflow state JSON is stored.
 ///
-/// Format: `$GITROOT/.amux/workflows/<repo-hash8>-<work-item>-<workflow-name>.json`
-pub fn workflow_state_path(git_root: &Path, work_item: u32, workflow_name: &str) -> PathBuf {
+/// When `work_item` is `Some`: `$GITROOT/.amux/workflows/<hash8>-<wi>-<name>.json`
+/// When `work_item` is `None`:  `$GITROOT/.amux/workflows/<hash8>-<name>.json`
+pub fn workflow_state_path(git_root: &Path, work_item: Option<u32>, workflow_name: &str) -> PathBuf {
     let repo_hash = &sha256_hex(&git_root.to_string_lossy())[..8];
-    git_root
-        .join(".amux/workflows")
-        .join(format!("{}-{:04}-{}.json", repo_hash, work_item, workflow_name))
+    let filename = match work_item {
+        Some(wi) => format!("{}-{:04}-{}.json", repo_hash, wi, workflow_name),
+        None => format!("{}-{}.json", repo_hash, workflow_name),
+    };
+    git_root.join(".amux/workflows").join(filename)
 }
 
 /// Persist the workflow state to its JSON file, creating the directory if needed.
@@ -259,10 +264,29 @@ pub fn load_workflow_state(path: &Path) -> Result<WorkflowState> {
 /// - `{{work_item_content}}` → full text of the work item file
 /// - `{{work_item_section:[name]}}` → content of a named H1/H2 section
 ///
+/// When `work_item` is `None`, work-item variables are replaced with empty strings
+/// and a warning is printed to stderr so the user knows the substitution occurred.
 /// Unknown variables are left in place (with a logged warning in tests only).
-pub fn substitute_prompt(template: &str, work_item: u32, work_item_content: &str) -> String {
+pub fn substitute_prompt(template: &str, work_item: Option<u32>, work_item_content: &str) -> String {
+    // Warn when the template uses work-item variables but no work item was supplied,
+    // so the user knows their placeholders are being replaced with empty strings.
+    if work_item.is_none() {
+        let uses_work_item_vars = template.contains("{{work_item_number}}")
+            || template.contains("{{work_item_content}}")
+            || template.contains("{{work_item_section:[");
+        if uses_work_item_vars {
+            eprintln!(
+                "WARNING: workflow step template references work-item variables \
+                 ({{{{work_item_number}}}}, {{{{work_item_content}}}}, or {{{{work_item_section:[...]}}}}) \
+                 but no --work-item was provided. These placeholders will be replaced with empty strings. \
+                 Pass --work-item <N> to supply work item context."
+            );
+        }
+    }
+
     let mut result = template.to_string();
-    result = result.replace("{{work_item_number}}", &format!("{:04}", work_item));
+    let wi_number = work_item.map(|wi| format!("{:04}", wi)).unwrap_or_default();
+    result = result.replace("{{work_item_number}}", &wi_number);
     result = result.replace("{{work_item_content}}", work_item_content);
 
     // Handle {{work_item_section:[name]}} substitutions iteratively.
@@ -374,7 +398,7 @@ mod tests {
             None,
             vec![make_step("plan", &[], "p"), make_step("impl", &["plan"], "i")],
             "hash".into(),
-            1,
+            Some(1),
             "wf".into(),
         );
         let ready = state.next_ready();
@@ -387,7 +411,7 @@ mod tests {
             None,
             vec![make_step("plan", &[], "p"), make_step("impl", &["plan"], "i")],
             "hash".into(),
-            1,
+            Some(1),
             "wf".into(),
         );
         state.set_status("plan", StepStatus::Done);
@@ -401,7 +425,7 @@ mod tests {
             None,
             vec![make_step("plan", &[], "p"), make_step("impl", &["plan"], "i")],
             "hash".into(),
-            1,
+            Some(1),
             "wf".into(),
         );
         state.set_status("plan", StepStatus::Done);
@@ -416,7 +440,7 @@ mod tests {
             None,
             vec![make_step("a", &[], ""), make_step("b", &[], "")],
             "hash".into(),
-            1,
+            Some(1),
             "wf".into(),
         );
         state.set_status("a", StepStatus::Running);
@@ -435,7 +459,7 @@ mod tests {
             None,
             vec![make_step("plan", &[], "p")],
             "hash".into(),
-            1,
+            Some(1),
             "wf".into(),
         );
         assert_eq!(state.get_step("plan").unwrap().status, StepStatus::Pending);
@@ -451,7 +475,7 @@ mod tests {
             None,
             vec![make_step("plan", &[], "p")],
             "hash".into(),
-            1,
+            Some(1),
             "wf".into(),
         );
         state.set_status("plan", StepStatus::Running);
@@ -466,19 +490,19 @@ mod tests {
 
     #[test]
     fn substitute_work_item_number() {
-        let result = substitute_prompt("Item {{work_item_number}}", 27, "");
+        let result = substitute_prompt("Item {{work_item_number}}", Some(27), "");
         assert_eq!(result, "Item 0027");
     }
 
     #[test]
     fn substitute_work_item_content() {
-        let result = substitute_prompt("Content: {{work_item_content}}", 1, "Hello world");
+        let result = substitute_prompt("Content: {{work_item_content}}", Some(1), "Hello world");
         assert_eq!(result, "Content: Hello world");
     }
 
     #[test]
     fn substitute_no_placeholder_unchanged() {
-        let result = substitute_prompt("Just a plain prompt.", 1, "content");
+        let result = substitute_prompt("Just a plain prompt.", Some(1), "content");
         assert_eq!(result, "Just a plain prompt.");
     }
 
@@ -487,7 +511,7 @@ mod tests {
         let content = "# Title\n\n## Implementation Details\nDo the thing.\nMore details.\n\n## Other\nIgnored.\n";
         let result = substitute_prompt(
             "Details: {{work_item_section:[Implementation Details]}}",
-            1,
+            Some(1),
             content,
         );
         assert!(result.contains("Do the thing."));
@@ -498,7 +522,7 @@ mod tests {
     #[test]
     fn substitute_section_case_insensitive() {
         let content = "## IMPL DETAILS\nStuff.\n";
-        let result = substitute_prompt("{{work_item_section:[impl details]}}", 1, content);
+        let result = substitute_prompt("{{work_item_section:[impl details]}}", Some(1), content);
         assert!(result.contains("Stuff."));
     }
 
@@ -509,7 +533,7 @@ mod tests {
         let content = "## Implementation Details:\nDo the thing.\n## Other:\nIgnored.\n";
         let result = substitute_prompt(
             "{{work_item_section:[Implementation Details]}}",
-            1,
+            Some(1),
             content,
         );
         assert!(result.contains("Do the thing."), "got: {result}");
@@ -524,7 +548,7 @@ mod tests {
             None,
             vec![make_step("a", &[], ""), make_step("b", &["a"], "")],
             "hash".into(),
-            1,
+            Some(1),
             "wf".into(),
         );
         let new_steps = vec![make_step("a", &[], "different"), make_step("b", &["a"], "ok")];
@@ -537,7 +561,7 @@ mod tests {
             None,
             vec![make_step("a", &[], "")],
             "hash".into(),
-            1,
+            Some(1),
             "wf".into(),
         );
         let new_steps = vec![make_step("a", &[], ""), make_step("b", &[], "")];
@@ -550,7 +574,7 @@ mod tests {
             None,
             vec![make_step("original", &[], "")],
             "hash".into(),
-            1,
+            Some(1),
             "wf".into(),
         );
         let new_steps = vec![make_step("renamed", &[], "")];
@@ -594,7 +618,7 @@ mod tests {
                 model: None,
             },
         ];
-        let state = WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
+        let state = WorkflowState::new(None, steps, "hash".into(), Some(1), "wf".into());
         assert_eq!(
             state.get_step("plan").unwrap().agent,
             Some("codex".to_string()),
@@ -615,7 +639,7 @@ mod tests {
             agent: Some("gemini".to_string()),
             model: None,
         }];
-        let state = WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
+        let state = WorkflowState::new(None, steps, "hash".into(), Some(1), "wf".into());
         let json = serde_json::to_string(&state).unwrap();
         let restored: WorkflowState = serde_json::from_str(&json).unwrap();
         assert_eq!(
@@ -661,7 +685,7 @@ mod tests {
             agent: None,
             model: Some("claude-opus-4-6".to_string()),
         }];
-        let state = WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
+        let state = WorkflowState::new(None, steps, "hash".into(), Some(1), "wf".into());
         let json = serde_json::to_string(&state).unwrap();
         let restored: WorkflowState = serde_json::from_str(&json).unwrap();
         assert_eq!(
@@ -818,7 +842,7 @@ mod tests {
             "[[step]]\nname = \"impl\"\nprompt = \"Implement {{work_item_number}}.\"\n",
         ).unwrap();
         let (_, _, steps) = load_workflow_file(&path).unwrap();
-        let result = substitute_prompt(&steps[0].prompt_template, 42, "");
+        let result = substitute_prompt(&steps[0].prompt_template, Some(42), "");
         assert_eq!(result, "Implement 0042.");
     }
 
@@ -831,7 +855,7 @@ mod tests {
             "steps:\n  - name: impl\n    prompt: \"Implement {{work_item_number}}.\"\n",
         ).unwrap();
         let (_, _, steps) = load_workflow_file(&path).unwrap();
-        let result = substitute_prompt(&steps[0].prompt_template, 42, "");
+        let result = substitute_prompt(&steps[0].prompt_template, Some(42), "");
         assert_eq!(result, "Implement 0042.");
     }
 

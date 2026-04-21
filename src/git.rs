@@ -49,6 +49,28 @@ pub fn worktree_branch_name(work_item: u32) -> String {
     format!("amux/work-item-{:04}", work_item)
 }
 
+/// Returns `~/.amux/worktrees/<repo-name>/wf-<name>/`.
+///
+/// Used by `exec workflow` when no `--work-item` is provided, so each distinct
+/// workflow file gets its own worktree path rather than all sharing `0000`.
+pub fn worktree_path_named(git_root: &Path, name: &str) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Cannot resolve home directory")?;
+    let repo_name = git_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("repo");
+    Ok(home
+        .join(".amux")
+        .join("worktrees")
+        .join(repo_name)
+        .join(format!("wf-{}", name)))
+}
+
+/// Returns the deterministic branch name for a workflow worktree: `"amux/workflow-<name>"`.
+pub fn worktree_branch_name_for_workflow(name: &str) -> String {
+    format!("amux/workflow-{}", name)
+}
+
 /// Returns `true` if the branch exists in `git_root`.
 pub fn branch_exists(git_root: &Path, branch: &str) -> bool {
     Command::new("git")
@@ -269,6 +291,59 @@ mod tests {
     fn worktree_branch_name_prefix_is_amux_slash() {
         let name = worktree_branch_name(30);
         assert!(name.starts_with("amux/work-item-"), "Expected 'amux/work-item-' prefix, got: {}", name);
+    }
+
+    // ── worktree_path_named / worktree_branch_name_for_workflow (work item 0058) ──
+
+    #[test]
+    fn worktree_path_named_uses_wf_prefix_and_name() {
+        let git_root = Path::new("/home/user/myrepo");
+        let path = worktree_path_named(git_root, "implement-feature").unwrap();
+        let home = dirs::home_dir().unwrap();
+        let expected = home
+            .join(".amux")
+            .join("worktrees")
+            .join("myrepo")
+            .join("wf-implement-feature");
+        assert_eq!(path, expected);
+    }
+
+    #[test]
+    fn worktree_path_named_differs_from_work_item_path() {
+        // Ensure no collision between a named workflow worktree and a work-item worktree.
+        let git_root = Path::new("/some/repo");
+        let named = worktree_path_named(git_root, "my-workflow").unwrap();
+        let numbered = worktree_path(git_root, 0).unwrap(); // the old "0000" sentinel
+        assert_ne!(
+            named, numbered,
+            "named worktree path must not collide with work-item-0000 path"
+        );
+    }
+
+    #[test]
+    fn worktree_path_named_uses_repo_name_from_git_root() {
+        let git_root = Path::new("/projects/my-proj");
+        let path = worktree_path_named(git_root, "wf").unwrap();
+        let parent = path.parent().unwrap();
+        let repo_component = parent.file_name().unwrap().to_str().unwrap();
+        assert_eq!(repo_component, "my-proj");
+    }
+
+    #[test]
+    fn worktree_branch_name_for_workflow_formats_correctly() {
+        assert_eq!(
+            worktree_branch_name_for_workflow("implement-feature"),
+            "amux/workflow-implement-feature"
+        );
+        assert_eq!(worktree_branch_name_for_workflow("wf"), "amux/workflow-wf");
+    }
+
+    #[test]
+    fn worktree_branch_name_for_workflow_differs_from_work_item_branch() {
+        // A workflow branch must not collide with a work-item-0000 branch.
+        let wf_branch = worktree_branch_name_for_workflow("workflow");
+        let wi_branch = worktree_branch_name(0);
+        assert_ne!(wf_branch, wi_branch);
     }
 
     #[test]

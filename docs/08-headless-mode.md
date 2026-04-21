@@ -12,12 +12,117 @@ All operations, inputs, and outputs are recorded durably in `~/.amux/headless/` 
 
 Headless mode is useful for:
 
-- CI pipelines that trigger `implement` runs and poll for results
+- CI pipelines that trigger `implement` or `exec prompt` runs and poll for results
 - Scripts or tooling that submit work items and retrieve output programmatically
 - Remote integrations where the amux server runs on one machine and clients run elsewhere
 - Audit-heavy environments where a complete durable record of every agent action is required
+- One-shot agent invocations from scripts using `amux exec prompt` or `amux exec workflow`
 
 For single interactive sessions, use `amux chat` or `amux implement` instead.
+
+---
+
+## One-shot scripted execution (`exec`)
+
+The `exec` subcommand group provides two commands for running agent tasks non-interactively from scripts, CI pipelines, or the headless HTTP server — without a persistent session or TUI.
+
+### `amux exec prompt <prompt>`
+
+Launches an agent container with a pre-supplied prompt. Behaves identically to `amux chat`, except the initial prompt is baked into the launch arguments rather than requiring a live terminal session.
+
+```sh
+# Run a single task and exit
+amux exec prompt "Fix the failing tests in src/api"
+
+# Non-interactive: agent executes and exits; output goes to stdout
+amux exec prompt "Summarise recent changes" --non-interactive
+
+# Use a specific agent and model
+amux exec prompt "Refactor the auth module" --agent codex --model gpt-4o
+
+# Full autonomous run
+amux exec prompt "Implement caching for the API layer" --yolo --non-interactive
+```
+
+The prompt must be non-empty. Passing an empty string exits immediately with:
+
+```
+error: prompt cannot be empty
+```
+
+**Flags accepted by `exec prompt`:**
+
+| Flag | Description |
+|------|-------------|
+| `--non-interactive` / `-n` | Run in print/batch mode — agent executes and exits |
+| `--plan` | Read-only analysis mode — agent cannot modify files |
+| `--allow-docker` | Mount host Docker socket into the container |
+| `--mount-ssh` | Mount `~/.ssh` read-only into the container |
+| `--auto` | Auto-approve file edits; prompt before shell commands |
+| `--yolo` | Fully autonomous mode — skip all permission prompts |
+| `--agent=<name>` | Override the agent for this run |
+| `--model=<NAME>` | Override the model for this run |
+
+All flags behave identically to their `chat` counterparts. See [Agent Sessions](02-agent-sessions.md#flags-common-to-chat-and-implement).
+
+---
+
+### `amux exec workflow <path>` / `amux exec wf <path>`
+
+Runs a workflow file without requiring a paired work item. Behaves identically to `amux implement --workflow`, except the work item is optional.
+
+```sh
+# Run a workflow without a work item
+amux exec workflow ./aspec/workflows/implement-feature.md
+
+# Alias: exec wf
+amux exec wf ./aspec/workflows/implement-feature.md
+
+# Optionally associate a work item for template variable substitution
+amux exec workflow ./aspec/workflows/implement-feature.md --work-item 0053
+
+# Non-interactive workflow run
+amux exec workflow ./aspec/workflows/review.md --non-interactive
+```
+
+`exec workflow` and `exec wf` are identical — `wf` is a short alias.
+
+**Work item template variables:** When no `--work-item` is given, prompt templates that use `{{work_item_number}}`, `{{work_item_content}}`, or `{{work_item_section:[Name]}}` are left unexpanded with a warning:
+
+```
+warning: workflow uses {{work_item_content}} but no --work-item was provided; placeholder left unexpanded
+```
+
+When `--work-item <N>` is provided, amux resolves the work item file exactly as `implement` does, and substitutes all template variables.
+
+**Workflow state files:** When no work item is given, the state file is keyed by the workflow file's name and content hash:
+
+```
+~/.amux/headless/<workflow-name>-<content-hash8>.state.json
+```
+
+When a work item is given, the state file follows the same path as `implement`:
+
+```
+$GITROOT/.amux/workflows/<repo-hash8>-<work-item>-<workflow-name>.json
+```
+
+**Flags accepted by `exec workflow`:**
+
+| Flag | Description |
+|------|-------------|
+| `--work-item <N>` / `-w <N>` | Work item number; enables template variable substitution |
+| `--non-interactive` / `-n` | Run each step's agent in print/batch mode |
+| `--plan` | Read-only mode for all steps |
+| `--allow-docker` | Mount host Docker socket into each step's container |
+| `--worktree` | Run all steps in an isolated Git worktree |
+| `--mount-ssh` | Mount `~/.ssh` read-only into each step's container |
+| `--auto` | Auto-approve file edits; prompt before shell commands |
+| `--yolo` | Fully autonomous mode; implies `--worktree`; auto-advances stuck steps |
+| `--agent=<name>` | Default agent for steps that do not specify an `Agent:` field |
+| `--model=<NAME>` | Default model for steps that do not specify a `Model:` field |
+
+All flags behave identically to their `implement --workflow` counterparts. See [Workflows](04-workflows.md#flags).
 
 ---
 
@@ -129,7 +234,7 @@ The server maintains a strict allowlist of working directories. Any session crea
 **At startup**, the allowlist is populated from two sources:
 
 1. `--workdirs` flags passed to `amux headless start`
-2. `headlessWorkDirs` in the global config (`~/.amux/config.json`)
+2. `headless.workDirs` in the global config (`~/.amux/config.json`)
 
 Both sources are merged. Every path is resolved to its canonical form (symlinks resolved, trailing slashes stripped) via `std::fs::canonicalize`. If a listed path does not exist at startup, a warning is logged but the server still starts — the path stays on the allowlist in case the directory is created later.
 
@@ -257,7 +362,23 @@ curl -s -X POST http://localhost:9876/v1/commands \
   -d '{"subcommand":"implement","args":["0057"]}'
 ```
 
-Dispatches a subcommand to the session identified by the `x-amux-session` header. Valid values for `subcommand`: `implement`, `chat`, `ready`.
+Dispatches a subcommand to the session identified by the `x-amux-session` header. Valid values for `subcommand`: `implement`, `chat`, `ready`, `exec`.
+
+For `exec`, the `args` array starts with the exec action (`prompt` or `workflow`/`wf`), followed by any further arguments:
+
+```sh
+# exec prompt via headless API
+curl -s -X POST http://localhost:9876/v1/commands \
+  -H 'x-amux-session: <session-id>' \
+  -H 'Content-Type: application/json' \
+  -d '{"subcommand":"exec","args":["prompt","Fix the failing tests","--non-interactive"]}'
+
+# exec workflow via headless API
+curl -s -X POST http://localhost:9876/v1/commands \
+  -H 'x-amux-session: <session-id>' \
+  -H 'Content-Type: application/json' \
+  -d '{"subcommand":"exec","args":["workflow","./aspec/workflows/implement-feature.md","--work-item","0053"]}'
+```
 
 Returns immediately with a command UUID — execution is asynchronous:
 
@@ -381,6 +502,34 @@ curl -s "$SERVER/v1/commands/$CMD/logs" | jq -r .output
 curl -s -X DELETE "$SERVER/v1/sessions/$SESSION"
 ```
 
+### Example: one-shot exec prompt
+
+For tasks that don't need a persistent session, `exec prompt` can be run directly from the CLI without starting the HTTP server:
+
+```sh
+# Run a single one-shot task; output goes to stdout; exit code reflects agent result
+amux exec prompt "Fix the failing tests in src/api" --non-interactive
+
+# Combine with shell tools
+amux exec prompt "List all TODO comments in the codebase" --non-interactive | tee todos.txt
+```
+
+To drive the same task via the headless HTTP server (so the result is logged and auditable):
+
+```sh
+SERVER=http://localhost:9876
+SESSION=$(curl -s -X POST "$SERVER/v1/sessions" \
+  -H 'Content-Type: application/json' \
+  -d '{"workdir":"/home/user/my-project"}' | jq -r .session_id)
+
+CMD=$(curl -s -X POST "$SERVER/v1/commands" \
+  -H "x-amux-session: $SESSION" \
+  -H 'Content-Type: application/json' \
+  -d '{"subcommand":"exec","args":["prompt","Fix the failing tests","--non-interactive"]}' | jq -r .command_id)
+
+# Poll as usual...
+```
+
 ---
 
 ## Storage layout
@@ -426,20 +575,43 @@ The database is the authoritative record of all activity. The per-command log fi
 
 ## Configuration
 
-### `headlessWorkDirs` (global config)
-
-Pre-configure working directories in `~/.amux/config.json` so you don't have to repeat `--workdirs` every time:
+Headless mode settings live under a `headless` key in the global config (`~/.amux/config.json`). All fields are optional.
 
 ```json
 {
-  "headlessWorkDirs": [
-    "/home/user/my-project",
-    "/home/user/other-project"
-  ]
+  "headless": {
+    "workDirs": [
+      "/home/user/my-project",
+      "/home/user/other-project"
+    ],
+    "alwaysNonInteractive": true
+  }
 }
 ```
 
-Paths from `headlessWorkDirs` and paths from `--workdirs` flags are merged at startup — both sources can be used together. See [Configuration](07-configuration.md#global-config) for the full global config reference.
+### `headless.workDirs`
+
+Pre-configure working directories so you don't have to repeat `--workdirs` every time you start the server:
+
+```sh
+amux config set --global headless.workDirs "/home/user/my-project,/home/user/other-project"
+```
+
+Paths from `headless.workDirs` and paths from `--workdirs` flags are merged at startup — both sources can be used together. See [Configuration](07-configuration.md#global-config) for the full global config reference.
+
+### `headless.alwaysNonInteractive`
+
+When set to `true`, amux automatically injects `--non-interactive` into every dispatched command that supports it — including `implement`, `chat`, `exec prompt`, `exec workflow`, `ready`, and `specs amend`.
+
+```sh
+amux config set --global headless.alwaysNonInteractive true
+```
+
+This is the recommended setting for headless server deployments where no TTY is available. It guarantees that no command blocks waiting for interactive input.
+
+When `alwaysNonInteractive` is `true` and a command is dispatched via the HTTP API, the flag is automatically injected into the args vector — you do not need to include `--non-interactive` in your API requests explicitly.
+
+The setting defaults to `false` so that amux's interactive defaults remain unchanged for users who have not configured a headless server.
 
 ---
 
@@ -471,6 +643,11 @@ On `SIGTERM` or `SIGINT`, the server finishes all in-flight HTTP responses and a
 | `amux headless logs` with no log file | Clear error suggesting `--background` |
 | Unknown `subcommand` in `POST /v1/commands` | HTTP 400; response lists valid subcommands |
 | `x-amux-session` header missing | HTTP 400 |
+| `exec prompt` with empty string | CLI validation error: `"prompt cannot be empty"` before any container launches |
+| `exec workflow` with `{{work_item_content}}` and no `--work-item` | Warning printed; placeholder left unexpanded; workflow continues |
+| `exec workflow --work-item <N>` where file not found | Error pointing to the expected path pattern; same message as `implement` |
+| `headless.alwaysNonInteractive` true + duplicate `--non-interactive` flag in args | Flag is deduplicated; no error |
+| `exec` dispatched via HTTP API with unknown action (not `prompt`/`workflow`/`wf`) | HTTP 400; response lists valid exec actions |
 
 ---
 

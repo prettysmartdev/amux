@@ -2,7 +2,8 @@ use crate::cli::{Agent, ConfigAction};
 use crate::commands::init_flow::find_git_root;
 use crate::config::{
     load_global_config, load_repo_config, migrate_legacy_repo_config, save_global_config,
-    save_repo_config, GlobalConfig, RepoConfig, WorkItemsConfig, DEFAULT_SCROLLBACK_LINES,
+    save_repo_config, GlobalConfig, HeadlessConfig, RepoConfig, WorkItemsConfig,
+    DEFAULT_SCROLLBACK_LINES,
 };
 use anyhow::{bail, Result};
 use std::path::Path;
@@ -78,6 +79,20 @@ pub static ALL_FIELDS: &[ConfigFieldDef] = &[
         hint: "managed by the agent auth flow; read-only here",
         builtin_default: "(not set)",
         settable: false,
+    },
+    ConfigFieldDef {
+        key: "headless.workDirs",
+        scope: FieldScope::GlobalOnly,
+        hint: "comma-separated absolute paths; empty string clears",
+        builtin_default: "(empty)",
+        settable: true,
+    },
+    ConfigFieldDef {
+        key: "headless.alwaysNonInteractive",
+        scope: FieldScope::GlobalOnly,
+        hint: "true | false",
+        builtin_default: "false",
+        settable: true,
     },
     ConfigFieldDef {
         key: "work_items.dir",
@@ -170,6 +185,18 @@ pub fn global_display(field: &ConfigFieldDef, global: &GlobalConfig) -> String {
                 .env_passthrough
                 .as_ref()
                 .map(|v| format_vec(v))
+                .unwrap_or_else(|| format!("{} (built-in)", field.builtin_default)),
+            "headless.workDirs" => global
+                .headless
+                .as_ref()
+                .and_then(|h| h.work_dirs.as_ref())
+                .map(|v| format_vec(v))
+                .unwrap_or_else(|| format!("{} (built-in)", field.builtin_default)),
+            "headless.alwaysNonInteractive" => global
+                .headless
+                .as_ref()
+                .and_then(|h| h.always_non_interactive)
+                .map(|v| v.to_string())
                 .unwrap_or_else(|| format!("{} (built-in)", field.builtin_default)),
             _ => "N/A".to_string(),
         },
@@ -317,6 +344,18 @@ pub fn effective_display(
             }
             "(not set)".to_string()
         }
+        "headless.workDirs" => global
+            .headless
+            .as_ref()
+            .and_then(|h| h.work_dirs.as_ref())
+            .map(|v| format_vec(v))
+            .unwrap_or_else(|| "(empty)".to_string()),
+        "headless.alwaysNonInteractive" => global
+            .headless
+            .as_ref()
+            .and_then(|h| h.always_non_interactive)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "false".to_string()),
         _ => "?".to_string(),
     }
 }
@@ -419,6 +458,17 @@ pub fn validate_value(field: &ConfigFieldDef, value: &str) -> Result<()> {
             // Any string is valid; empty string clears the field.
             // Path escape validation is performed in set() where git_root is available.
         }
+        "headless.workDirs" => {
+            // Comma-separated absolute paths; empty string clears.
+        }
+        "headless.alwaysNonInteractive" => {
+            if !["true", "false"].contains(&value.trim()) {
+                bail!(
+                    "Invalid value '{}' for 'headless.alwaysNonInteractive'. Expected true or false.",
+                    value
+                );
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -464,6 +514,14 @@ pub fn apply_to_global(field: &ConfigFieldDef, value: &str, global: &mut GlobalC
         }
         "env_passthrough" => {
             global.env_passthrough = Some(parse_vec_value(value));
+        }
+        "headless.workDirs" => {
+            let headless = global.headless.get_or_insert_with(HeadlessConfig::default);
+            headless.work_dirs = Some(parse_vec_value(value));
+        }
+        "headless.alwaysNonInteractive" => {
+            let headless = global.headless.get_or_insert_with(HeadlessConfig::default);
+            headless.always_non_interactive = Some(value.trim() == "true");
         }
         _ => {}
     }
@@ -890,6 +948,9 @@ mod tests {
             "auto_agent_auth_accepted",
             "work_items.dir",
             "work_items.template",
+            // headless fields added in work item 0058
+            "headless.workDirs",
+            "headless.alwaysNonInteractive",
         ] {
             assert!(find_field(key).is_some(), "expected Some for key '{}'", key);
         }
@@ -1325,6 +1386,108 @@ mod tests {
         assert!(
             msg.contains("repo-only") || msg.contains("--global"),
             "expected repo-only scope error, got: {}",
+            msg
+        );
+    }
+
+    // ── headless.* set() round-trips ──────────────────────────────────────────
+    //
+    // Both round-trip tests mutate the `AMUX_CONFIG_HOME` env var, which is
+    // process-global state.  A single module-level lock serialises them so they
+    // cannot race even when cargo runs tests in parallel.
+    use std::sync::Mutex;
+    static GLOBAL_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn set_headless_always_non_interactive_round_trips_through_global_config() {
+        use tempfile::TempDir;
+        let _guard = GLOBAL_ENV_LOCK.lock().unwrap();
+
+        let tmp = TempDir::new().unwrap();
+        // SAFETY: test-only env mutation; serialised by GLOBAL_ENV_LOCK.
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+
+        set("headless.alwaysNonInteractive", "true", true, None).unwrap();
+        let loaded = crate::config::load_global_config().unwrap();
+        assert_eq!(
+            loaded.headless.as_ref().and_then(|h| h.always_non_interactive),
+            Some(true),
+            "set true must persist to disk"
+        );
+
+        set("headless.alwaysNonInteractive", "false", true, None).unwrap();
+        let loaded2 = crate::config::load_global_config().unwrap();
+        assert_eq!(
+            loaded2.headless.as_ref().and_then(|h| h.always_non_interactive),
+            Some(false),
+            "set false must persist to disk"
+        );
+
+        // SAFETY: test-only env mutation.
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+    }
+
+    #[test]
+    fn set_headless_always_non_interactive_rejects_non_bool() {
+        let err = set("headless.alwaysNonInteractive", "yes", true, None).unwrap_err();
+        assert!(
+            err.to_string().contains("true or false"),
+            "expected validation error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn set_headless_work_dirs_round_trips_through_global_config() {
+        use tempfile::TempDir;
+        let _guard = GLOBAL_ENV_LOCK.lock().unwrap();
+
+        let tmp = TempDir::new().unwrap();
+        // SAFETY: test-only env mutation; serialised by GLOBAL_ENV_LOCK.
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+
+        set("headless.workDirs", "/tmp/a,/tmp/b", true, None).unwrap();
+        let loaded = crate::config::load_global_config().unwrap();
+        assert_eq!(
+            loaded.headless.as_ref().and_then(|h| h.work_dirs.as_deref()),
+            Some(["/tmp/a".to_string(), "/tmp/b".to_string()].as_slice()),
+            "comma-separated dirs must persist to disk"
+        );
+
+        // Empty string must clear the list.
+        set("headless.workDirs", "", true, None).unwrap();
+        let loaded2 = crate::config::load_global_config().unwrap();
+        assert_eq!(
+            loaded2
+                .headless
+                .as_ref()
+                .and_then(|h| h.work_dirs.as_deref()),
+            Some([].as_slice()),
+            "empty string must clear workDirs to an empty list"
+        );
+
+        // SAFETY: test-only env mutation.
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+    }
+
+    #[test]
+    fn set_headless_work_dirs_with_repo_flag_fails() {
+        let err = set("headless.workDirs", "/tmp", false, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("global-only") || msg.contains("--global"),
+            "expected global-only scope error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn set_headless_always_non_interactive_with_repo_flag_fails() {
+        let err = set("headless.alwaysNonInteractive", "true", false, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("global-only") || msg.contains("--global"),
+            "expected global-only scope error, got: {}",
             msg
         );
     }

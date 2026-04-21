@@ -2627,7 +2627,7 @@ mod tests {
             title: Some("Test Workflow".to_string()),
             steps,
             workflow_hash: "deadbeef".to_string(),
-            work_item: 27,
+            work_item: Some(27),
             workflow_name: "test-workflow".to_string(),
         };
 
@@ -2685,7 +2685,7 @@ mod tests {
             title: None,
             steps: linear_steps,
             workflow_hash: "h".to_string(),
-            work_item: 1,
+            work_item: Some(1),
             workflow_name: "w".to_string(),
         };
         let h = workflow_strip_height(&wf_linear);
@@ -2725,7 +2725,7 @@ mod tests {
             title: None,
             steps: parallel_steps,
             workflow_hash: "h".to_string(),
-            work_item: 1,
+            work_item: Some(1),
             workflow_name: "w".to_string(),
         };
         let h_parallel = workflow_strip_height(&wf_parallel);
@@ -2832,7 +2832,7 @@ mod tests {
                 model: None,
             },
         ];
-        let wf = crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into());
+        let wf = crate::workflow::WorkflowState::new(None, steps, "hash".into(), Some(1), "wf".into());
         app.active_tab_mut().workflow = Some(wf);
         app.active_tab_mut().workflow_current_step = Some("a".to_string());
         app.active_tab_mut().workflow_step_agents.insert("a".to_string(), "claude".to_string());
@@ -2877,7 +2877,7 @@ mod tests {
                 model: None,
             }],
             "hash".to_string(),
-            1,
+            Some(1),
             "wf".to_string(),
         ));
         app.active_tab_mut().workflow_current_step = Some("plan".to_string());

@@ -49,7 +49,10 @@ Applies to all projects on the machine unless overridden by a per-repo config.
   "runtime": "docker",
   "yoloDisallowedTools": ["Bash"],
   "envPassthrough": ["ANTHROPIC_API_KEY"],
-  "headlessWorkDirs": ["/home/user/my-project"]
+  "headless": {
+    "workDirs": ["/home/user/my-project"],
+    "alwaysNonInteractive": false
+  }
 }
 ```
 
@@ -60,7 +63,8 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 | `runtime` | string | `"docker"` | Container runtime: `"docker"` or `"apple-containers"` (macOS 26+ only) |
 | `yoloDisallowedTools` | string array | `[]` | Global fallback list of tools forbidden when `--yolo` is active |
 | `envPassthrough` | string array | `[]` | Host environment variable names to inject into agent containers at launch. See [`envPassthrough`](#envpassthrough) |
-| `headlessWorkDirs` | string array | `[]` | Working directories pre-approved for headless mode session creation. Merged with `--workdirs` flags at server startup. See [Headless Mode](08-headless-mode.md#working-directory-allowlist) |
+| `headless.workDirs` | string array | `[]` | Working directories pre-approved for headless mode session creation. Merged with `--workdirs` flags at server startup. See [Headless Mode](08-headless-mode.md#working-directory-allowlist) |
+| `headless.alwaysNonInteractive` | boolean | `false` | When `true`, all dispatched commands automatically run in non-interactive mode. Useful for headless servers where no TTY is available. See [Headless Mode](08-headless-mode.md#alwaysnoninteractive) |
 
 **Note:** `runtime` is a global (machine-level) setting only. It is not available in the per-repo config — container runtime is a property of the machine, not the project.
 
@@ -76,7 +80,8 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 | `envPassthrough` | Per-repo → Global → Empty list (no passthrough) |
 | `runtime` | Global only |
 | `workItems.dir` / `workItems.template` | Per-repo only |
-| `headlessWorkDirs` | Global only (merged with `--workdirs` flags at startup) |
+| `headless.workDirs` | Global only (merged with `--workdirs` flags at startup) |
+| `headless.alwaysNonInteractive` | Global only |
 
 For `yoloDisallowedTools` and `envPassthrough`, if a per-repo list is set it **replaces** the global list entirely — lists are not merged. To inherit the global list for a repo, omit the field from the repo config.
 
@@ -93,17 +98,19 @@ The `amux config` subcommand lets you view and edit configuration without openin
 Displays every configuration field — even fields not set in either file — as a table showing the global value, repo value, effective (applied) value, and whether the repo is overriding the global:
 
 ```
-Field                       Global              Repo              Effective          Override
-──────────────────────────  ──────────────────  ────────────────  ─────────────────  ────────
-default_agent               claude (built-in)   N/A               claude             —
-runtime                     docker (built-in)   N/A               docker             —
-terminal_scrollback_lines   10000 (built-in)    5000              5000               yes
-yolo_disallowed_tools       (empty)             (not set)         (empty)            —
-env_passthrough             HOME, PATH          (not set)         HOME, PATH         —
-agent                       N/A                 codex             codex              yes
-auto_agent_auth_accepted    N/A                 true (read-only)  true               —
-work_items.dir              N/A                 docs/work-items   docs/work-items    —
-work_items.template         N/A                 (not set)         (not set)          —
+Field                            Global              Repo              Effective          Override
+───────────────────────────────  ──────────────────  ────────────────  ─────────────────  ────────
+default_agent                    claude (built-in)   N/A               claude             —
+runtime                          docker (built-in)   N/A               docker             —
+terminal_scrollback_lines        10000 (built-in)    5000              5000               yes
+yolo_disallowed_tools            (empty)             (not set)         (empty)            —
+env_passthrough                  HOME, PATH          (not set)         HOME, PATH         —
+agent                            N/A                 codex             codex              yes
+auto_agent_auth_accepted         N/A                 true (read-only)  true               —
+work_items.dir                   N/A                 docs/work-items   docs/work-items    —
+work_items.template              N/A                 (not set)         (not set)          —
+headless.workDirs                (not set)           N/A               (not set)          —
+headless.alwaysNonInteractive    false (built-in)    N/A               false              —
 ```
 
 Column meanings:
@@ -137,7 +144,7 @@ When neither scope has the field set, the built-in default is shown for both Glo
 Passing an unknown field name prints a helpful error listing all valid names:
 
 ```
-error: Unknown config field 'scrollback'. Valid fields: default_agent, runtime, terminal_scrollback_lines, yolo_disallowed_tools, env_passthrough, agent, auto_agent_auth_accepted
+error: Unknown config field 'scrollback'. Valid fields: default_agent, runtime, terminal_scrollback_lines, yolo_disallowed_tools, env_passthrough, agent, auto_agent_auth_accepted, headless.workDirs, headless.alwaysNonInteractive
 ```
 
 ### `amux config set [--global] <field> <value>`
@@ -165,6 +172,12 @@ amux config set work_items.dir docs/work-items
 
 # Set work item template for this repo
 amux config set work_items.template docs/work-items/0000-template.md
+
+# Configure headless working directories globally
+amux config set --global headless.workDirs "/home/user/my-project,/home/user/other-project"
+
+# Enable always-non-interactive mode for headless server use
+amux config set --global headless.alwaysNonInteractive true
 ```
 
 After writing, `config set` prints a confirmation showing the new effective value:
@@ -182,6 +195,8 @@ error: 'runtime' is a global-only field. Use --global to set it.
 error: 'agent' is a repo-only field. Cannot be set with --global.
 
 error: 'work_items.dir' is a repo-only field. Cannot be set with --global.
+
+error: 'headless.workDirs' is a global-only field. Use --global to set it.
 ```
 
 **Override warnings**: if the value you're setting will be silently shadowed, `config set` warns you:

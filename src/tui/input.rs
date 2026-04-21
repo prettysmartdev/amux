@@ -2457,7 +2457,7 @@ mod tests {
                 model: None,
             }],
             "hash".to_string(),
-            1,
+            Some(1),
             "test-wf".to_string(),
         )
     }

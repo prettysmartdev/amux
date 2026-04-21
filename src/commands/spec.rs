@@ -27,6 +27,7 @@ pub static READY_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "no-cache",        takes_value: false, value_name: "", hint: "pass --no-cache to docker build" },
     FlagSpec { name: "non-interactive", takes_value: false, value_name: "", hint: "run without interactive prompt" },
     FlagSpec { name: "allow-docker",    takes_value: false, value_name: "", hint: "allow Docker access" },
+    FlagSpec { name: "json",            takes_value: false, value_name: "", hint: "output structured JSON (implies --non-interactive)" },
 ];
 
 pub static IMPLEMENT_FLAGS: &[FlagSpec] = &[
@@ -66,6 +67,30 @@ pub static SPECS_AMEND_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "allow-docker",    takes_value: false, value_name: "", hint: "allow Docker access" },
 ];
 
+pub static EXEC_PROMPT_FLAGS: &[FlagSpec] = &[
+    FlagSpec { name: "non-interactive", takes_value: false, value_name: "",     hint: "run without interactive prompt" },
+    FlagSpec { name: "plan",            takes_value: false, value_name: "",     hint: "plan mode" },
+    FlagSpec { name: "allow-docker",    takes_value: false, value_name: "",     hint: "allow Docker access" },
+    FlagSpec { name: "mount-ssh",       takes_value: false, value_name: "",     hint: "mount SSH agent" },
+    FlagSpec { name: "yolo",            takes_value: false, value_name: "",     hint: "skip confirmation prompts" },
+    FlagSpec { name: "auto",            takes_value: false, value_name: "",     hint: "auto mode" },
+    FlagSpec { name: "agent",           takes_value: true,  value_name: "NAME", hint: "override configured agent" },
+    FlagSpec { name: "model",           takes_value: true,  value_name: "NAME", hint: "override agent model (e.g. claude-opus-4-6)" },
+];
+
+pub static EXEC_WORKFLOW_FLAGS: &[FlagSpec] = &[
+    FlagSpec { name: "work-item",       takes_value: true,  value_name: "NUM",  hint: "optional work item number" },
+    FlagSpec { name: "non-interactive", takes_value: false, value_name: "",     hint: "run without interactive prompt" },
+    FlagSpec { name: "plan",            takes_value: false, value_name: "",     hint: "plan mode" },
+    FlagSpec { name: "allow-docker",    takes_value: false, value_name: "",     hint: "allow Docker access" },
+    FlagSpec { name: "worktree",        takes_value: false, value_name: "",     hint: "use git worktree" },
+    FlagSpec { name: "mount-ssh",       takes_value: false, value_name: "",     hint: "mount SSH agent" },
+    FlagSpec { name: "yolo",            takes_value: false, value_name: "",     hint: "skip confirmation prompts" },
+    FlagSpec { name: "auto",            takes_value: false, value_name: "",     hint: "auto mode" },
+    FlagSpec { name: "agent",           takes_value: true,  value_name: "NAME", hint: "override configured agent" },
+    FlagSpec { name: "model",           takes_value: true,  value_name: "NAME", hint: "override agent model (e.g. claude-opus-4-6)" },
+];
+
 pub static CONFIG_SET_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "global", takes_value: false, value_name: "", hint: "write to global config instead of repo config" },
 ];
@@ -84,6 +109,8 @@ pub static ALL_COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "implement",  flags: IMPLEMENT_FLAGS   },
     CommandSpec { name: "chat",       flags: CHAT_FLAGS        },
     CommandSpec { name: "status",     flags: STATUS_FLAGS      },
+    CommandSpec { name: "exec prompt",  flags: EXEC_PROMPT_FLAGS   },
+    CommandSpec { name: "exec workflow",flags: EXEC_WORKFLOW_FLAGS },
     CommandSpec { name: "specs new",  flags: SPECS_NEW_FLAGS   },
     CommandSpec { name: "specs amend",flags: SPECS_AMEND_FLAGS },
     CommandSpec { name: "headless start", flags: HEADLESS_START_FLAGS },

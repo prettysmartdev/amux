@@ -44,10 +44,10 @@ async fn run_start(
     // Merge CLI workdirs with config workdirs.
     let global_config = crate::config::load_global_config().unwrap_or_default();
     let mut all_workdirs: Vec<String> = cli_workdirs;
-    if let Some(config_dirs) = global_config.headless_work_dirs {
+    if let Some(config_dirs) = global_config.headless.as_ref().and_then(|h| h.work_dirs.as_ref()) {
         for dir in config_dirs {
-            if !all_workdirs.contains(&dir) {
-                all_workdirs.push(dir);
+            if !all_workdirs.contains(dir) {
+                all_workdirs.push(dir.clone());
             }
         }
     }

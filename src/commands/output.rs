@@ -9,6 +9,8 @@ use tokio::sync::mpsc::UnboundedSender;
 pub enum OutputSink {
     Stdout,
     Channel(UnboundedSender<String>),
+    /// Discards all output. Used when suppressing human-readable output (e.g. --json mode).
+    Null,
     /// Test-only variant: behaves like `Stdout` (supports_color = true, interactive paths
     /// are exercised) but captures all output to a channel and serves mock user input from
     /// a pre-loaded queue instead of reading from stdin.
@@ -40,6 +42,7 @@ impl OutputSink {
         match self {
             OutputSink::Stdout => true,
             OutputSink::Channel(_) => false,
+            OutputSink::Null => false,
             #[cfg(test)]
             OutputSink::MockInput { .. } => true,
         }
@@ -51,6 +54,7 @@ impl OutputSink {
             OutputSink::Channel(tx) => {
                 let _ = tx.send(s.into());
             }
+            OutputSink::Null => {}
             #[cfg(test)]
             OutputSink::MockInput { tx, .. } => {
                 let _ = tx.send(s.into());
@@ -67,6 +71,7 @@ impl OutputSink {
             OutputSink::Channel(tx) => {
                 let _ = tx.send(s.into());
             }
+            OutputSink::Null => {}
             #[cfg(test)]
             OutputSink::MockInput { tx, .. } => {
                 let _ = tx.send(s.into());
@@ -86,6 +91,7 @@ impl OutputSink {
                 true
             }
             OutputSink::Channel(tx) => tx.send(s.into()).is_ok(),
+            OutputSink::Null => true,
             #[cfg(test)]
             OutputSink::MockInput { tx, .. } => tx.send(s.into()).is_ok(),
         }
@@ -94,7 +100,7 @@ impl OutputSink {
     /// Read one line of user input.
     ///
     /// - `Stdout`: reads from stdin (interactive terminal).
-    /// - `Channel`: returns an empty string (non-interactive; callers treat this as
+    /// - `Channel`/`Null`: returns an empty string (non-interactive; callers treat this as
     ///   a default/no answer).
     /// - `MockInput`: pops the next queued response (test-only).
     pub fn read_line(&self) -> String {
@@ -108,7 +114,7 @@ impl OutputSink {
                     .unwrap_or(Ok(String::new()))
                     .unwrap_or_default()
             }
-            OutputSink::Channel(_) => String::new(),
+            OutputSink::Channel(_) | OutputSink::Null => String::new(),
             #[cfg(test)]
             OutputSink::MockInput { input, .. } => {
                 input.lock().unwrap().pop_front().unwrap_or_default()

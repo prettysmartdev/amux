@@ -609,3 +609,249 @@ fn implement_help_shows_agent_flag() {
         stdout
     );
 }
+
+// ── exec subcommand integration tests (work item 0058) ───────────────────────
+
+#[test]
+fn exec_help_shows_prompt_and_workflow_subcommands() {
+    let output = amux()
+        .args(["exec", "--help"])
+        .output()
+        .expect("failed to run amux exec --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("prompt"),
+        "exec --help must mention 'prompt' subcommand; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("workflow"),
+        "exec --help must mention 'workflow' subcommand; got: {stdout}"
+    );
+}
+
+#[test]
+fn exec_prompt_help_shows_all_flags() {
+    let output = amux()
+        .args(["exec", "prompt", "--help"])
+        .output()
+        .expect("failed to run amux exec prompt --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in &["--non-interactive", "--plan", "--allow-docker", "--mount-ssh",
+                  "--yolo", "--auto", "--agent", "--model"] {
+        assert!(
+            stdout.contains(flag),
+            "exec prompt --help must mention {flag}; got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn exec_prompt_help_shows_short_n_alias() {
+    let output = amux()
+        .args(["exec", "prompt", "--help"])
+        .output()
+        .expect("failed to run amux exec prompt --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // clap renders short flags as `-n, --non-interactive`
+    assert!(
+        stdout.contains("-n"),
+        "exec prompt --help must show -n short alias for --non-interactive; got: {stdout}"
+    );
+}
+
+#[test]
+fn exec_workflow_help_shows_all_flags() {
+    let output = amux()
+        .args(["exec", "workflow", "--help"])
+        .output()
+        .expect("failed to run amux exec workflow --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in &["--work-item", "--non-interactive", "--plan", "--allow-docker",
+                  "--worktree", "--mount-ssh", "--yolo", "--auto", "--agent", "--model"] {
+        assert!(
+            stdout.contains(flag),
+            "exec workflow --help must mention {flag}; got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn exec_workflow_help_shows_short_n_alias() {
+    let output = amux()
+        .args(["exec", "workflow", "--help"])
+        .output()
+        .expect("failed to run amux exec workflow --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("-n"),
+        "exec workflow --help must show -n short alias for --non-interactive; got: {stdout}"
+    );
+}
+
+#[test]
+fn exec_wf_alias_help_works() {
+    let alias_out = amux()
+        .args(["exec", "wf", "--help"])
+        .output()
+        .expect("failed to run amux exec wf --help");
+    assert!(
+        alias_out.status.success(),
+        "`exec wf --help` must succeed (wf is an alias for workflow); \
+         stderr: {}",
+        String::from_utf8_lossy(&alias_out.stderr)
+    );
+    // Alias help must mention the same flags as the canonical command.
+    let stdout = String::from_utf8_lossy(&alias_out.stdout);
+    assert!(
+        stdout.contains("--work-item"),
+        "exec wf --help must show --work-item flag; got: {stdout}"
+    );
+}
+
+#[test]
+fn exec_prompt_without_git_repo_exits_with_git_error_not_unknown_subcommand() {
+    // Run from a temp dir that is NOT a git repo so the binary fails at
+    // find_git_root rather than at argument parsing.  The error must mention
+    // "git" (or "Git"), not "unknown" — proving the subcommand was recognised.
+    let not_a_repo = TempDir::new().unwrap();
+    let output = amux()
+        .current_dir(not_a_repo.path())
+        .args(["exec", "prompt", "hello"])
+        .output()
+        .expect("failed to run amux exec prompt");
+    assert!(
+        !output.status.success(),
+        "exec prompt must exit non-zero outside a git repo"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_lower = stderr.to_lowercase();
+    assert!(
+        stderr_lower.contains("git") || stderr_lower.contains("repository"),
+        "error must be a git-not-found error, not an unknown-subcommand error; \
+         got: {stderr}"
+    );
+    // Must NOT say "unknown" or "unrecognized" (clap parse failure messages).
+    assert!(
+        !stderr_lower.contains("unknown command") && !stderr_lower.contains("unrecognized"),
+        "exec prompt must be a recognised subcommand; got: {stderr}"
+    );
+}
+
+#[test]
+fn exec_workflow_without_git_repo_exits_with_git_error_not_unknown_subcommand() {
+    let not_a_repo = TempDir::new().unwrap();
+    let output = amux()
+        .current_dir(not_a_repo.path())
+        .args(["exec", "workflow", "./wf.md"])
+        .output()
+        .expect("failed to run amux exec workflow");
+    assert!(
+        !output.status.success(),
+        "exec workflow must exit non-zero outside a git repo"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_lower = stderr.to_lowercase();
+    assert!(
+        stderr_lower.contains("git") || stderr_lower.contains("repository"),
+        "error must be a git-not-found error; got: {stderr}"
+    );
+    assert!(
+        !stderr_lower.contains("unknown command") && !stderr_lower.contains("unrecognized"),
+        "exec workflow must be a recognised subcommand; got: {stderr}"
+    );
+}
+
+// ── headless config integration tests (work item 0058) ───────────────────────
+
+#[test]
+fn config_get_headless_always_non_interactive_default_is_false() {
+    let home = TempDir::new().unwrap();
+    let repo = make_git_repo();
+
+    let output = amux_with_home(home.path())
+        .current_dir(repo.path())
+        .args(["config", "get", "headless.alwaysNonInteractive"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "config get headless.alwaysNonInteractive must exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Effective value when not set should be "false" (the built-in default).
+    assert!(
+        stdout.contains("false"),
+        "headless.alwaysNonInteractive must default to false; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn config_set_and_get_headless_always_non_interactive_global() {
+    let home = TempDir::new().unwrap();
+    let repo = make_git_repo();
+
+    // Set the flag globally.
+    let set_out = amux_with_home(home.path())
+        .current_dir(repo.path())
+        .args(["config", "set", "--global", "headless.alwaysNonInteractive", "true"])
+        .output()
+        .unwrap();
+    assert!(
+        set_out.status.success(),
+        "config set --global headless.alwaysNonInteractive true must succeed; stderr: {}",
+        String::from_utf8_lossy(&set_out.stderr)
+    );
+
+    // Verify the written JSON uses the camelCase nested key.
+    let config_path = home.path().join(".amux").join("config.json");
+    let json = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        json.contains("alwaysNonInteractive") && json.contains("true"),
+        "global config.json must contain alwaysNonInteractive: true; got: {json}"
+    );
+
+    // config get must reflect the new value.
+    let get_out = amux_with_home(home.path())
+        .current_dir(repo.path())
+        .args(["config", "get", "headless.alwaysNonInteractive"])
+        .output()
+        .unwrap();
+    assert!(get_out.status.success());
+    let stdout = String::from_utf8_lossy(&get_out.stdout);
+    assert!(
+        stdout.contains("true"),
+        "config get must return 'true' after set --global; stdout: {stdout}"
+    );
+}
+
+#[test]
+fn config_get_headless_work_dirs_works() {
+    let home = TempDir::new().unwrap();
+    let repo = make_git_repo();
+
+    // Query the field without setting it first — must succeed and show default.
+    let output = amux_with_home(home.path())
+        .current_dir(repo.path())
+        .args(["config", "get", "headless.workDirs"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "config get headless.workDirs must exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Default is empty (no work dirs configured).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("empty") || stdout.contains("(not set)") || stdout.contains("[]"),
+        "headless.workDirs must show empty/not-set when unconfigured; stdout: {stdout}"
+    );
+}

@@ -137,7 +137,7 @@ pub async fn run(
             std::env::current_dir().unwrap_or_else(|_| git_root.clone()).join(wf_path)
         };
         let result = run_workflow(
-            work_item,
+            Some(work_item),
             &resolved_wf,
             &git_root,
             mount_path.clone(),
@@ -492,8 +492,8 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
 /// After each step the user is prompted to advance or abort.
 /// State is persisted to JSON so the workflow can be resumed after an interruption.
 #[allow(clippy::too_many_arguments)]
-async fn run_workflow(
-    work_item: u32,
+pub async fn run_workflow(
+    work_item: Option<u32>,
     workflow_path: &Path,
     git_root: &Path,
     mount_path: PathBuf,
@@ -538,13 +538,19 @@ async fn run_workflow(
         .clone()
         .unwrap_or_else(|| "Workflow".to_string());
     println!("\nRunning workflow: {}", title_display);
-    println!("Work item: {:04}", work_item);
+    if let Some(wi) = work_item {
+        println!("Work item: {:04}", wi);
+    }
     println!("Steps: {}", state.steps.len());
 
-    // Load work item content for prompt substitution.
-    let work_item_path = find_work_item(&PathBuf::from(git_root), work_item)?;
-    let work_item_content = std::fs::read_to_string(&work_item_path)
-        .with_context(|| format!("Cannot read work item: {}", work_item_path.display()))?;
+    // Load work item content for prompt substitution (empty when no work item).
+    let work_item_content = if let Some(wi) = work_item {
+        let work_item_path = find_work_item(&PathBuf::from(git_root), wi)?;
+        std::fs::read_to_string(&work_item_path)
+            .with_context(|| format!("Cannot read work item: {}", work_item_path.display()))?
+    } else {
+        String::new()
+    };
 
     // ── Pre-flight: validate all required agents ──────────────────────────────
     // Collect the distinct effective agent names required across all steps.
@@ -692,10 +698,17 @@ async fn run_workflow(
             workflow_step_entrypoint(step_agent, &prompt, non_interactive, plan);
         let disallowed_tools = if yolo || auto { effective_yolo_disallowed_tools(git_root) } else { vec![] };
         append_autonomous_flags(&mut entrypoint, step_agent, yolo, auto, &disallowed_tools);
-        let status_msg = format!(
-            "Workflow step '{}' — work item {:04} with agent '{}'",
-            step_name, work_item, step_agent
-        );
+        let status_msg = if let Some(wi) = work_item {
+            format!(
+                "Workflow step '{}' — work item {:04} with agent '{}'",
+                step_name, wi, step_agent
+            )
+        } else {
+            format!(
+                "Workflow step '{}' with agent '{}'",
+                step_name, step_agent
+            )
+        };
 
         // Resolve model: step-level Model: field takes precedence over CLI --model.
         let step_model: Option<&str> = step_state.model.as_deref().or(cli_model);
@@ -784,17 +797,24 @@ fn resolve_resume_or_restart(
     existing: WorkflowState,
     new_hash: &str,
     new_steps: &[workflow::parser::WorkflowStep],
-    work_item: u32,
+    work_item: Option<u32>,
     workflow_name: &str,
     state_path: &Path,
     default_agent: &str,
 ) -> Result<WorkflowState> {
     use std::io::{BufRead, Write};
 
-    println!(
-        "\nFound a saved workflow state for '{}' (work item {:04}).",
-        workflow_name, work_item
-    );
+    if let Some(wi) = work_item {
+        println!(
+            "\nFound a saved workflow state for '{}' (work item {:04}).",
+            workflow_name, wi
+        );
+    } else {
+        println!(
+            "\nFound a saved workflow state for '{}'.",
+            workflow_name
+        );
+    }
 
     if existing.workflow_hash != new_hash {
         println!("WARNING: The workflow file has changed since the last run.");
@@ -887,7 +907,7 @@ fn warn_resume_agent_overrides(state: &WorkflowState, default_agent: &str) {
 ///
 /// If the worktree directory already exists the user is prompted to resume or
 /// recreate it.  Otherwise the worktree is created fresh.
-fn prepare_worktree_cmd(git_root: &Path, wt_path: &PathBuf, branch: &str) -> Result<PathBuf> {
+pub fn prepare_worktree_cmd(git_root: &Path, wt_path: &PathBuf, branch: &str) -> Result<PathBuf> {
     use std::io::{BufRead, Write};
     if wt_path.exists() {
         println!("Worktree already exists at {}.", wt_path.display());
@@ -1276,7 +1296,7 @@ mod tests {
                 model: None,
             })
             .collect();
-        crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into())
+        crate::workflow::WorkflowState::new(None, steps, "hash".into(), Some(1), "wf".into())
     }
 
     /// Compute the per-step agent map given a state, default agent, and fallback map.
@@ -1468,7 +1488,7 @@ mod tests {
                 model: model.map(|m| m.to_string()),
             })
             .collect();
-        crate::workflow::WorkflowState::new(None, steps, "hash".into(), 1, "wf".into())
+        crate::workflow::WorkflowState::new(None, steps, "hash".into(), Some(1), "wf".into())
     }
 
     /// Workflow: step A has `Model: model-a`, step B has none.

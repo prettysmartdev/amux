@@ -22,7 +22,15 @@ Single-step `implement` works well for focused, well-specified tasks. Workflows 
 ```sh
 # Run the bundled example workflow against work item 0027
 amux implement 0027 --workflow aspec/workflows/implement-feature.md
+
+# Run a workflow without a work item (exec workflow)
+amux exec workflow aspec/workflows/review.md
+
+# Run a workflow and associate a work item for template variable substitution
+amux exec workflow aspec/workflows/implement-feature.md --work-item 0027
 ```
+
+`exec workflow` and `implement --workflow` behave identically, except the work item is optional with `exec workflow`. Use `exec workflow` when you want to run a workflow file independently of any specific work item — for example, a standing code review or documentation workflow. See [Headless Mode](08-headless-mode.md#amux-exec-workflow-path--amux-exec-wf-path) for usage in CI and scripting contexts.
 
 The TUI shows a **workflow status strip** between the execution window and the command box, with one coloured box per step. After each step completes, a confirmation dialog appears — press **Enter** to advance, **q** to pause. State is saved to disk so you can resume later.
 

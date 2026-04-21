@@ -1949,7 +1949,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
             }
         };
 
-        let prompt = workflow::substitute_prompt(&step_state.prompt_template, work_item, &work_item_content);
+        let prompt = workflow::substitute_prompt(&step_state.prompt_template, Some(work_item), &work_item_content);
         effective_entrypoint = workflow_step_entrypoint(&step_agent, &prompt, non_interactive, plan);
         command_display = format!("implement {:04} [step: {}]", work_item, step_name);
 
@@ -3758,7 +3758,7 @@ fn init_workflow_tui(
         .unwrap_or("workflow")
         .to_string();
 
-    let state_path = workflow::workflow_state_path(git_root, work_item, &workflow_name);
+    let state_path = workflow::workflow_state_path(git_root, Some(work_item), &workflow_name);
 
     let state = if state_path.exists() {
         match workflow::load_workflow_state(&state_path) {
@@ -3769,18 +3769,18 @@ fn init_workflow_tui(
                         "Warning: workflow file changed since last run. Restarting from beginning.".to_string(),
                     );
                     let _ = std::fs::remove_file(&state_path);
-                    crate::workflow::WorkflowState::new(title, steps, hash, work_item, workflow_name)
+                    crate::workflow::WorkflowState::new(title, steps, hash, Some(work_item), workflow_name)
                 } else {
                     app.active_tab_mut().push_output("Resuming previous workflow run.".to_string());
                     existing
                 }
             }
             Err(_) => {
-                crate::workflow::WorkflowState::new(title, steps, hash, work_item, workflow_name)
+                crate::workflow::WorkflowState::new(title, steps, hash, Some(work_item), workflow_name)
             }
         }
     } else {
-        crate::workflow::WorkflowState::new(title, steps, hash, work_item, workflow_name)
+        crate::workflow::WorkflowState::new(title, steps, hash, Some(work_item), workflow_name)
     };
 
     // Persist state.
@@ -3956,7 +3956,7 @@ async fn launch_next_workflow_step(app: &mut App) {
         (
             wf,
             git_root,
-            tab.workflow.as_ref().map(|w| w.work_item).unwrap_or(0),
+            tab.workflow.as_ref().and_then(|w| w.work_item),
             agent,
             tab.workflow_allow_docker,
             tab.workflow_ssh_dir.clone(),
@@ -3978,15 +3978,19 @@ async fn launch_next_workflow_step(app: &mut App) {
         .or_else(|| step_state.agent.clone())
         .unwrap_or_else(|| agent_name.clone());
 
-    // Load work item content.
-    let work_item_content = match find_work_item(&git_root, work_item).and_then(|p| {
-        std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("{}", e))
-    }) {
-        Ok(c) => c,
-        Err(e) => {
-            app.active_tab_mut().push_output(format!("Cannot read work item: {}", e));
-            return;
+    // Load work item content (empty when no work item).
+    let work_item_content = if let Some(wi) = work_item {
+        match find_work_item(&git_root, wi).and_then(|p| {
+            std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("{}", e))
+        }) {
+            Ok(c) => c,
+            Err(e) => {
+                app.active_tab_mut().push_output(format!("Cannot read work item: {}", e));
+                return;
+            }
         }
+    } else {
+        String::new()
     };
 
     let credentials = agent_keychain_credentials(&step_agent);
@@ -4056,7 +4060,11 @@ async fn launch_next_workflow_step(app: &mut App) {
     );
     let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
 
-    let command_display = format!("implement {:04} [step: {}]", work_item, step_name);
+    let command_display = if let Some(wi) = work_item {
+        format!("implement {:04} [step: {}]", wi, step_name)
+    } else {
+        format!("workflow [step: {}]", step_name)
+    };
     app.active_tab_mut().continue_command(command_display);
     app.active_tab_mut().push_output(format!("--- Workflow step: {} ---", step_name));
 
@@ -4307,15 +4315,19 @@ async fn launch_next_workflow_step_in_current_container(app: &mut App) {
         None => return,
     };
 
-    // Load work item content for prompt substitution.
-    let work_item_content = match find_work_item(&git_root, work_item).and_then(|p| {
-        std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("{}", e))
-    }) {
-        Ok(c) => c,
-        Err(e) => {
-            app.active_tab_mut().push_output(format!("Cannot read work item: {}", e));
-            return;
+    // Load work item content for prompt substitution (empty when no work item).
+    let work_item_content = if let Some(wi) = work_item {
+        match find_work_item(&git_root, wi).and_then(|p| {
+            std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("{}", e))
+        }) {
+            Ok(c) => c,
+            Err(e) => {
+                app.active_tab_mut().push_output(format!("Cannot read work item: {}", e));
+                return;
+            }
         }
+    } else {
+        String::new()
     };
 
     let prompt = workflow::substitute_prompt(&step_state.prompt_template, work_item, &work_item_content);
@@ -4696,7 +4708,7 @@ mod tests {
             title: None,
             steps,
             workflow_hash: "hash".to_string(),
-            work_item: 1,
+            work_item: Some(1),
             workflow_name: "test-wf".to_string(),
         }
     }
@@ -4880,7 +4892,7 @@ mod tests {
         advance_workflow_next_new_container(&mut app).await;
 
         // plan is Done and state file exists (impl is Pending, so not all_done).
-        let state_path = crate::workflow::workflow_state_path(tmp.path(), 1, "test-wf");
+        let state_path = crate::workflow::workflow_state_path(tmp.path(), Some(1), "test-wf");
         assert!(state_path.exists(), "State file should be written before any launch attempt");
         let saved = std::fs::read_to_string(&state_path).unwrap();
         assert!(saved.contains("Done") || saved.contains("done"), "State file should record plan as Done");

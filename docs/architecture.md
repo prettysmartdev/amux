@@ -37,8 +37,9 @@ src/
   lib.rs                   Re-exports public API for integration tests
   cli.rs                   clap CLI: Cli, Command, Agent enums
   config/
-    mod.rs                 RepoConfig, GlobalConfig, load/save helpers,
-                           DEFAULT_SCROLLBACK_LINES, effective_scrollback_lines()
+    mod.rs                 RepoConfig, GlobalConfig, HeadlessConfig, load/save helpers,
+                           DEFAULT_SCROLLBACK_LINES, effective_scrollback_lines(),
+                           effective_headless_work_dirs(), effective_always_non_interactive()
   commands/
     mod.rs                 Public run() dispatcher
     spec.rs                CommandSpec + FlagSpec tables: canonical single source of truth
@@ -82,6 +83,10 @@ src/
                            agent_entrypoint, agent_entrypoint_non_interactive
     chat.rs                `amux chat` — run() + run_with_sink()
                            chat_entrypoint, chat_entrypoint_non_interactive
+    exec.rs                `amux exec` — run_prompt(), run_workflow()
+                           Thin dispatch layer: delegates to agent::run_agent_with_sink
+                           (for prompt) and implement::run_workflow (for workflow);
+                           agent_entrypoint_with_prompt helper
     headless/
       mod.rs               Top-level dispatch: run_start, run_kill, run_logs, run_status
       server.rs            axum HTTP router + handlers; shared AppState (sessions, allowlist,
@@ -1427,9 +1432,10 @@ A heartbeat task logs an `INFO`-level summary every 60 seconds: active session c
 | Unit — docker stats | `docker::tests` | Stats parsing, container name generation |
 | Unit — host settings / LSP suppression | `docker::tests` | `disable_lsp_recommendations` file creation, key merging, invalid-JSON fallback; `prepare_minimal` returns valid settings with LSP key |
 | Unit — PTY | `tui::pty::tests` | Real `echo` and `sh -c 'exit 42'` processes |
-| Unit — ready | `commands::ready::tests` | Summary table, interactive notice, options, entrypoints |
+| Unit — ready | `commands::ready::tests` | Summary table, interactive notice, options, entrypoints; `--json` flag produces valid JSON with expected top-level keys |
 | Unit — implement | `commands::implement::tests` | Entrypoints (interactive + non-interactive) |
 | Unit — chat | `commands::chat::tests` | Entrypoints, no-prompt verification |
+| Unit — exec | `commands::exec::tests` | `run_prompt` builds same container launch call as `chat::run_with_sink` with prompt injection; `run_workflow` with `work_item = None` skips work item lookup and leaves `{{work_item}}` unexpanded |
 | Unit — agent | `commands::agent::tests` | Shared agent launching |
 | Unit — new | `commands::new::tests` | Slugify, numbering, template, find_template, kind parsing, run_with_sink |
 | Unit — init flow | `commands::init_flow::tests` | Each stage independently via mock `InitQa` + `InitContainerLauncher`; `InitSummary` correctness; no filesystem or Docker access |
@@ -1444,10 +1450,13 @@ A heartbeat task logs an `INFO`-level summary every 60 seconds: active session c
 | Integration — Docker | `tests/dockerfile_build.rs` | Builds each agent template Dockerfile to verify validity |
 | Unit — headless db | `commands::headless::db::tests` | Schema creation, session CRUD, command CRUD, UUID uniqueness, field round-trips through serde |
 | Unit — headless process | `commands::headless::process::tests` | PID file write/read/delete; live vs. stopped process detection; missing PID file handling |
-| Unit — headless config | `config::tests` | `headlessWorkDirs` deserializes from `GlobalConfig` JSON; round-trips through save/load; missing field produces empty Vec |
+| Unit — headless config | `config::tests` | `HeadlessConfig` round-trips through JSON with both fields set, with only one set, and with neither set; `headless.workDirs` deserializes from nested `GlobalConfig` JSON; `headless.alwaysNonInteractive` defaults to `false` when absent |
 | Unit — headless CLI parsing | `cli::tests` | Each `HeadlessAction` variant parses correctly: `--port`, `--workdirs` (single and multiple), `--background`; default values |
 | Integration — headless HTTP | `commands::headless::server::tests` | Full session + command lifecycle against a server on a random port: create session → submit command → poll status → retrieve stdout; DB state matches HTTP responses |
 | Integration — headless allowlist | `commands::headless::server::tests` | Server started with one allowlisted dir; session creation with non-allowlisted dir returns HTTP 403 |
+| Integration — headless exec dispatch | `commands::headless::server::tests` | `POST /v1/commands` with `subcommand = "exec"` and args `["prompt", "hello"]` is accepted; `exec workflow` and `exec wf` alias both accepted |
+| Integration — exec prompt | `tests/exec_integration.rs` | Container launch args include the prompt string and all flag-driven options (plan, yolo, model, etc.) |
+| Integration — exec workflow | `tests/exec_integration.rs` | Without work item: `{{work_item}}` placeholders left unexpanded; with `--work-item 0053`: identical to `implement 0053 --workflow` |
 | End-to-end — headless | `tests/headless_integration.rs` | `amux headless start` in a subprocess; HTTP requests via `reqwest`; assert response shape, log files created, DB entries exist |
 
 ### Window Border Color Matrix

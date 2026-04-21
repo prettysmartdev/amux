@@ -427,12 +427,14 @@ pub async fn run(
     no_cache: bool,
     non_interactive: bool,
     allow_docker: bool,
+    json: bool,
     runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let git_root = find_git_root_from(&cwd).context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
-    let sink = OutputSink::Stdout;
+    // When --json is active, suppress human-readable output by using a null sink.
+    let sink = if json { OutputSink::Null } else { OutputSink::Stdout };
     let mut qa = crate::commands::ready_flow::CliReadyQa::new(sink.clone());
     let launcher = crate::commands::ready_flow::CliReadyAuditLauncher::new(runtime.clone());
     let params = crate::commands::ready_flow::ReadyParams {
@@ -442,9 +444,45 @@ pub async fn run(
         non_interactive,
         allow_docker,
     };
-    crate::commands::ready_flow::execute(params, &mut qa, &launcher, &sink, mount_path, runtime)
+    let summary = crate::commands::ready_flow::execute(params, &mut qa, &launcher, &sink, mount_path, runtime)
         .await?;
+    if json {
+        let json_out = ready_summary_to_json(&summary);
+        println!("{}", serde_json::to_string_pretty(&json_out).unwrap_or_default());
+    }
     Ok(())
+}
+
+/// Convert a ReadySummary into a JSON-serialisable value.
+fn ready_summary_to_json(summary: &ReadySummary) -> serde_json::Value {
+    fn status_to_json(s: &StepStatus) -> serde_json::Value {
+        match s {
+            StepStatus::Pending => serde_json::json!({"status": "pending"}),
+            StepStatus::Ok(msg) => serde_json::json!({"status": "ok", "message": msg}),
+            StepStatus::Skipped(msg) => serde_json::json!({"status": "skipped", "message": msg}),
+            StepStatus::Failed(msg) => serde_json::json!({"status": "failed", "message": msg}),
+            StepStatus::Warn(msg) => serde_json::json!({"status": "warn", "message": msg}),
+        }
+    }
+
+    let all_ok = !matches!(summary.docker_daemon, StepStatus::Failed(_))
+        && !matches!(summary.dockerfile, StepStatus::Failed(_))
+        && !matches!(summary.local_agent, StepStatus::Failed(_))
+        && !matches!(summary.dev_image, StepStatus::Failed(_));
+
+    serde_json::json!({
+        "ready": all_ok,
+        "steps": {
+            "docker_daemon": status_to_json(&summary.docker_daemon),
+            "dockerfile": status_to_json(&summary.dockerfile),
+            "aspec_folder": status_to_json(&summary.aspec_folder),
+            "work_items_config": status_to_json(&summary.work_items_config),
+            "local_agent": status_to_json(&summary.local_agent),
+            "dev_image": status_to_json(&summary.dev_image),
+            "refresh": status_to_json(&summary.refresh),
+            "image_rebuild": status_to_json(&summary.image_rebuild),
+        }
+    })
 }
 
 /// Phase 1 — Pre-audit: Docker checks, Dockerfile init, aspec check, agent check, image build.
@@ -2005,5 +2043,152 @@ mod tests {
             StepStatus::Pending,
             "fallback image_rebuild must be Pending before post-audit runs"
         );
+    }
+
+    // ─── ready_summary_to_json (work item 0058) ──────────────────────────────
+    //
+    // When `--json` is set, ready::run() calls ready_summary_to_json() and prints
+    // the result.  These tests verify the shape of that output without requiring
+    // a Docker daemon.
+
+    #[test]
+    fn ready_summary_to_json_has_required_top_level_keys() {
+        let summary = ReadySummary::default();
+        let json = ready_summary_to_json(&summary);
+        assert!(
+            json.get("ready").is_some(),
+            "JSON output must contain top-level 'ready' key; got: {json}"
+        );
+        assert!(
+            json.get("steps").is_some(),
+            "JSON output must contain top-level 'steps' key; got: {json}"
+        );
+    }
+
+    #[test]
+    fn ready_summary_to_json_steps_contains_all_expected_keys() {
+        let summary = ReadySummary::default();
+        let json = ready_summary_to_json(&summary);
+        let steps = json["steps"].as_object().expect("steps must be a JSON object");
+        let expected_keys = [
+            "docker_daemon",
+            "dockerfile",
+            "aspec_folder",
+            "work_items_config",
+            "local_agent",
+            "dev_image",
+            "refresh",
+            "image_rebuild",
+        ];
+        for key in &expected_keys {
+            assert!(
+                steps.contains_key(*key),
+                "steps must contain key '{key}'; got keys: {:?}",
+                steps.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn ready_summary_to_json_failed_docker_sets_ready_false() {
+        let summary = ReadySummary {
+            docker_daemon: StepStatus::Failed("not running".into()),
+            ..Default::default()
+        };
+        let json = ready_summary_to_json(&summary);
+        assert_eq!(
+            json["ready"].as_bool(),
+            Some(false),
+            "a Failed docker_daemon step must set ready=false; got: {json}"
+        );
+    }
+
+    #[test]
+    fn ready_summary_to_json_failed_dockerfile_sets_ready_false() {
+        let summary = ReadySummary {
+            dockerfile: StepStatus::Failed("missing".into()),
+            ..Default::default()
+        };
+        let json = ready_summary_to_json(&summary);
+        assert_eq!(json["ready"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn ready_summary_to_json_all_ok_sets_ready_true() {
+        let summary = ReadySummary {
+            docker_daemon: StepStatus::Ok("running".into()),
+            dockerfile: StepStatus::Ok("exists".into()),
+            aspec_folder: StepStatus::Ok("present".into()),
+            work_items_config: StepStatus::Ok("ok".into()),
+            local_agent: StepStatus::Ok("claude: ready".into()),
+            dev_image: StepStatus::Ok("exists".into()),
+            refresh: StepStatus::Skipped("use --refresh to run".into()),
+            image_rebuild: StepStatus::Skipped("no rebuild".into()),
+        };
+        let json = ready_summary_to_json(&summary);
+        assert_eq!(
+            json["ready"].as_bool(),
+            Some(true),
+            "all-Ok summary must set ready=true; got: {json}"
+        );
+    }
+
+    #[test]
+    fn ready_summary_to_json_step_status_format_ok() {
+        let summary = ReadySummary {
+            docker_daemon: StepStatus::Ok("running".into()),
+            ..Default::default()
+        };
+        let json = ready_summary_to_json(&summary);
+        let docker = &json["steps"]["docker_daemon"];
+        assert_eq!(docker["status"].as_str(), Some("ok"));
+        assert_eq!(docker["message"].as_str(), Some("running"));
+    }
+
+    #[test]
+    fn ready_summary_to_json_step_status_format_failed() {
+        let summary = ReadySummary {
+            local_agent: StepStatus::Failed("claude: not installed".into()),
+            ..Default::default()
+        };
+        let json = ready_summary_to_json(&summary);
+        let agent = &json["steps"]["local_agent"];
+        assert_eq!(agent["status"].as_str(), Some("failed"));
+        assert_eq!(agent["message"].as_str(), Some("claude: not installed"));
+    }
+
+    #[test]
+    fn ready_summary_to_json_step_status_format_pending() {
+        let summary = ReadySummary::default(); // all Pending
+        let json = ready_summary_to_json(&summary);
+        let refresh = &json["steps"]["refresh"];
+        assert_eq!(
+            refresh["status"].as_str(),
+            Some("pending"),
+            "Pending step must serialize as 'pending'; got: {refresh}"
+        );
+        // Pending has no message field.
+        assert!(
+            refresh.get("message").is_none(),
+            "Pending step must not have a message field; got: {refresh}"
+        );
+    }
+
+    #[test]
+    fn ready_summary_to_json_is_valid_json_string() {
+        // Verify that serde_json::to_string_pretty produces valid JSON
+        // (as used in ready::run when --json is active).
+        let summary = ReadySummary {
+            docker_daemon: StepStatus::Ok("running".into()),
+            dockerfile: StepStatus::Ok("exists".into()),
+            ..Default::default()
+        };
+        let value = ready_summary_to_json(&summary);
+        let json_str = serde_json::to_string_pretty(&value)
+            .expect("ready_summary_to_json output must be serialisable to a JSON string");
+        let reparsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("output must be valid JSON");
+        assert!(reparsed["ready"].is_boolean(), "re-parsed JSON must contain boolean 'ready'");
+        assert!(reparsed["steps"].is_object(), "re-parsed JSON must contain object 'steps'");
     }
 }

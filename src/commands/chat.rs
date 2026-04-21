@@ -162,6 +162,20 @@ pub fn chat_entrypoint_non_interactive(agent: &str, plan: bool) -> Vec<String> {
     args
 }
 
+/// Build the entrypoint command for exec prompt: non-interactive with an injected prompt.
+pub fn chat_entrypoint_with_prompt(agent: &str, prompt: &str, plan: bool) -> Vec<String> {
+    let mut args = match agent {
+        "claude" => vec!["claude".to_string(), "-p".to_string(), prompt.to_string()],
+        "codex" => vec!["codex".to_string(), prompt.to_string()],
+        "opencode" => vec!["opencode".to_string(), prompt.to_string()],
+        "maki" => vec!["maki".to_string(), "--print".to_string(), prompt.to_string()],
+        "gemini" => vec!["gemini".to_string(), "-p".to_string(), prompt.to_string()],
+        _ => vec![agent.to_string(), prompt.to_string()],
+    };
+    append_plan_flags(&mut args, agent, plan);
+    args
+}
+
 /// Append agent-specific plan mode flags to the argument list.
 ///
 /// - Claude: `--permission-mode plan`

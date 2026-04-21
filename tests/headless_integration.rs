@@ -852,3 +852,51 @@ async fn truly_concurrent_commands_on_same_session_exactly_one_accepted() {
         statuses
     );
 }
+
+// ---------------------------------------------------------------------------
+// exec subcommand accepted by is_valid_subcommand (work item 0058)
+// ---------------------------------------------------------------------------
+
+/// Submitting `subcommand = "exec"` with args `["prompt", "hello"]` must be
+/// accepted (202 Accepted) by the headless server rather than rejected with 400.
+/// This verifies that "exec" is present in KNOWN_SUBCOMMANDS.
+#[tokio::test]
+async fn create_command_with_exec_subcommand_is_accepted_not_rejected() {
+    let workdir = TempDir::new().unwrap();
+    let canonical = std::fs::canonicalize(workdir.path()).unwrap();
+    let (_root, base) = start_test_server(vec![canonical.clone()]).await;
+    let client = reqwest::Client::new();
+
+    // Create a session in the allowlisted workdir.
+    let create: serde_json::Value = client
+        .post(format!("{base}/v1/sessions"))
+        .json(&serde_json::json!({ "workdir": canonical.to_str().unwrap() }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session_id = create["session_id"].as_str().unwrap().to_string();
+
+    // Submit an exec command — the server must accept it (202) rather than
+    // rejecting it as an unknown subcommand (400).
+    let resp = client
+        .post(format!("{base}/v1/commands"))
+        .header("x-amux-session", &session_id)
+        .json(&serde_json::json!({
+            "subcommand": "exec",
+            "args": ["prompt", "hello"]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        202,
+        "exec subcommand must be accepted with 202 (not rejected as unknown); \
+         body: {}",
+        resp.text().await.unwrap_or_default()
+    );
+}

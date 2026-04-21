@@ -47,12 +47,16 @@ pub enum Command {
         no_cache: bool,
 
         /// Run the agent in non-interactive (print) mode instead of interactive mode.
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         non_interactive: bool,
 
         /// Mount the host Docker daemon socket into the agent container.
         #[arg(long)]
         allow_docker: bool,
+
+        /// Suppress human output and print structured JSON. Implies --non-interactive.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Launch the dev container to implement a work item.
@@ -61,7 +65,7 @@ pub enum Command {
         work_item: String,
 
         /// Run the agent in non-interactive (print) mode instead of interactive mode.
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         non_interactive: bool,
 
         /// Run the agent in plan mode (read-only, no file modifications).
@@ -111,7 +115,7 @@ pub enum Command {
     /// Start a freeform chat session with the configured agent in a container.
     Chat {
         /// Run the agent in non-interactive (print) mode instead of interactive mode.
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         non_interactive: bool,
 
         /// Run the agent in plan mode (read-only, no file modifications).
@@ -172,6 +176,12 @@ pub enum Command {
         action: ConfigAction,
     },
 
+    /// Run a one-shot command: inject a prompt or run a workflow without a work item.
+    Exec {
+        #[command(subcommand)]
+        action: ExecAction,
+    },
+
     /// Run amux as a headless HTTP server for remote/automated access.
     Headless {
         #[command(subcommand)]
@@ -215,11 +225,116 @@ pub enum SpecsAction {
         /// Work item number (e.g. 0025).
         work_item: String,
         /// Run the agent in non-interactive (print) mode.
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         non_interactive: bool,
         /// Mount the host Docker daemon socket into the agent container.
         #[arg(long)]
         allow_docker: bool,
+    },
+}
+
+/// Clap value parser: reject empty or whitespace-only prompt strings.
+fn parse_non_empty_prompt(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        Err("prompt cannot be empty".to_string())
+    } else {
+        Ok(s.to_string())
+    }
+}
+
+/// Subcommands for `amux exec`.
+#[derive(Subcommand)]
+pub enum ExecAction {
+    /// Send a prompt to the agent in non-interactive mode (like chat -n with a prompt).
+    Prompt {
+        /// The prompt text to send to the agent.
+        #[arg(value_parser = parse_non_empty_prompt)]
+        prompt: String,
+
+        /// Run the agent in non-interactive (print) mode instead of interactive mode.
+        #[arg(short = 'n', long)]
+        non_interactive: bool,
+
+        /// Run the agent in plan mode (read-only, no file modifications).
+        #[arg(long)]
+        plan: bool,
+
+        /// Mount the host Docker daemon socket into the agent container.
+        #[arg(long)]
+        allow_docker: bool,
+
+        /// Mount host ~/.ssh read-only into the agent container.
+        #[arg(long)]
+        mount_ssh: bool,
+
+        /// Enable fully autonomous mode: skip all agent permission prompts and apply
+        /// yoloDisallowedTools config.
+        #[arg(long)]
+        yolo: bool,
+
+        /// Enable auto permission mode: pass --permission-mode auto to the agent instead of
+        /// --dangerously-skip-permissions. Applies yoloDisallowedTools config.
+        #[arg(long)]
+        auto: bool,
+
+        /// Agent to use (overrides .amux/config.json).
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+
+        /// Override the model used by the launched agent (e.g. claude-opus-4-6).
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
+    },
+
+    /// Run a workflow file without requiring a work item number.
+    #[command(alias = "wf")]
+    Workflow {
+        /// Path to the workflow Markdown file.
+        workflow: std::path::PathBuf,
+
+        /// Optional work item number (e.g. 0001). When omitted, the workflow
+        /// runs without a work item context.
+        #[arg(long, value_name = "NUM")]
+        work_item: Option<String>,
+
+        /// Run the agent in non-interactive (print) mode instead of interactive mode.
+        #[arg(short = 'n', long)]
+        non_interactive: bool,
+
+        /// Run the agent in plan mode (read-only, no file modifications).
+        #[arg(long)]
+        plan: bool,
+
+        /// Mount the host Docker daemon socket into the agent container.
+        #[arg(long)]
+        allow_docker: bool,
+
+        /// Run in an isolated Git worktree under ~/.amux/worktrees/.
+        #[arg(long)]
+        worktree: bool,
+
+        /// Mount host ~/.ssh read-only into the agent container.
+        #[arg(long)]
+        mount_ssh: bool,
+
+        /// Enable fully autonomous mode: skip all agent permission prompts, apply
+        /// yoloDisallowedTools config, and auto-advance stuck steps after countdown.
+        /// Implies --worktree.
+        #[arg(long)]
+        yolo: bool,
+
+        /// Enable auto permission mode. With --workflow, implies --worktree but does NOT
+        /// auto-advance stuck steps.
+        #[arg(long)]
+        auto: bool,
+
+        /// Agent to use (overrides .amux/config.json).
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+
+        /// Override the model used by the launched agent (e.g. claude-opus-4-6).
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
     },
 }
 
@@ -472,12 +587,13 @@ mod tests {
     fn ready_defaults_no_refresh_no_non_interactive() {
         let cli = parse(&["amux", "ready"]);
         match cli.command.unwrap() {
-            Command::Ready { refresh, build, no_cache, non_interactive, allow_docker } => {
+            Command::Ready { refresh, build, no_cache, non_interactive, allow_docker, json } => {
                 assert!(!refresh);
                 assert!(!build);
                 assert!(!no_cache);
                 assert!(!non_interactive);
                 assert!(!allow_docker);
+                assert!(!json);
             }
             _ => panic!("expected ready"),
         }
@@ -1549,6 +1665,346 @@ mod tests {
             assert!(
                 cli_flags.contains(&flag.to_string()),
                 "Spec flag --{flag} is missing from the CLI `headless start` subcommand"
+            );
+        }
+    }
+
+    // ── ExecAction parsing (work item 0058) ──────────────────────────────────
+
+    // ── exec prompt ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn exec_prompt_empty_string_is_rejected_at_cli_level() {
+        // The value_parser on the `prompt` field must reject empty strings before
+        // any command handler is invoked.
+        // Use pattern matching rather than unwrap_err() to avoid needing Cli: Debug.
+        match Cli::try_parse_from(["amux", "exec", "prompt", ""]) {
+            Ok(_) => panic!("empty prompt must be rejected by CLI validation"),
+            Err(e) => {
+                let err_msg = e.to_string();
+                assert!(
+                    err_msg.contains("prompt cannot be empty"),
+                    "error message must mention 'prompt cannot be empty'; got: {err_msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exec_prompt_whitespace_only_string_is_rejected_at_cli_level() {
+        match Cli::try_parse_from(["amux", "exec", "prompt", "   "]) {
+            Ok(_) => panic!("whitespace-only prompt must be rejected by CLI validation"),
+            Err(_) => {} // expected
+        }
+    }
+
+    #[test]
+    fn exec_prompt_parses_with_prompt_only() {
+        let cli = parse(&["amux", "exec", "prompt", "hello world"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Prompt { prompt, .. } } => {
+                assert_eq!(prompt, "hello world");
+            }
+            _ => panic!("expected exec prompt"),
+        }
+    }
+
+    #[test]
+    fn exec_prompt_defaults() {
+        let cli = parse(&["amux", "exec", "prompt", "hi"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Prompt {
+                non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model, ..
+            } } => {
+                assert!(!non_interactive, "non_interactive must default to false");
+                assert!(!plan, "plan must default to false");
+                assert!(!allow_docker, "allow_docker must default to false");
+                assert!(!mount_ssh, "mount_ssh must default to false");
+                assert!(!yolo, "yolo must default to false");
+                assert!(!auto, "auto must default to false");
+                assert!(agent.is_none(), "agent must default to None");
+                assert!(model.is_none(), "model must default to None");
+            }
+            _ => panic!("expected exec prompt"),
+        }
+    }
+
+    #[test]
+    fn exec_prompt_non_interactive_long_form() {
+        let cli = parse(&["amux", "exec", "prompt", "hi", "--non-interactive"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Prompt { non_interactive, .. } } => {
+                assert!(non_interactive);
+            }
+            _ => panic!("expected exec prompt"),
+        }
+    }
+
+    #[test]
+    fn exec_prompt_non_interactive_short_alias() {
+        // -n is the short alias for --non-interactive on exec prompt.
+        let cli = parse(&["amux", "exec", "prompt", "hi", "-n"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Prompt { non_interactive, .. } } => {
+                assert!(non_interactive, "-n must set non_interactive = true");
+            }
+            _ => panic!("expected exec prompt"),
+        }
+    }
+
+    #[test]
+    fn exec_prompt_all_flags() {
+        let cli = parse(&[
+            "amux", "exec", "prompt", "do stuff",
+            "--plan", "--allow-docker", "--mount-ssh", "--yolo", "--auto",
+            "--agent", "codex", "--model", "claude-opus-4-6",
+        ]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Prompt {
+                prompt, plan, allow_docker, mount_ssh, yolo, auto, agent, model, ..
+            } } => {
+                assert_eq!(prompt, "do stuff");
+                assert!(plan);
+                assert!(allow_docker);
+                assert!(mount_ssh);
+                assert!(yolo);
+                assert!(auto);
+                assert_eq!(agent, Some("codex".to_string()));
+                assert_eq!(model, Some("claude-opus-4-6".to_string()));
+            }
+            _ => panic!("expected exec prompt"),
+        }
+    }
+
+    #[test]
+    fn exec_prompt_agent_eq_form() {
+        let cli = parse(&["amux", "exec", "prompt", "hi", "--agent=opencode"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Prompt { agent, .. } } => {
+                assert_eq!(agent, Some("opencode".to_string()));
+            }
+            _ => panic!("expected exec prompt"),
+        }
+    }
+
+    #[test]
+    fn exec_prompt_model_eq_form() {
+        let cli = parse(&["amux", "exec", "prompt", "hi", "--model=claude-haiku-4-5"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Prompt { model, .. } } => {
+                assert_eq!(model, Some("claude-haiku-4-5".to_string()));
+            }
+            _ => panic!("expected exec prompt"),
+        }
+    }
+
+    // ── exec workflow ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn exec_workflow_parses_with_path_only() {
+        let cli = parse(&["amux", "exec", "workflow", "./wf.md"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Workflow { workflow, .. } } => {
+                assert_eq!(workflow, std::path::PathBuf::from("./wf.md"));
+            }
+            _ => panic!("expected exec workflow"),
+        }
+    }
+
+    #[test]
+    fn exec_workflow_defaults() {
+        let cli = parse(&["amux", "exec", "workflow", "./wf.md"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Workflow {
+                work_item, non_interactive, plan, allow_docker, worktree,
+                mount_ssh, yolo, auto, agent, model, ..
+            } } => {
+                assert!(work_item.is_none(), "work_item must default to None");
+                assert!(!non_interactive, "non_interactive must default to false");
+                assert!(!plan, "plan must default to false");
+                assert!(!allow_docker, "allow_docker must default to false");
+                assert!(!worktree, "worktree must default to false");
+                assert!(!mount_ssh, "mount_ssh must default to false");
+                assert!(!yolo, "yolo must default to false");
+                assert!(!auto, "auto must default to false");
+                assert!(agent.is_none(), "agent must default to None");
+                assert!(model.is_none(), "model must default to None");
+            }
+            _ => panic!("expected exec workflow"),
+        }
+    }
+
+    #[test]
+    fn exec_workflow_parses_work_item_flag() {
+        let cli = parse(&["amux", "exec", "workflow", "./wf.md", "--work-item", "0053"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Workflow { work_item, .. } } => {
+                assert_eq!(work_item, Some("0053".to_string()));
+            }
+            _ => panic!("expected exec workflow"),
+        }
+    }
+
+    #[test]
+    fn exec_workflow_non_interactive_long_form() {
+        let cli = parse(&["amux", "exec", "workflow", "./wf.md", "--non-interactive"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Workflow { non_interactive, .. } } => {
+                assert!(non_interactive);
+            }
+            _ => panic!("expected exec workflow"),
+        }
+    }
+
+    #[test]
+    fn exec_workflow_non_interactive_short_alias() {
+        // -n is the short alias for --non-interactive on exec workflow.
+        let cli = parse(&["amux", "exec", "workflow", "./wf.md", "-n"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Workflow { non_interactive, .. } } => {
+                assert!(non_interactive, "-n must set non_interactive = true");
+            }
+            _ => panic!("expected exec workflow"),
+        }
+    }
+
+    #[test]
+    fn exec_workflow_all_flags() {
+        let cli = parse(&[
+            "amux", "exec", "workflow", "my-workflow.md",
+            "--work-item", "0001",
+            "--plan", "--allow-docker", "--worktree", "--mount-ssh",
+            "--yolo", "--auto",
+            "--agent", "maki", "--model", "claude-sonnet-4-6",
+        ]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Workflow {
+                workflow, work_item, plan, allow_docker, worktree,
+                mount_ssh, yolo, auto, agent, model, ..
+            } } => {
+                assert_eq!(workflow, std::path::PathBuf::from("my-workflow.md"));
+                assert_eq!(work_item, Some("0001".to_string()));
+                assert!(plan);
+                assert!(allow_docker);
+                assert!(worktree);
+                assert!(mount_ssh);
+                assert!(yolo);
+                assert!(auto);
+                assert_eq!(agent, Some("maki".to_string()));
+                assert_eq!(model, Some("claude-sonnet-4-6".to_string()));
+            }
+            _ => panic!("expected exec workflow"),
+        }
+    }
+
+    // ── exec wf alias ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn exec_wf_alias_parses_same_as_exec_workflow() {
+        // `exec wf` is an alias for `exec workflow`.
+        let via_alias = parse(&["amux", "exec", "wf", "my-workflow.md"]);
+        let via_full = parse(&["amux", "exec", "workflow", "my-workflow.md"]);
+
+        let path_alias = match via_alias.command.unwrap() {
+            Command::Exec { action: ExecAction::Workflow { workflow, .. } } => workflow,
+            _ => panic!("exec wf must parse as exec workflow"),
+        };
+        let path_full = match via_full.command.unwrap() {
+            Command::Exec { action: ExecAction::Workflow { workflow, .. } } => workflow,
+            _ => panic!("exec workflow must parse as exec workflow"),
+        };
+        assert_eq!(path_alias, path_full, "exec wf and exec workflow must produce the same result");
+    }
+
+    #[test]
+    fn exec_wf_alias_with_work_item_flag() {
+        let cli = parse(&["amux", "exec", "wf", "./wf.md", "--work-item", "0053"]);
+        match cli.command.unwrap() {
+            Command::Exec { action: ExecAction::Workflow { work_item, .. } } => {
+                assert_eq!(work_item, Some("0053".to_string()),
+                    "exec wf alias must accept --work-item flag");
+            }
+            _ => panic!("expected exec workflow via wf alias"),
+        }
+    }
+
+    // ── CLI/spec parity for exec prompt and exec workflow ────────────────────
+    //
+    // Verifies bidirectional coverage between the clap Arg definitions and the
+    // FlagSpec constants in spec.rs so that autocomplete and CLI stay in sync.
+
+    #[test]
+    fn cli_spec_parity_exec_prompt() {
+        use crate::commands::spec;
+        use clap::CommandFactory;
+
+        let mut cmd = Cli::command();
+        let exec = cmd
+            .find_subcommand_mut("exec")
+            .expect("exec subcommand must exist in CLI");
+        let prompt = exec
+            .find_subcommand("prompt")
+            .expect("exec prompt subcommand must exist in CLI");
+
+        let cli_flags: Vec<String> = prompt
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .filter(|&name| name != "help")
+            .map(str::to_string)
+            .collect();
+
+        let spec_flags: Vec<&str> = spec::EXEC_PROMPT_FLAGS.iter().map(|f| f.name).collect();
+
+        for flag in &cli_flags {
+            assert!(
+                spec_flags.contains(&flag.as_str()),
+                "CLI flag --{flag} is missing from EXEC_PROMPT_FLAGS in spec.rs; \
+                 spec has: {spec_flags:?}"
+            );
+        }
+        for flag in &spec_flags {
+            assert!(
+                cli_flags.contains(&flag.to_string()),
+                "Spec flag --{flag} is missing from CLI `exec prompt` subcommand; \
+                 CLI has: {cli_flags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_spec_parity_exec_workflow() {
+        use crate::commands::spec;
+        use clap::CommandFactory;
+
+        let mut cmd = Cli::command();
+        let exec = cmd
+            .find_subcommand_mut("exec")
+            .expect("exec subcommand must exist in CLI");
+        let workflow = exec
+            .find_subcommand("workflow")
+            .expect("exec workflow subcommand must exist in CLI");
+
+        let cli_flags: Vec<String> = workflow
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .filter(|&name| name != "help")
+            .map(str::to_string)
+            .collect();
+
+        let spec_flags: Vec<&str> = spec::EXEC_WORKFLOW_FLAGS.iter().map(|f| f.name).collect();
+
+        for flag in &cli_flags {
+            assert!(
+                spec_flags.contains(&flag.as_str()),
+                "CLI flag --{flag} is missing from EXEC_WORKFLOW_FLAGS in spec.rs; \
+                 spec has: {spec_flags:?}"
+            );
+        }
+        for flag in &spec_flags {
+            assert!(
+                cli_flags.contains(&flag.to_string()),
+                "Spec flag --{flag} is missing from CLI `exec workflow` subcommand; \
+                 CLI has: {cli_flags:?}"
             );
         }
     }
