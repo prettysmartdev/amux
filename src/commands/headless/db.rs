@@ -52,8 +52,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             exit_code   INTEGER,
             started_at  TEXT,
             finished_at TEXT,
-            stdout_path TEXT NOT NULL,
-            stderr_path TEXT NOT NULL
+            log_path    TEXT NOT NULL
         );",
     )?;
     Ok(())
@@ -144,8 +143,7 @@ pub struct CommandRow {
     pub exit_code: Option<i32>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
-    pub stdout_path: String,
-    pub stderr_path: String,
+    pub log_path: String,
 }
 
 pub fn insert_command(
@@ -154,20 +152,19 @@ pub fn insert_command(
     session_id: &str,
     subcommand: &str,
     args: &str,
-    stdout_path: &str,
-    stderr_path: &str,
+    log_path: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO commands (id, session_id, subcommand, args, status, stdout_path, stderr_path)
-         VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
-        rusqlite::params![id, session_id, subcommand, args, stdout_path, stderr_path],
+        "INSERT INTO commands (id, session_id, subcommand, args, status, log_path)
+         VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
+        rusqlite::params![id, session_id, subcommand, args, log_path],
     )?;
     Ok(())
 }
 
 pub fn get_command(conn: &Connection, id: &str) -> Result<Option<CommandRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, subcommand, args, status, exit_code, started_at, finished_at, stdout_path, stderr_path
+        "SELECT id, session_id, subcommand, args, status, exit_code, started_at, finished_at, log_path
          FROM commands WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![id], |row| {
@@ -180,8 +177,7 @@ pub fn get_command(conn: &Connection, id: &str) -> Result<Option<CommandRow>> {
             exit_code: row.get(5)?,
             started_at: row.get(6)?,
             finished_at: row.get(7)?,
-            stdout_path: row.get(8)?,
-            stderr_path: row.get(9)?,
+            log_path: row.get(8)?,
         })
     })?;
     match rows.next() {
@@ -362,10 +358,9 @@ mod tests {
         let session_id = "s1";
         let subcommand = "implement";
         let args = r#"["--yolo","0001"]"#;
-        let stdout_path = "/root/.amux/headless/sessions/s1/commands/cmd-0001/stdout.log";
-        let stderr_path = "/root/.amux/headless/sessions/s1/commands/cmd-0001/stderr.log";
+        let log_path = "/root/.amux/headless/sessions/s1/commands/cmd-0001/output.log";
 
-        insert_command(&conn, id, session_id, subcommand, args, stdout_path, stderr_path).unwrap();
+        insert_command(&conn, id, session_id, subcommand, args, log_path).unwrap();
 
         let cmd = get_command(&conn, id).unwrap().expect("command should be found");
         assert_eq!(cmd.id, id);
@@ -376,8 +371,7 @@ mod tests {
         assert!(cmd.exit_code.is_none());
         assert!(cmd.started_at.is_none());
         assert!(cmd.finished_at.is_none());
-        assert_eq!(cmd.stdout_path, stdout_path);
-        assert_eq!(cmd.stderr_path, stderr_path);
+        assert_eq!(cmd.log_path, log_path);
     }
 
     #[test]
@@ -390,7 +384,7 @@ mod tests {
     fn update_command_started_sets_running_and_started_at() {
         let (_tmp, conn) = make_tmp_db();
         insert_session(&conn, "s1", "/tmp/w", "2024-01-01T00:00:00Z").unwrap();
-        insert_command(&conn, "c1", "s1", "implement", "[]", "/out", "/err").unwrap();
+        insert_command(&conn, "c1", "s1", "implement", "[]", "/out").unwrap();
 
         let started_at = "2024-01-01T00:00:01Z";
         update_command_started(&conn, "c1", started_at).unwrap();
@@ -406,7 +400,7 @@ mod tests {
     fn update_command_finished_done_sets_all_fields() {
         let (_tmp, conn) = make_tmp_db();
         insert_session(&conn, "s1", "/tmp/w", "2024-01-01T00:00:00Z").unwrap();
-        insert_command(&conn, "c1", "s1", "implement", "[]", "/out", "/err").unwrap();
+        insert_command(&conn, "c1", "s1", "implement", "[]", "/out").unwrap();
         update_command_started(&conn, "c1", "2024-01-01T00:00:01Z").unwrap();
 
         let finished_at = "2024-01-01T00:01:00Z";
@@ -422,7 +416,7 @@ mod tests {
     fn update_command_finished_error_stores_nonzero_exit_code() {
         let (_tmp, conn) = make_tmp_db();
         insert_session(&conn, "s1", "/tmp/w", "2024-01-01T00:00:00Z").unwrap();
-        insert_command(&conn, "c1", "s1", "chat", "[]", "/out", "/err").unwrap();
+        insert_command(&conn, "c1", "s1", "chat", "[]", "/out").unwrap();
         update_command_started(&conn, "c1", "2024-01-01T00:00:01Z").unwrap();
         update_command_finished(&conn, "c1", "error", Some(2), "2024-01-01T00:01:00Z").unwrap();
 
@@ -435,7 +429,7 @@ mod tests {
     fn update_command_finished_null_exit_code_stores_none() {
         let (_tmp, conn) = make_tmp_db();
         insert_session(&conn, "s1", "/tmp/w", "2024-01-01T00:00:00Z").unwrap();
-        insert_command(&conn, "c1", "s1", "chat", "[]", "/out", "/err").unwrap();
+        insert_command(&conn, "c1", "s1", "chat", "[]", "/out").unwrap();
         update_command_started(&conn, "c1", "2024-01-01T00:00:01Z").unwrap();
         update_command_finished(&conn, "c1", "error", None, "2024-01-01T00:01:00Z").unwrap();
 
@@ -451,7 +445,7 @@ mod tests {
 
         assert_eq!(count_running_commands(&conn).unwrap(), 0, "empty DB");
 
-        insert_command(&conn, "c1", "s1", "implement", "[]", "/out", "/err").unwrap();
+        insert_command(&conn, "c1", "s1", "implement", "[]", "/out").unwrap();
         assert_eq!(count_running_commands(&conn).unwrap(), 0, "pending is not running");
 
         update_command_started(&conn, "c1", "2024-01-01T00:00:01Z").unwrap();
@@ -465,7 +459,7 @@ mod tests {
     fn has_running_command_for_session_detects_pending() {
         let (_tmp, conn) = make_tmp_db();
         insert_session(&conn, "s1", "/tmp/w", "2024-01-01T00:00:00Z").unwrap();
-        insert_command(&conn, "c1", "s1", "implement", "[]", "/out", "/err").unwrap();
+        insert_command(&conn, "c1", "s1", "implement", "[]", "/out").unwrap();
 
         assert!(has_running_command_for_session(&conn, "s1").unwrap());
     }
@@ -474,7 +468,7 @@ mod tests {
     fn has_running_command_for_session_detects_running() {
         let (_tmp, conn) = make_tmp_db();
         insert_session(&conn, "s1", "/tmp/w", "2024-01-01T00:00:00Z").unwrap();
-        insert_command(&conn, "c1", "s1", "implement", "[]", "/out", "/err").unwrap();
+        insert_command(&conn, "c1", "s1", "implement", "[]", "/out").unwrap();
         update_command_started(&conn, "c1", "2024-01-01T00:00:01Z").unwrap();
 
         assert!(has_running_command_for_session(&conn, "s1").unwrap());
@@ -492,7 +486,7 @@ mod tests {
     fn has_running_command_for_session_false_after_done() {
         let (_tmp, conn) = make_tmp_db();
         insert_session(&conn, "s1", "/tmp/w", "2024-01-01T00:00:00Z").unwrap();
-        insert_command(&conn, "c1", "s1", "implement", "[]", "/out", "/err").unwrap();
+        insert_command(&conn, "c1", "s1", "implement", "[]", "/out").unwrap();
         update_command_started(&conn, "c1", "2024-01-01T00:00:01Z").unwrap();
         update_command_finished(&conn, "c1", "done", Some(0), "2024-01-01T00:01:00Z").unwrap();
 
@@ -533,7 +527,7 @@ mod tests {
 
         // Store a richer args array.
         let args_original = r#"["--yolo","0042","--worktree","--mount-ssh"]"#;
-        insert_command(&conn, "c1", "s1", "implement", args_original, "/out", "/err").unwrap();
+        insert_command(&conn, "c1", "s1", "implement", args_original, "/out").unwrap();
 
         let cmd = get_command(&conn, "c1").unwrap().unwrap();
 
@@ -547,7 +541,7 @@ mod tests {
     fn command_args_empty_json_array_round_trips() {
         let (_tmp, conn) = make_tmp_db();
         insert_session(&conn, "s1", "/tmp/w", "2024-01-01T00:00:00Z").unwrap();
-        insert_command(&conn, "c1", "s1", "status", "[]", "/out", "/err").unwrap();
+        insert_command(&conn, "c1", "s1", "status", "[]", "/out").unwrap();
 
         let cmd = get_command(&conn, "c1").unwrap().unwrap();
         let v: serde_json::Value = serde_json::from_str(&cmd.args).unwrap();

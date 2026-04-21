@@ -180,11 +180,10 @@ http://localhost:<port>/v1
 
 #### Create a session
 
-```
-POST /v1/sessions
-Content-Type: application/json
-
-{ "workdir": "/home/user/my-project" }
+```sh
+curl -s -X POST http://localhost:9876/v1/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"workdir":"/home/user/my-project"}'
 ```
 
 Creates a new session bound to the given working directory. The directory must be in the allowlist. Returns immediately with a session UUID:
@@ -202,8 +201,8 @@ Error responses:
 
 #### List sessions
 
-```
-GET /v1/sessions
+```sh
+curl -s http://localhost:9876/v1/sessions
 ```
 
 ```json
@@ -229,16 +228,16 @@ GET /v1/sessions
 
 #### Get session detail
 
-```
-GET /v1/sessions/:id
+```sh
+curl -s http://localhost:9876/v1/sessions/<session-id>
 ```
 
 Returns the session record. Returns HTTP 404 if the ID does not exist.
 
 #### Close a session
 
-```
-DELETE /v1/sessions/:id
+```sh
+curl -s -X DELETE http://localhost:9876/v1/sessions/<session-id>
 ```
 
 Marks the session `closed`. Closed sessions cannot receive new commands. All existing command records and output files are preserved — no data is deleted. Returns HTTP 204 on success, HTTP 404 if the session does not exist.
@@ -251,15 +250,11 @@ Commands are submitted to a session and execute asynchronously. Submit a command
 
 #### Submit a command
 
-```
-POST /v1/commands
-x-amux-session: <session-uuid>
-Content-Type: application/json
-
-{
-  "subcommand": "implement",
-  "args": ["0057"]
-}
+```sh
+curl -s -X POST http://localhost:9876/v1/commands \
+  -H 'x-amux-session: <session-id>' \
+  -H 'Content-Type: application/json' \
+  -d '{"subcommand":"implement","args":["0057"]}'
 ```
 
 Dispatches a subcommand to the session identified by the `x-amux-session` header. Valid values for `subcommand`: `implement`, `chat`, `ready`.
@@ -292,8 +287,8 @@ Error responses:
 
 #### Get command status
 
-```
-GET /v1/commands/:id
+```sh
+curl -s http://localhost:9876/v1/commands/<command-id>
 ```
 
 Returns the current status and metadata for a command:
@@ -308,8 +303,7 @@ Returns the current status and metadata for a command:
   "exit_code": null,
   "started_at": "2026-04-20T12:01:00Z",
   "finished_at": null,
-  "stdout_path": "~/.amux/headless/sessions/a1b2c3d4-.../commands/e5f6a7b8-.../stdout.log",
-  "stderr_path": "~/.amux/headless/sessions/a1b2c3d4-.../commands/e5f6a7b8-.../stderr.log"
+  "log_path": "~/.amux/headless/sessions/a1b2c3d4-.../commands/e5f6a7b8-.../output.log"
 }
 ```
 
@@ -322,27 +316,26 @@ Returns the current status and metadata for a command:
 
 #### Get command logs
 
-```
-GET /v1/commands/:id/logs
+```sh
+curl -s http://localhost:9876/v1/commands/<command-id>/logs
 ```
 
-Returns the captured stdout and stderr for a command. For a running command, returns whatever has been written to the log files so far. For a completed command, returns the full output.
+Returns the captured output for a command. Stdout and stderr are combined into a single stream in the order they were written. For a running command, returns whatever has been written so far. For a completed command, returns the full output.
 
 ```json
 {
-  "stdout": "Implementing work item 0057...\n✓ Tests pass\n",
-  "stderr": ""
+  "output": "Implementing work item 0057...\n✓ Tests pass\n"
 }
 ```
 
-Output is written incrementally as the subprocess produces it — neither stdout nor stderr is fully buffered in memory.
+Output is written incrementally as the subprocess produces it — not buffered in memory.
 
 ---
 
 ### Server health
 
-```
-GET /v1/status
+```sh
+curl -s http://localhost:9876/v1/status
 ```
 
 ```json
@@ -382,7 +375,7 @@ while true; do
 done
 
 # 4. Retrieve output
-curl -s "$SERVER/v1/commands/$CMD/logs" | jq -r .stdout
+curl -s "$SERVER/v1/commands/$CMD/logs" | jq -r .output
 
 # 5. Close the session
 curl -s -X DELETE "$SERVER/v1/sessions/$SESSION"
@@ -403,8 +396,7 @@ Everything headless mode writes lives under `~/.amux/headless/`:
     <session-uuid>/
       commands/
         <command-uuid>/
-          stdout.log               # captured stdout (written incrementally)
-          stderr.log               # captured stderr (written incrementally)
+          output.log               # combined stdout+stderr (written incrementally)
           metadata.json            # request payload, timestamps, exit code
 ```
 
@@ -412,7 +404,7 @@ Everything headless mode writes lives under `~/.amux/headless/`:
 
 **`sessions`** — one row per session: `id` (UUID), `workdir`, `status` (`active`/`closed`), `created_at`, `closed_at`.
 
-**`commands`** — one row per command: `id` (UUID), `session_id`, `subcommand`, `args` (JSON array), `status` (`pending`/`running`/`done`/`error`), `exit_code`, `started_at`, `finished_at`, `stdout_path`, `stderr_path`.
+**`commands`** — one row per command: `id` (UUID), `session_id`, `subcommand`, `args` (JSON array), `status` (`pending`/`running`/`done`/`error`), `exit_code`, `started_at`, `finished_at`, `log_path`.
 
 The database is the authoritative record of all activity. The per-command log files hold raw output. Neither is deleted when a session is closed.
 

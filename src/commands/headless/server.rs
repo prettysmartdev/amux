@@ -92,8 +92,7 @@ struct CommandResponse {
     started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     finished_at: Option<String>,
-    stdout_path: String,
-    stderr_path: String,
+    log_path: String,
 }
 
 #[derive(Serialize)]
@@ -491,8 +490,7 @@ async fn handle_create_command(
             .into_response();
     }
 
-    let stdout_path = cmd_dir.join("stdout.log");
-    let stderr_path = cmd_dir.join("stderr.log");
+    let log_path = cmd_dir.join("output.log");
 
     // Insert command row; release the DB lock before touching busy_sessions
     // to keep the lock-acquisition order consistent (DB → busy) and avoid deadlock.
@@ -504,8 +502,7 @@ async fn handle_create_command(
             &session_id,
             &body.subcommand,
             &args_json,
-            &stdout_path.to_string_lossy(),
-            &stderr_path.to_string_lossy(),
+            &log_path.to_string_lossy(),
         )
     };
     if let Err(e) = insert_result {
@@ -523,8 +520,7 @@ async fn handle_create_command(
         session_id = %session_id,
         subcommand = %body.subcommand,
         args = %args_json,
-        stdout_path = %stdout_path.display(),
-        stderr_path = %stderr_path.display(),
+        log_path = %log_path.display(),
         "Command dispatched"
     );
 
@@ -534,8 +530,7 @@ async fn handle_create_command(
     let sess_id = session_id.clone();
     let subcommand = body.subcommand.clone();
     let cmd_args = body.args.clone();
-    let stdout_p = stdout_path.clone();
-    let stderr_p = stderr_path.clone();
+    let log_p = log_path.clone();
     let workdir_clone = workdir.clone();
 
     let handle = tokio::spawn(async move {
@@ -545,8 +540,7 @@ async fn handle_create_command(
             sess_id,
             subcommand,
             cmd_args,
-            stdout_p,
-            stderr_p,
+            log_p,
             workdir_clone,
         )
         .await;
@@ -567,8 +561,7 @@ async fn execute_command(
     session_id: String,
     subcommand: String,
     args: Vec<String>,
-    stdout_path: PathBuf,
-    stderr_path: PathBuf,
+    log_path: PathBuf,
     workdir: String,
 ) {
     let started_at = chrono::Utc::now().to_rfc3339();
@@ -588,13 +581,13 @@ async fn execute_command(
         "workdir": workdir,
         "started_at": started_at,
     });
-    if let Some(parent) = stdout_path.parent() {
+    if let Some(parent) = log_path.parent() {
         let meta_path = parent.join("metadata.json");
         let _ = tokio::fs::write(&meta_path, serde_json::to_string_pretty(&metadata).unwrap_or_default()).await;
     }
 
     // Build the CLI command to execute. We spawn a child process of amux
-    // with the requested subcommand, capturing stdout/stderr to log files.
+    // with the requested subcommand, capturing stdout/stderr to a single log file.
     let amux_bin = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -623,18 +616,19 @@ async fn execute_command(
     }
     cmd.current_dir(&workdir);
 
-    // Open log files with async I/O, then convert to std::fs::File for use as
-    // process stdio.  Using tokio::fs avoids blocking the executor on the open syscall.
-    let stdout_file = match tokio::fs::OpenOptions::new()
+    // Open a single log file for combined stdout+stderr. Using tokio::fs avoids
+    // blocking the executor on the open syscall; we then convert to std::fs::File
+    // and clone it so both stdio handles write to the same file.
+    let log_file = match tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(&stdout_path)
+        .open(&log_path)
         .await
     {
         Ok(f) => f.into_std().await,
         Err(e) => {
-            tracing::error!(error = %e, command_id = %command_id, "Failed to create stdout log");
+            tracing::error!(error = %e, command_id = %command_id, "Failed to create output log");
             let finished_at = chrono::Utc::now().to_rfc3339();
             let db = state.db.lock().await;
             let _ = db::update_command_finished(&db, &command_id, "error", None, &finished_at);
@@ -643,16 +637,10 @@ async fn execute_command(
             return;
         }
     };
-    let stderr_file = match tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&stderr_path)
-        .await
-    {
-        Ok(f) => f.into_std().await,
+    let stderr_file = match log_file.try_clone() {
+        Ok(f) => f,
         Err(e) => {
-            tracing::error!(error = %e, command_id = %command_id, "Failed to create stderr log");
+            tracing::error!(error = %e, command_id = %command_id, "Failed to clone output log file handle");
             let finished_at = chrono::Utc::now().to_rfc3339();
             let db = state.db.lock().await;
             let _ = db::update_command_finished(&db, &command_id, "error", None, &finished_at);
@@ -662,7 +650,7 @@ async fn execute_command(
         }
     };
 
-    cmd.stdout(stdout_file);
+    cmd.stdout(log_file);
     cmd.stderr(stderr_file);
 
     let result = cmd.spawn();
@@ -697,7 +685,7 @@ async fn execute_command(
             );
 
             // Update metadata.json with completion info.
-            if let Some(parent) = stdout_path.parent() {
+            if let Some(parent) = log_path.parent() {
                 let meta_path = parent.join("metadata.json");
                 let metadata = serde_json::json!({
                     "command_id": command_id,
@@ -747,8 +735,7 @@ async fn handle_get_command(
                 exit_code: c.exit_code,
                 started_at: c.started_at,
                 finished_at: c.finished_at,
-                stdout_path: c.stdout_path,
-                stderr_path: c.stderr_path,
+                log_path: c.log_path,
             })
             .into_response()
         }
@@ -776,16 +763,12 @@ async fn handle_get_command_logs(
     match db::get_command(&db, &id) {
         Ok(Some(c)) => {
             drop(db); // Release lock before file I/O.
-            let stdout = tokio::fs::read_to_string(&c.stdout_path)
-                .await
-                .unwrap_or_default();
-            let stderr = tokio::fs::read_to_string(&c.stderr_path)
+            let output = tokio::fs::read_to_string(&c.log_path)
                 .await
                 .unwrap_or_default();
             Json(serde_json::json!({
                 "command_id": c.id,
-                "stdout": stdout,
-                "stderr": stderr,
+                "output": output,
             }))
             .into_response()
         }
@@ -882,7 +865,7 @@ pub async fn start_server(
     // Spawn heartbeat task.
     let heartbeat_state = Arc::clone(&state);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
         loop {
             interval.tick().await;
             let db = heartbeat_state.db.lock().await;
