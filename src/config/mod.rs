@@ -93,6 +93,10 @@ pub struct GlobalConfig {
     /// Overridden by per-repo config when both are set.
     #[serde(rename = "envPassthrough", skip_serializing_if = "Option::is_none")]
     pub env_passthrough: Option<Vec<String>>,
+    /// Working directories allowlisted for headless mode sessions.
+    /// Each entry should be an absolute path. Resolved to canonical paths at server startup.
+    #[serde(rename = "headlessWorkDirs", skip_serializing_if = "Option::is_none")]
+    pub headless_work_dirs: Option<Vec<String>>,
 }
 
 /// Built-in default number of scrollback lines for the container terminal emulator.
@@ -163,6 +167,10 @@ pub fn migrate_legacy_repo_config(git_root: &Path) -> anyhow::Result<bool> {
 
 #[allow(dead_code)]
 pub fn global_config_path() -> Result<PathBuf> {
+    // Allow tests to override the home directory via env var.
+    if let Ok(home) = std::env::var("AMUX_CONFIG_HOME") {
+        return Ok(PathBuf::from(home).join("config.json"));
+    }
     let home = dirs::home_dir().context("Cannot determine home directory")?;
     Ok(home.join(".amux").join("config.json"))
 }
@@ -756,5 +764,115 @@ mod tests {
         let wi = loaded.work_items.unwrap();
         assert_eq!(wi.dir.as_deref(), Some("./work-items"));
         assert_eq!(wi.template.as_deref(), Some("./work-items/0000-template.md"));
+    }
+
+    // ─── GlobalConfig headlessWorkDirs ───────────────────────────────────────
+
+    #[test]
+    fn headless_work_dirs_deserializes_from_json() {
+        let json = r#"{"headlessWorkDirs": ["/workspace/a", "/workspace/b"]}"#;
+        let config: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.headless_work_dirs,
+            Some(vec!["/workspace/a".to_string(), "/workspace/b".to_string()])
+        );
+    }
+
+    #[test]
+    fn headless_work_dirs_absent_field_deserializes_to_none() {
+        let json = r#"{"default_agent": "claude"}"#;
+        let config: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            config.headless_work_dirs.is_none(),
+            "absent headlessWorkDirs must deserialize to None"
+        );
+        // Callers unwrap with unwrap_or_default() → empty Vec, not an error.
+        let dirs: Vec<String> = config.headless_work_dirs.unwrap_or_default();
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn headless_work_dirs_empty_array_field_deserializes_to_some_empty_vec() {
+        let json = r#"{"headlessWorkDirs": []}"#;
+        let config: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.headless_work_dirs, Some(vec![]));
+    }
+
+    #[test]
+    fn headless_work_dirs_serializes_with_camel_case_key() {
+        let config = GlobalConfig {
+            headless_work_dirs: Some(vec!["/repo/proj".to_string()]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains("headlessWorkDirs"),
+            "expected camelCase key 'headlessWorkDirs' in JSON; got: {json}"
+        );
+        assert!(
+            !json.contains("headless_work_dirs"),
+            "snake_case key must not appear in JSON; got: {json}"
+        );
+    }
+
+    #[test]
+    fn headless_work_dirs_absent_is_omitted_from_json() {
+        let config = GlobalConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            !json.contains("headlessWorkDirs"),
+            "absent headless_work_dirs must be omitted (skip_serializing_if); got: {json}"
+        );
+    }
+
+    #[test]
+    fn headless_work_dirs_round_trips_through_json() {
+        let original = GlobalConfig {
+            headless_work_dirs: Some(vec![
+                "/workspace/alpha".to_string(),
+                "/workspace/beta".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        let restored: GlobalConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(
+            restored.headless_work_dirs.as_deref(),
+            Some(["/workspace/alpha".to_string(), "/workspace/beta".to_string()].as_slice())
+        );
+    }
+
+    /// Tests save_global_config / load_global_config via the AMUX_CONFIG_HOME override.
+    ///
+    /// Uses a static mutex so only one test at a time may mutate the env var,
+    /// preventing parallel tests from observing each other's temporary override.
+    #[test]
+    fn headless_work_dirs_round_trips_through_save_load_global_config() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap());
+
+        let original = GlobalConfig {
+            headless_work_dirs: Some(vec!["/srv/repo".to_string()]),
+            default_agent: Some("claude".to_string()),
+            ..Default::default()
+        };
+        save_global_config(&original).unwrap();
+        let loaded = load_global_config().unwrap();
+
+        std::env::remove_var("AMUX_CONFIG_HOME");
+
+        assert_eq!(
+            original, loaded,
+            "GlobalConfig must survive a save/load round-trip"
+        );
+        assert_eq!(
+            loaded.headless_work_dirs.as_deref(),
+            Some(["/srv/repo".to_string()].as_slice())
+        );
     }
 }

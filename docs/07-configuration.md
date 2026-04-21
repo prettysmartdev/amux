@@ -48,7 +48,8 @@ Applies to all projects on the machine unless overridden by a per-repo config.
   "terminal_scrollback_lines": 10000,
   "runtime": "docker",
   "yoloDisallowedTools": ["Bash"],
-  "envPassthrough": ["ANTHROPIC_API_KEY"]
+  "envPassthrough": ["ANTHROPIC_API_KEY"],
+  "headlessWorkDirs": ["/home/user/my-project"]
 }
 ```
 
@@ -59,6 +60,7 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 | `runtime` | string | `"docker"` | Container runtime: `"docker"` or `"apple-containers"` (macOS 26+ only) |
 | `yoloDisallowedTools` | string array | `[]` | Global fallback list of tools forbidden when `--yolo` is active |
 | `envPassthrough` | string array | `[]` | Host environment variable names to inject into agent containers at launch. See [`envPassthrough`](#envpassthrough) |
+| `headlessWorkDirs` | string array | `[]` | Working directories pre-approved for headless mode session creation. Merged with `--workdirs` flags at server startup. See [Headless Mode](08-headless-mode.md#working-directory-allowlist) |
 
 **Note:** `runtime` is a global (machine-level) setting only. It is not available in the per-repo config — container runtime is a property of the machine, not the project.
 
@@ -74,6 +76,7 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 | `envPassthrough` | Per-repo → Global → Empty list (no passthrough) |
 | `runtime` | Global only |
 | `workItems.dir` / `workItems.template` | Per-repo only |
+| `headlessWorkDirs` | Global only (merged with `--workdirs` flags at startup) |
 
 For `yoloDisallowedTools` and `envPassthrough`, if a per-repo list is set it **replaces** the global list entirely — lists are not merged. To inherit the global list for a repo, omit the field from the repo config.
 
@@ -447,4 +450,4 @@ The tag push triggers the release CI pipeline, which builds binaries for all pla
 
 ---
 
-[← Nanoclaw](06-nanoclaw.md) · [Architecture →](architecture.md)
+[← Nanoclaw](06-nanoclaw.md) · [Next: Headless Mode →](08-headless-mode.md)

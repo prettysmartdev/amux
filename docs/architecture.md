@@ -8,17 +8,23 @@ User
  ▼
 amux binary ──► command mode  ──► commands/{init,ready,implement,chat,new}
      │                                       │
-     └──────► interactive mode (TUI)         │
-                    │                        ▼
-              tui/{mod,state,          runtime: AgentRuntime (Arc<dyn>)
-               input,render,pty}             │
-                    │              ┌──────────┴──────────┐
-                    │         DockerRuntime       AppleContainersRuntime
-                    │              │                     │ (macOS 26+)
-                    ▼              ▼                     ▼
-             Container Runtime ──────────────► Managed Container
-               (Docker or                      (agent runs here)
-            Apple Containers)
+     ├──────► interactive mode (TUI)         │
+     │              │                        ▼
+     │        tui/{mod,state,          runtime: AgentRuntime (Arc<dyn>)
+     │         input,render,pty}             │
+     │              │              ┌──────────┴──────────┐
+     │              │         DockerRuntime       AppleContainersRuntime
+     │              │              │                     │ (macOS 26+)
+     │              ▼              ▼                     ▼
+     │        Container Runtime ──────────────► Managed Container
+     │          (Docker or                      (agent runs here)
+     │       Apple Containers)
+     │
+     └──────► headless mode ──► commands/headless/{mod,server,db,process,logging}
+                    │                        │
+                    ▼                        ▼
+             HTTP server (axum)      SQLite DB + log files
+               localhost:<port>       ~/.amux/headless/
 ```
 
 ---
@@ -76,6 +82,19 @@ src/
                            agent_entrypoint, agent_entrypoint_non_interactive
     chat.rs                `amux chat` — run() + run_with_sink()
                            chat_entrypoint, chat_entrypoint_non_interactive
+    headless/
+      mod.rs               Top-level dispatch: run_start, run_kill, run_logs, run_status
+      server.rs            axum HTTP router + handlers; shared AppState (sessions, allowlist,
+                           in-memory busy-session mutex); request/response types
+      db.rs                SQLite schema setup (sessions + commands tables);
+                           all data-access functions; session/command CRUD;
+                           AMUX_HEADLESS_ROOT env override for test isolation
+      process.rs           OS process manager integration: systemd-run (Linux),
+                           launchd plist (macOS), double-fork fallback;
+                           PID file write/read/delete; live-process detection
+      logging.rs           tracing-subscriber setup: human-readable to stdout
+                           (foreground) or JSON/appending to amux.log (background);
+                           periodic heartbeat log every 60 s
   runtime/
     mod.rs                 AgentRuntime trait (all container operations);
                            resolve_runtime() factory (reads GlobalConfig);
@@ -1312,6 +1331,83 @@ Inactive tabs are rendered only as a tab bar entry — the full render path runs
 
 ---
 
+## Headless Mode
+
+The headless server is a third execution mode alongside command mode and the TUI. It is implemented entirely within `src/commands/headless/` and shares no state with the TUI event loop.
+
+### Request flow
+
+```
+HTTP client
+     │
+     ▼
+axum router (server.rs)
+     │
+     ├── POST /v1/sessions ──► db::create_session() ──► SQLite
+     │
+     └── POST /v1/commands ──► validate session (DB)
+                                     │
+                                     ├── acquire per-session mutex (in-memory)
+                                     │
+                                     └── tokio::spawn ──► commands::run() dispatch
+                                                               │
+                                                               ▼
+                                                         Docker container
+                                                         stdout/stderr → log files
+                                                         status → db::update_command()
+```
+
+### `AppState`
+
+The axum router is backed by a shared `AppState` (wrapped in `Arc`) that holds:
+
+- The resolved working-directory allowlist (`Vec<PathBuf>`)
+- A `tokio::sync::Mutex<rusqlite::Connection>` — single writer, avoids `SQLITE_BUSY` under concurrent requests
+- A `HashMap<Uuid, Arc<Mutex<()>>>` — one mutex per active session, enforces the one-command-at-a-time invariant without blocking unrelated sessions
+
+### Database access
+
+`db.rs` is a leaf module with no knowledge of axum or the HTTP layer. All data-access functions accept a `MutexGuard<Connection>`. The schema is created on first run inside `db::init_schema()` and never migrated — future schema changes require a new version.
+
+The `AMUX_HEADLESS_ROOT` environment variable overrides the storage root (`~/.amux/headless/`). Set it in tests to redirect all DB and log-file writes to a `tempfile::TempDir`, keeping tests hermetic.
+
+### Subcommand execution
+
+When `POST /v1/commands` is accepted:
+
+1. A new `commands` row is written with `status = pending`.
+2. A Tokio task is spawned. The task:
+   a. Updates the row to `status = running` and records `started_at`.
+   b. Creates `~/.amux/headless/sessions/<session-id>/commands/<command-id>/` and opens `stdout.log` and `stderr.log` for incremental async writes (`tokio::fs`).
+   c. Dispatches to the existing `commands::run()` path with an `OutputSink` wired to the log files, using the session's `workdir` as the execution CWD.
+   d. On completion, updates the row with `status`, `exit_code`, and `finished_at`.
+3. The HTTP response (`{ "command_id": "..." }`) is returned before step 2 completes — execution is fire-and-forget from the client's perspective.
+
+All file I/O within the server uses `tokio::fs` (async) to avoid blocking the Tokio executor. Synchronous `std::fs` is restricted to startup and shutdown paths.
+
+### Background mode
+
+`process.rs` encapsulates all OS-specific daemonization:
+
+| Platform | Strategy |
+|----------|----------|
+| Linux (systemd) | `systemd-run --user --unit=amux-headless.service -- amux headless start …` (without `--background`) |
+| macOS (launchd) | Writes `~/Library/LaunchAgents/io.amux.headless.plist`; calls `launchctl load` |
+| Fallback | Double-fork via `nix::unistd::fork()`; setsid; redirect stdio to `/dev/null` |
+
+In all cases the child PID is written to `~/.amux/headless/amux.pid`. `run_kill()` reads the PID, sends `SIGTERM`, and waits up to 5 seconds before `SIGKILL`; then removes the PID file and (on macOS) unloads the plist.
+
+### Logging
+
+`logging.rs` configures `tracing-subscriber` differently by mode:
+
+- **Foreground**: `fmt::Subscriber` with `ANSI` colours, directed to stdout.
+- **Background**: `fmt::Subscriber` with JSON format, appending to `~/.amux/headless/amux.log`. A size guard truncates the log when it exceeds 100 MB (keeping the last 10 MB) to prevent unbounded growth.
+
+A heartbeat task logs an `INFO`-level summary every 60 seconds: active session count, running command count.
+
+---
+
 ## Testing Strategy
 
 | Layer | Location | What is tested |
@@ -1346,6 +1442,13 @@ Inactive tabs are rendered only as a tab bar entry — the full render path runs
 | Unit — download | `commands::download::tests` | Tarball extraction, file counting, empty tarball error |
 | Integration — download | `tests/download_integration.rs` | GitHub template downloads, aspec folder download, init integration, fallback |
 | Integration — Docker | `tests/dockerfile_build.rs` | Builds each agent template Dockerfile to verify validity |
+| Unit — headless db | `commands::headless::db::tests` | Schema creation, session CRUD, command CRUD, UUID uniqueness, field round-trips through serde |
+| Unit — headless process | `commands::headless::process::tests` | PID file write/read/delete; live vs. stopped process detection; missing PID file handling |
+| Unit — headless config | `config::tests` | `headlessWorkDirs` deserializes from `GlobalConfig` JSON; round-trips through save/load; missing field produces empty Vec |
+| Unit — headless CLI parsing | `cli::tests` | Each `HeadlessAction` variant parses correctly: `--port`, `--workdirs` (single and multiple), `--background`; default values |
+| Integration — headless HTTP | `commands::headless::server::tests` | Full session + command lifecycle against a server on a random port: create session → submit command → poll status → retrieve stdout; DB state matches HTTP responses |
+| Integration — headless allowlist | `commands::headless::server::tests` | Server started with one allowlisted dir; session creation with non-allowlisted dir returns HTTP 403 |
+| End-to-end — headless | `tests/headless_integration.rs` | `amux headless start` in a subprocess; HTTP requests via `reqwest`; assert response shape, log files created, DB entries exist |
 
 ### Window Border Color Matrix
 
@@ -1366,4 +1469,4 @@ caller invokes them.
 
 ---
 
-[← Configuration](07-configuration.md) · [Contents](contents.md)
+[← Headless Mode](08-headless-mode.md) · [Contents](contents.md)

@@ -16,6 +16,7 @@ A guide to using amux, the containerized multi-agent terminal multiplexer.
 | 05 | [Yolo Mode](05-yolo-mode.md) | Fully autonomous operation, disallowed tools, countdown |
 | 06 | [Nanoclaw](06-nanoclaw.md) | Persistent background agents, `claws` commands |
 | 07 | [Configuration](07-configuration.md) | Config files, runtime selection, all fields |
+| 08 | [Headless Mode](08-headless-mode.md) | HTTP server, sessions, commands, CI/automation, auditability |
 | — | [Architecture](architecture.md) | Source layout, modules, design decisions |
 
 ---

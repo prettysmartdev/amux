@@ -4,6 +4,7 @@ pub mod chat;
 pub mod claws;
 pub mod config;
 pub mod download;
+pub mod headless;
 pub mod implement;
 pub mod init;
 pub mod init_flow;
@@ -54,5 +55,6 @@ pub async fn run(command: Command, runtime: Arc<dyn crate::runtime::AgentRuntime
             },
         },
         Command::Config { action } => config::run(action, runtime).await,
+        Command::Headless { action } => headless::run(action, runtime).await,
     }
 }

@@ -171,6 +171,12 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Run amux as a headless HTTP server for remote/automated access.
+    Headless {
+        #[command(subcommand)]
+        action: HeadlessAction,
+    },
 }
 
 /// Subcommands for `amux config`.
@@ -215,6 +221,35 @@ pub enum SpecsAction {
         #[arg(long)]
         allow_docker: bool,
     },
+}
+
+/// Subcommands for `amux headless`.
+#[derive(Subcommand)]
+pub enum HeadlessAction {
+    /// Start the headless HTTP server.
+    Start {
+        /// Port to listen on.
+        #[arg(long, default_value = "9876")]
+        port: u16,
+
+        /// Allowlisted working directories (repeatable). Only sessions with a workdir
+        /// in this list will be accepted.
+        #[arg(long = "workdirs")]
+        workdirs: Vec<String>,
+
+        /// Daemonize via the OS process manager (systemd on Linux, launchd on macOS).
+        #[arg(long)]
+        background: bool,
+    },
+
+    /// Stop the background headless server.
+    Kill,
+
+    /// Stream the background server log file to stdout.
+    Logs,
+
+    /// Show headless server status (PID, port, sessions, uptime).
+    Status,
 }
 
 /// Subcommands for `amux claws`.
@@ -1335,6 +1370,186 @@ mod tests {
         for &name in KNOWN_AGENT_NAMES {
             let result = validate_agent_name(name);
             assert!(result.is_ok(), "{} should be accepted by validate_agent_name", name);
+        }
+    }
+
+    // ─── HeadlessAction parsing (work item 0057) ─────────────────────────────
+
+    // ── headless start defaults ──────────────────────────────────────────────
+
+    #[test]
+    fn headless_start_parses_with_all_defaults() {
+        let cli = parse(&["amux", "headless", "start"]);
+        match cli.command.unwrap() {
+            Command::Headless {
+                action: HeadlessAction::Start { port, workdirs, background },
+            } => {
+                assert_eq!(port, 9876, "default port must be 9876");
+                assert!(workdirs.is_empty(), "default workdirs must be empty");
+                assert!(!background, "background must default to false");
+            }
+            _ => panic!("expected headless start"),
+        }
+    }
+
+    // ── --port ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn headless_start_port_flag_space_form() {
+        let cli = parse(&["amux", "headless", "start", "--port", "8080"]);
+        match cli.command.unwrap() {
+            Command::Headless { action: HeadlessAction::Start { port, .. } } => {
+                assert_eq!(port, 8080);
+            }
+            _ => panic!("expected headless start"),
+        }
+    }
+
+    #[test]
+    fn headless_start_port_flag_eq_form() {
+        let cli = parse(&["amux", "headless", "start", "--port=12345"]);
+        match cli.command.unwrap() {
+            Command::Headless { action: HeadlessAction::Start { port, .. } } => {
+                assert_eq!(port, 12345);
+            }
+            _ => panic!("expected headless start"),
+        }
+    }
+
+    // ── --workdirs ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn headless_start_single_workdir() {
+        let cli = parse(&["amux", "headless", "start", "--workdirs", "/workspace/repo"]);
+        match cli.command.unwrap() {
+            Command::Headless { action: HeadlessAction::Start { workdirs, .. } } => {
+                assert_eq!(workdirs, vec!["/workspace/repo".to_string()]);
+            }
+            _ => panic!("expected headless start"),
+        }
+    }
+
+    #[test]
+    fn headless_start_multiple_workdirs_via_repeated_flag() {
+        let cli = parse(&[
+            "amux", "headless", "start",
+            "--workdirs", "/workspace/a",
+            "--workdirs", "/workspace/b",
+            "--workdirs", "/workspace/c",
+        ]);
+        match cli.command.unwrap() {
+            Command::Headless { action: HeadlessAction::Start { workdirs, .. } } => {
+                assert_eq!(
+                    workdirs,
+                    vec![
+                        "/workspace/a".to_string(),
+                        "/workspace/b".to_string(),
+                        "/workspace/c".to_string(),
+                    ]
+                );
+            }
+            _ => panic!("expected headless start"),
+        }
+    }
+
+    // ── --background ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn headless_start_background_flag_sets_true() {
+        let cli = parse(&["amux", "headless", "start", "--background"]);
+        match cli.command.unwrap() {
+            Command::Headless { action: HeadlessAction::Start { background, .. } } => {
+                assert!(background);
+            }
+            _ => panic!("expected headless start"),
+        }
+    }
+
+    #[test]
+    fn headless_start_all_flags_together() {
+        let cli = parse(&[
+            "amux", "headless", "start",
+            "--port", "9999",
+            "--workdirs", "/tmp/work",
+            "--background",
+        ]);
+        match cli.command.unwrap() {
+            Command::Headless {
+                action: HeadlessAction::Start { port, workdirs, background },
+            } => {
+                assert_eq!(port, 9999);
+                assert_eq!(workdirs, vec!["/tmp/work".to_string()]);
+                assert!(background);
+            }
+            _ => panic!("expected headless start"),
+        }
+    }
+
+    // ── headless kill / logs / status ─────────────────────────────────────────
+
+    #[test]
+    fn headless_kill_parses() {
+        let cli = parse(&["amux", "headless", "kill"]);
+        assert!(matches!(
+            cli.command.unwrap(),
+            Command::Headless { action: HeadlessAction::Kill }
+        ));
+    }
+
+    #[test]
+    fn headless_logs_parses() {
+        let cli = parse(&["amux", "headless", "logs"]);
+        assert!(matches!(
+            cli.command.unwrap(),
+            Command::Headless { action: HeadlessAction::Logs }
+        ));
+    }
+
+    #[test]
+    fn headless_status_parses() {
+        let cli = parse(&["amux", "headless", "status"]);
+        assert!(matches!(
+            cli.command.unwrap(),
+            Command::Headless { action: HeadlessAction::Status }
+        ));
+    }
+
+    // ── CLI/spec parity for headless start ───────────────────────────────────
+
+    #[test]
+    fn cli_spec_parity_headless_start() {
+        use crate::commands::spec;
+        use clap::CommandFactory;
+
+        // Navigate to the `headless start` subcommand.
+        let mut cmd = Cli::command();
+        let headless = cmd
+            .find_subcommand_mut("headless")
+            .expect("headless subcommand must exist");
+        let start = headless
+            .find_subcommand("start")
+            .expect("headless start subcommand must exist");
+
+        let cli_flags: Vec<String> = start
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .filter(|&name| name != "help")
+            .map(str::to_string)
+            .collect();
+
+        let spec_flags: Vec<&str> = spec::HEADLESS_START_FLAGS.iter().map(|f| f.name).collect();
+
+        for flag in &cli_flags {
+            assert!(
+                spec_flags.contains(&flag.as_str()),
+                "CLI flag --{flag} is missing from HEADLESS_START_FLAGS in spec.rs"
+            );
+        }
+        for flag in &spec_flags {
+            assert!(
+                cli_flags.contains(&flag.to_string()),
+                "Spec flag --{flag} is missing from the CLI `headless start` subcommand"
+            );
         }
     }
 }

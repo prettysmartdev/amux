@@ -70,6 +70,12 @@ pub static CONFIG_SET_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "global", takes_value: false, value_name: "", hint: "write to global config instead of repo config" },
 ];
 
+pub static HEADLESS_START_FLAGS: &[FlagSpec] = &[
+    FlagSpec { name: "port",       takes_value: true,  value_name: "PORT", hint: "port to listen on (default 9876)" },
+    FlagSpec { name: "workdirs",   takes_value: true,  value_name: "DIR",  hint: "allowlisted working directory (repeatable)" },
+    FlagSpec { name: "background", takes_value: false, value_name: "",     hint: "daemonize via OS process manager" },
+];
+
 /// All top-level amux subcommands, each with their full flag set.
 /// This is the single source of truth consumed by TUI parsing and autocomplete.
 pub static ALL_COMMANDS: &[CommandSpec] = &[
@@ -80,4 +86,5 @@ pub static ALL_COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "status",     flags: STATUS_FLAGS      },
     CommandSpec { name: "specs new",  flags: SPECS_NEW_FLAGS   },
     CommandSpec { name: "specs amend",flags: SPECS_AMEND_FLAGS },
+    CommandSpec { name: "headless start", flags: HEADLESS_START_FLAGS },
 ];
