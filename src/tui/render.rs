@@ -829,6 +829,22 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
         draw_worktree_pre_commit_message(frame, area, uncommitted_files, message, *cursor_pos);
         return;
     }
+    if let Dialog::RemoteSessionPicker { sessions, selected, .. } = &tab.dialog {
+        draw_remote_picker(frame, area, " Select Remote Session ", sessions.iter().map(|s| {
+            format!("{}  ({})", s.id, s.workdir)
+        }).collect(), *selected);
+        return;
+    }
+    if let Dialog::RemoteSavedDirPicker { dirs, selected, .. } = &tab.dialog {
+        draw_remote_picker(frame, area, " Select Working Directory ", dirs.clone(), *selected);
+        return;
+    }
+    if let Dialog::RemoteSessionKillPicker { sessions, selected, .. } = &tab.dialog {
+        draw_remote_picker(frame, area, " Select Session to Kill ", sessions.iter().map(|s| {
+            format!("{}  ({})", s.id, s.workdir)
+        }).collect(), *selected);
+        return;
+    }
 
     let (title, body) = match &tab.dialog {
         Dialog::CloseTabConfirm => (
@@ -1119,6 +1135,17 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
         Dialog::WorktreePreCommitMessage { .. } => return,
         // ConfigShow is handled by the early return above — unreachable here.
         Dialog::ConfigShow { .. } => return,
+        // Remote pickers are handled by early returns above — unreachable here.
+        Dialog::RemoteSessionPicker { .. } => return,
+        Dialog::RemoteSavedDirPicker { .. } => return,
+        Dialog::RemoteSessionKillPicker { .. } => return,
+        Dialog::RemoteSaveDirConfirm { dir, .. } => (
+            " Save Directory? ",
+            format!(
+                "  Save '{}' to remote.savedDirs for future use?\n\n  [y]  Yes\n  [n/Esc]  No  ",
+                dir
+            ),
+        ),
     };
 
     let popup_width = 72u16.min(area.width.saturating_sub(4));
@@ -1711,6 +1738,80 @@ fn draw_workflow_yolo_countdown(
 
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);
+}
+
+/// Draw a simple list picker dialog (used for remote session/dir pickers).
+fn draw_remote_picker(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    items: Vec<String>,
+    selected: usize,
+) {
+    let max_items = (area.height as usize).saturating_sub(6).max(1);
+    let visible_items = items.len().min(max_items);
+    let popup_height = (visible_items + 4).min(area.height as usize - 2) as u16;
+    let popup_width = 80u16.min(area.width.saturating_sub(4));
+    let popup = centered_rect(popup_width, popup_height, area);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(title)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height < 2 {
+        return;
+    }
+
+    // Show items with a scroll window centered on selected.
+    let scroll_start = if selected >= visible_items {
+        selected - visible_items + 1
+    } else {
+        0
+    };
+
+    let rows: Vec<Row> = items
+        .iter()
+        .enumerate()
+        .skip(scroll_start)
+        .take(visible_items)
+        .map(|(i, item)| {
+            let style = if i == selected {
+                Style::default().fg(Color::Black).bg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![Cell::from(item.as_str()).style(style)])
+        })
+        .collect();
+
+    let hint_area = Rect {
+        x: inner.x,
+        y: inner.y + inner.height.saturating_sub(1),
+        width: inner.width,
+        height: 1,
+    };
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
+
+    let table = Table::new(rows, [Constraint::Percentage(100)])
+        .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    frame.render_widget(table, list_area);
+
+    let hint = Paragraph::new("  ↑/↓ navigate   Enter select   Esc cancel")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, hint_area);
 }
 
 /// Return a centered rectangle of the given size within `area`.

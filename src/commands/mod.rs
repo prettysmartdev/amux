@@ -14,6 +14,7 @@ pub mod output;
 pub mod parity;
 pub mod ready;
 pub mod ready_flow;
+pub mod remote;
 pub mod spec;
 pub mod specs;
 pub mod status;
@@ -113,5 +114,6 @@ pub async fn run(mut command: Command, runtime: Arc<dyn crate::runtime::AgentRun
         },
         Command::Config { action } => config::run(action, runtime).await,
         Command::Headless { action } => headless::run(action, runtime).await,
+        Command::Remote { action } => remote::run(action).await,
     }
 }

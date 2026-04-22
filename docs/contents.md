@@ -17,6 +17,7 @@ A guide to using amux, the containerized multi-agent terminal multiplexer.
 | 06 | [Nanoclaw](06-nanoclaw.md) | Persistent background agents, `claws` commands |
 | 07 | [Configuration](07-configuration.md) | Config files, runtime selection, all fields |
 | 08 | [Headless Mode](08-headless-mode.md) | HTTP server, sessions, commands, CI/automation, auditability |
+| 09 | [Remote Mode](09-remote-mode.md) | `remote run`, `remote session`, live log streaming, TUI pickers |
 | — | [Architecture](architecture.md) | Source layout, modules, design decisions |
 
 ---

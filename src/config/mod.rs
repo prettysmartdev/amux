@@ -72,6 +72,18 @@ impl RepoConfig {
     }
 }
 
+/// Remote connection configuration nested within `GlobalConfig`.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteConfig {
+    /// Default remote headless amux server address (e.g. "http://1.2.3.4:9876").
+    #[serde(rename = "defaultAddr", skip_serializing_if = "Option::is_none")]
+    pub default_addr: Option<String>,
+
+    /// List of working directory paths pre-saved for `remote session start`.
+    #[serde(rename = "savedDirs", skip_serializing_if = "Option::is_none")]
+    pub saved_dirs: Option<Vec<String>>,
+}
+
 /// Headless server configuration nested within `GlobalConfig`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HeadlessConfig {
@@ -109,6 +121,10 @@ pub struct GlobalConfig {
     /// Headless server configuration (work dirs, always-non-interactive).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headless: Option<HeadlessConfig>,
+
+    /// Remote headless amux connection configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteConfig>,
 }
 
 /// Built-in default number of scrollback lines for the container terminal emulator.
@@ -165,6 +181,21 @@ pub fn effective_always_non_interactive() -> bool {
         .headless
         .and_then(|h| h.always_non_interactive)
         .unwrap_or(false)
+}
+
+/// Returns the effective remote default address from global config.
+/// Falls back to `None` when not configured.
+pub fn effective_remote_default_addr() -> Option<String> {
+    load_global_config().ok()?.remote?.default_addr
+}
+
+/// Returns the effective remote saved directories from global config.
+/// Falls back to an empty list when not configured.
+pub fn effective_remote_saved_dirs() -> Vec<String> {
+    load_global_config()
+        .ok()
+        .and_then(|c| c.remote?.saved_dirs)
+        .unwrap_or_default()
 }
 
 pub fn repo_config_path(git_root: &Path) -> PathBuf {
@@ -1023,5 +1054,143 @@ mod tests {
             Some(["/srv/repo".to_string()].as_slice())
         );
         assert_eq!(headless.always_non_interactive, Some(true));
+    }
+
+    // ─── RemoteConfig round-trips ─────────────────────────────────────────────
+    //
+    // Tests 0059: verify RemoteConfig JSON round-trips in all field combinations
+    // and document the camelCase key names used in on-disk JSON.
+
+    #[test]
+    fn remote_config_round_trips_both_fields_set() {
+        let original = RemoteConfig {
+            default_addr: Some("http://1.2.3.4:9876".to_string()),
+            saved_dirs: Some(vec!["/workspace/a".to_string(), "/workspace/b".to_string()]),
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        assert!(json.contains("defaultAddr"), "expected camelCase 'defaultAddr'; got: {json}");
+        assert!(json.contains("savedDirs"), "expected camelCase 'savedDirs'; got: {json}");
+        let restored: RemoteConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(restored.default_addr.as_deref(), Some("http://1.2.3.4:9876"));
+        assert_eq!(
+            restored.saved_dirs.as_deref(),
+            Some(["/workspace/a".to_string(), "/workspace/b".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn remote_config_round_trips_only_default_addr() {
+        let original = RemoteConfig {
+            default_addr: Some("http://host:9876".to_string()),
+            saved_dirs: None,
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        assert!(
+            !json.contains("savedDirs"),
+            "absent savedDirs must be omitted (skip_serializing_if); got: {json}"
+        );
+        let restored: RemoteConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(restored.saved_dirs, None);
+    }
+
+    #[test]
+    fn remote_config_round_trips_only_saved_dirs() {
+        let original = RemoteConfig {
+            default_addr: None,
+            saved_dirs: Some(vec!["/srv/proj".to_string()]),
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        assert!(
+            !json.contains("defaultAddr"),
+            "absent defaultAddr must be omitted (skip_serializing_if); got: {json}"
+        );
+        let restored: RemoteConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(restored.default_addr, None);
+    }
+
+    #[test]
+    fn remote_config_round_trips_neither_field_set() {
+        let original = RemoteConfig::default();
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        assert!(
+            !json.contains("defaultAddr"),
+            "absent defaultAddr must not appear in JSON; got: {json}"
+        );
+        assert!(
+            !json.contains("savedDirs"),
+            "absent savedDirs must not appear in JSON; got: {json}"
+        );
+        let restored: RemoteConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn global_config_with_remote_block_serializes_with_camel_case_keys() {
+        let config = GlobalConfig {
+            remote: Some(RemoteConfig {
+                default_addr: Some("http://1.2.3.4:9876".to_string()),
+                saved_dirs: Some(vec!["/workspace/proj".to_string()]),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"remote\""), "expected 'remote' key; got: {json}");
+        assert!(json.contains("defaultAddr"), "expected camelCase 'defaultAddr'; got: {json}");
+        assert!(json.contains("savedDirs"), "expected camelCase 'savedDirs'; got: {json}");
+    }
+
+    #[test]
+    fn global_config_remote_block_absent_when_none() {
+        let config = GlobalConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            !json.contains("remote"),
+            "absent remote must be omitted (skip_serializing_if); got: {json}"
+        );
+    }
+
+    #[test]
+    fn effective_remote_default_addr_returns_none_when_not_configured() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        // SAFETY: test-only env mutation; serialised by ENV_LOCK.
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+        let result = effective_remote_default_addr();
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+        assert_eq!(result, None, "must return None when global config has no remote block");
+    }
+
+    #[test]
+    fn effective_remote_saved_dirs_returns_empty_when_not_configured() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+        let result = effective_remote_saved_dirs();
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+        assert!(
+            result.is_empty(),
+            "must return empty Vec when global config has no remote block; got: {result:?}"
+        );
+    }
+
+    /// Documents that the old flat `remoteDefaultAddr` key (if it ever appeared at the
+    /// top level of `GlobalConfig`) does NOT deserialize into `GlobalConfig.remote`.
+    /// Consistent with the `headlessWorkDirs` breaking-change pattern from WI 0058.
+    #[test]
+    fn remote_config_old_flat_key_is_not_recognized() {
+        let old_json = r#"{"remoteDefaultAddr": "http://1.2.3.4:9876"}"#;
+        let config: GlobalConfig = serde_json::from_str(old_json).unwrap();
+        assert!(
+            config.remote.is_none(),
+            "old flat 'remoteDefaultAddr' key must not deserialize into GlobalConfig.remote; \
+             this documents the intentional breaking-change pattern consistent with WI 0058; \
+             got: {:?}",
+            config.remote
+        );
     }
 }

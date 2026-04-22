@@ -370,7 +370,8 @@ fn autocomplete_returns_matching_subcommands() {
     assert_eq!(sug, vec!["implement"]);
 
     let sug = autocomplete_suggestions("r");
-    assert_eq!(sug, vec!["ready"]);
+    assert!(sug.contains(&"ready".to_string()), "expected 'ready' in suggestions for 'r'");
+    assert!(sug.contains(&"remote".to_string()), "expected 'remote' in suggestions for 'r'");
 
     let sug = autocomplete_suggestions("init ");
     assert!(sug.iter().any(|s: &String| s.contains("--agent")));

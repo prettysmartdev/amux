@@ -276,7 +276,8 @@ http://localhost:<port>/v1
 | `DELETE` | `/v1/sessions/:id` | Close a session |
 | `POST` | `/v1/commands` | Submit a subcommand to a session |
 | `GET` | `/v1/commands/:id` | Get command status and metadata |
-| `GET` | `/v1/commands/:id/logs` | Get captured command output |
+| `GET` | `/v1/commands/:id/logs` | Get captured command output (snapshot) |
+| `GET` | `/v1/commands/:id/logs/stream` | Stream live command output via Server-Sent Events |
 | `GET` | `/v1/status` | Server health (uptime, active sessions, running commands) |
 
 ---
@@ -362,7 +363,7 @@ curl -s -X POST http://localhost:9876/v1/commands \
   -d '{"subcommand":"implement","args":["0057"]}'
 ```
 
-Dispatches a subcommand to the session identified by the `x-amux-session` header. Valid values for `subcommand`: `implement`, `chat`, `ready`, `exec`.
+Dispatches a subcommand to the session identified by the `x-amux-session` header. Valid values for `subcommand`: `implement`, `chat`, `ready`, `exec`, `remote`.
 
 For `exec`, the `args` array starts with the exec action (`prompt` or `workflow`/`wf`), followed by any further arguments:
 
@@ -450,6 +451,48 @@ Returns the captured output for a command. Stdout and stderr are combined into a
 ```
 
 Output is written incrementally as the subprocess produces it — not buffered in memory.
+
+#### Stream command logs (live)
+
+```sh
+curl -s http://localhost:9876/v1/commands/<command-id>/logs/stream
+```
+
+Opens a persistent HTTP response using [Server-Sent Events (SSE)](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events). The server replays any output already written, then tails the log file and sends new lines as they arrive. When the command completes, the server sends a `[amux:done]` sentinel event and closes the response.
+
+**SSE event format:**
+
+```
+data: <line of log output>
+
+data: <another line>
+
+data: [amux:done]
+
+```
+
+Each event is terminated by a blank line (standard SSE format). The sentinel `[amux:done]` signals that the command has finished — no more output will follow.
+
+**Shell example — stream and print until done:**
+
+```sh
+curl -s http://localhost:9876/v1/commands/<command-id>/logs/stream \
+| while IFS= read -r line; do
+    case "$line" in
+      "data: [amux:done]") echo "--- done ---"; break ;;
+      data:\ *)             echo "${line#data: }" ;;
+    esac
+  done
+```
+
+**Behaviour notes:**
+
+- If the command has already completed when you connect, the server replays the full historical log and sends `[amux:done]` immediately — no output is missed.
+- If the client disconnects mid-stream, the command continues executing unaffected.
+- If the log file does not yet exist (the command is `pending`), the server waits up to 10 s for it to appear before returning HTTP 404.
+- The `Content-Type` response header is `text/event-stream`.
+
+`amux remote run --follow` uses this endpoint internally. The cURL form above is equivalent and is useful in scripts where the amux binary is unavailable on the client.
 
 ---
 
@@ -648,7 +691,8 @@ On `SIGTERM` or `SIGINT`, the server finishes all in-flight HTTP responses and a
 | `exec workflow --work-item <N>` where file not found | Error pointing to the expected path pattern; same message as `implement` |
 | `headless.alwaysNonInteractive` true + duplicate `--non-interactive` flag in args | Flag is deduplicated; no error |
 | `exec` dispatched via HTTP API with unknown action (not `prompt`/`workflow`/`wf`) | HTTP 400; response lists valid exec actions |
+| `remote` subcommand dispatched via HTTP API without required args (e.g. no `--session`) | Subprocess exits with a clear error; output appears in the command log |
 
 ---
 
-[← Configuration](07-configuration.md) · [Architecture →](architecture.md)
+[← Configuration](07-configuration.md) · [Remote Mode →](09-remote-mode.md)

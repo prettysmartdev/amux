@@ -990,16 +990,31 @@ No other new dependencies. The summary table uses manual Unicode box-drawing (no
 - The existing `tui_implemented_commands_have_spec_entries` test passes with the new entries.
 
 ### Unit tests — TUI
-- `extract_passthrough_command` correctly strips `--remote-addr`, `--session`, `--follow`, `-f` and their values while preserving inner command flags like `--yolo`.
-- `extract_passthrough_command` handles `--remote-addr=http://...` (equals form).
+- `extract_passthrough_command`: `remote run implement 0001 --yolo` → `["implement", "0001", "--yolo"]`
+  (inner command flag `--yolo` must be preserved, not stripped).
+- `extract_passthrough_command`: `remote run implement 0001 --session abc123 --yolo` →
+  `["implement", "0001", "--yolo"]` (both the `--session` flag AND its value `abc123` must be stripped).
+- `extract_passthrough_command`: `--remote-addr=http://host:9876` (equals form) is stripped correctly.
+- `extract_passthrough_command`: `-f` is stripped from the passthrough (boolean short flag).
+- `extract_passthrough_command`: inner command short flags like `-n` are preserved.
+- `-f` short form of `--follow`: command `remote run implement 0001 -f` produces `follow = true`.
+- `--follow` long form: command `remote run implement 0001 --follow` produces `follow = true`.
+- Neither `-f` nor `--follow` present: `follow = false`.
 - The `SUBCOMMANDS` list includes `"remote"`.
 - `closest_subcommand("remte")` returns `Some("remote")` (typo correction).
 
 ### TUI unit tests — Dialog state
 - `RemoteSessionPicker` with non-empty sessions: `↓` increments `selected_idx` (capped at `sessions.len() - 1`); `↑` decrements (floored at 0); `Enter` returns `RemoteSessionChosen` with the correct `session_id`.
 - Pre-selection: when `last_remote_session_id` is `Some("abc")` and the sessions list contains an entry with `id = "abc"`, `selected_idx` initializes to that entry's index.
+- Pre-selection fallback: when `last_remote_session_id` is `Some("unknown-id")` and no session has that ID, `selected_idx` defaults to 0.
 - Empty session list: `Enter` and `Esc` both close the modal without action.
-- `RemoteSaveDirConfirm`: `y` returns `RemoteSaveDirAccepted`, `n` returns `RemoteSaveDirDeclined`, `Esc` returns `Action::None`.
+- `RemoteSaveDirConfirm`: `y` returns `RemoteSaveDirAccepted`, `n` returns `RemoteSaveDirDeclined`, action proceeds with session start.
+- `RemoteSaveDirConfirm`: `Esc` returns `Action::None` AND clears `pending_command` (session start is cancelled entirely, not just the save).
+- `RemoteSaveDirConfirm`: `Enter` returns `RemoteSaveDirDeclined` (proceed without saving).
+
+### TUI unit tests — launch guards
+- `launch_remote_run` with `session_id = ""` sets `input_error`, clears `pending_command`, does not spawn any task.
+- `launch_remote_session_start` with `dir = ""` sets `input_error`, clears `pending_command`, does not spawn any task.
 
 ### Integration tests — remote run
 - Without `--follow`: spin up the headless server on a random port, create a session, submit a command via the `run_remote_run` code path, poll until done, assert DB state and log file.

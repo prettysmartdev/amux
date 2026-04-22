@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use axum::{
     extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -40,6 +40,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/commands", post(handle_create_command))
         .route("/v1/commands/:id", get(handle_get_command))
         .route("/v1/commands/:id/logs", get(handle_get_command_logs))
+        .route("/v1/commands/:id/logs/stream", get(handle_stream_command_logs))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -120,7 +121,7 @@ fn error_json(msg: impl Into<String>) -> Json<ErrorResponse> {
 // ---------------------------------------------------------------------------
 
 const KNOWN_SUBCOMMANDS: &[&str] = &[
-    "implement", "chat", "ready", "init", "status", "specs", "config", "exec",
+    "implement", "chat", "ready", "init", "status", "specs", "config", "exec", "remote",
 ];
 
 fn is_valid_subcommand(name: &str) -> bool {
@@ -795,6 +796,142 @@ async fn handle_get_command_logs(
     }
 }
 
+/// SSE endpoint: stream the command log file line-by-line as Server-Sent Events.
+/// Sends a `[amux:done]` event when the command finishes (or is already done).
+async fn handle_stream_command_logs(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    use axum::response::sse::{Event, Sse};
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+
+    // Look up the command once to get the log path.
+    let (log_path, is_already_done) = {
+        let db = state.db.lock().await;
+        match db::get_command(&db, &id) {
+            Ok(Some(c)) => {
+                let done = matches!(c.status.as_str(), "done" | "error");
+                (c.log_path, done)
+            }
+            Ok(None) => {
+                return (StatusCode::NOT_FOUND, error_json(format!("Command '{}' not found", id)))
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to get command for SSE stream");
+                return (StatusCode::INTERNAL_SERVER_ERROR, error_json("Failed to get command"))
+                    .into_response();
+            }
+        }
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
+    let stream = UnboundedReceiverStream::new(rx);
+
+    if is_already_done {
+        // Command already finished: stream the existing log content then send sentinel.
+        tokio::spawn(async move {
+            match tokio::fs::read_to_string(&log_path).await {
+                Ok(content) => {
+                    for line in content.lines() {
+                        if tx.send(Ok(Event::default().data(line.to_string()))).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to read completed log for SSE");
+                }
+            }
+            let _ = tx.send(Ok(Event::default().data("[amux:done]")));
+        });
+    } else {
+        // Command still running: tail the log file, poll until command completes.
+        let state_clone = Arc::clone(&state);
+        let command_id = id.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+
+            // The log file may not exist yet if the command was just submitted and
+            // the executor task hasn't created it yet. Poll every 1s for up to 10s
+            // before giving up with a 404-style error sentinel.
+            const LOG_WAIT_SECS: u64 = 10;
+            let mut file = {
+                let mut waited = 0u64;
+                loop {
+                    match tokio::fs::File::open(&log_path).await {
+                        Ok(f) => break f,
+                        Err(_) if waited < LOG_WAIT_SECS => {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            waited += 1;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                path = %log_path,
+                                waited_secs = waited,
+                                "Log file did not appear within {}s; aborting SSE stream",
+                                LOG_WAIT_SECS,
+                            );
+                            let _ = tx.send(Ok(Event::default().data("[amux:done]")));
+                            return;
+                        }
+                    }
+                }
+            };
+
+            let mut leftover = String::new();
+
+            loop {
+                let mut chunk = vec![0u8; 4096];
+                match file.read(&mut chunk).await {
+                    Ok(0) => {
+                        // No new data: check if the command is now done.
+                        let done = {
+                            let db = state_clone.db.lock().await;
+                            match db::get_command(&db, &command_id) {
+                                Ok(Some(c)) => matches!(c.status.as_str(), "done" | "error"),
+                                _ => true,
+                            }
+                        };
+                        if done {
+                            // Flush remaining partial line if any.
+                            if !leftover.is_empty() {
+                                let line = std::mem::take(&mut leftover);
+                                if tx.send(Ok(Event::default().data(line))).is_err() {
+                                    return;
+                                }
+                            }
+                            let _ = tx.send(Ok(Event::default().data("[amux:done]")));
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    Ok(n) => {
+                        let text = String::from_utf8_lossy(&chunk[..n]);
+                        leftover.push_str(&text);
+                        // Emit complete lines.
+                        while let Some(pos) = leftover.find('\n') {
+                            let line = leftover[..pos].to_string();
+                            leftover = leftover[pos + 1..].to_string();
+                            if tx.send(Ok(Event::default().data(line))).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "SSE log read error");
+                        let _ = tx.send(Ok(Event::default().data("[amux:done]")));
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    Sse::new(stream).into_response()
+}
+
 /// Attempt to discover the PID of the process holding the given TCP port.
 /// Best-effort: returns `None` if the lookup is unsupported or fails.
 fn find_port_owner(port: u16) -> Option<u32> {
@@ -994,6 +1131,19 @@ mod tests {
         assert!(
             !is_valid_subcommand("exec prompt"),
             "two-level path must be rejected; the server splits on subcommand + args"
+        );
+    }
+
+    // ── remote subcommand (work item 0059) ───────────────────────────────────
+
+    /// "remote" was added to KNOWN_SUBCOMMANDS so that headless clients can
+    /// dispatch `remote run` and `remote session start/kill` requests.
+    #[test]
+    fn is_valid_subcommand_remote_is_accepted() {
+        assert!(
+            is_valid_subcommand("remote"),
+            "'remote' must be in KNOWN_SUBCOMMANDS so headless clients can dispatch \
+             remote commands; current list: {KNOWN_SUBCOMMANDS:?}"
         );
     }
 }

@@ -101,6 +101,20 @@ pub static HEADLESS_START_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "background", takes_value: false, value_name: "",     hint: "daemonize via OS process manager" },
 ];
 
+pub static REMOTE_RUN_FLAGS: &[FlagSpec] = &[
+    FlagSpec { name: "remote-addr", takes_value: true,  value_name: "URL", hint: "remote headless amux host address" },
+    FlagSpec { name: "session",     takes_value: true,  value_name: "ID",  hint: "session ID on the remote host" },
+    FlagSpec { name: "follow",      takes_value: false, value_name: "",    hint: "stream logs until command completes" },
+];
+
+pub static REMOTE_SESSION_START_FLAGS: &[FlagSpec] = &[
+    FlagSpec { name: "remote-addr", takes_value: true, value_name: "URL", hint: "remote headless amux host address" },
+];
+
+pub static REMOTE_SESSION_KILL_FLAGS: &[FlagSpec] = &[
+    FlagSpec { name: "remote-addr", takes_value: true, value_name: "URL", hint: "remote headless amux host address" },
+];
+
 /// All top-level amux subcommands, each with their full flag set.
 /// This is the single source of truth consumed by TUI parsing and autocomplete.
 pub static ALL_COMMANDS: &[CommandSpec] = &[
@@ -114,4 +128,7 @@ pub static ALL_COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "specs new",  flags: SPECS_NEW_FLAGS   },
     CommandSpec { name: "specs amend",flags: SPECS_AMEND_FLAGS },
     CommandSpec { name: "headless start", flags: HEADLESS_START_FLAGS },
+    CommandSpec { name: "remote run",           flags: REMOTE_RUN_FLAGS           },
+    CommandSpec { name: "remote session start", flags: REMOTE_SESSION_START_FLAGS },
+    CommandSpec { name: "remote session kill",  flags: REMOTE_SESSION_KILL_FLAGS  },
 ];

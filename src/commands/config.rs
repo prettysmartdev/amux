@@ -95,6 +95,20 @@ pub static ALL_FIELDS: &[ConfigFieldDef] = &[
         settable: true,
     },
     ConfigFieldDef {
+        key: "remote.defaultAddr",
+        scope: FieldScope::GlobalOnly,
+        hint: "URL of the remote headless amux host (e.g. http://1.2.3.4:9876)",
+        builtin_default: "(not set)",
+        settable: true,
+    },
+    ConfigFieldDef {
+        key: "remote.savedDirs",
+        scope: FieldScope::GlobalOnly,
+        hint: "comma-separated absolute paths; empty string clears",
+        builtin_default: "(empty)",
+        settable: true,
+    },
+    ConfigFieldDef {
         key: "work_items.dir",
         scope: FieldScope::RepoOnly,
         hint: "Path to the work items directory (relative to repo root)",
@@ -197,6 +211,18 @@ pub fn global_display(field: &ConfigFieldDef, global: &GlobalConfig) -> String {
                 .as_ref()
                 .and_then(|h| h.always_non_interactive)
                 .map(|v| v.to_string())
+                .unwrap_or_else(|| format!("{} (built-in)", field.builtin_default)),
+            "remote.defaultAddr" => global
+                .remote
+                .as_ref()
+                .and_then(|r| r.default_addr.as_deref())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| format!("{} (built-in)", field.builtin_default)),
+            "remote.savedDirs" => global
+                .remote
+                .as_ref()
+                .and_then(|r| r.saved_dirs.as_ref())
+                .map(|v| format_vec(v))
                 .unwrap_or_else(|| format!("{} (built-in)", field.builtin_default)),
             _ => "N/A".to_string(),
         },
@@ -356,6 +382,18 @@ pub fn effective_display(
             .and_then(|h| h.always_non_interactive)
             .map(|v| v.to_string())
             .unwrap_or_else(|| "false".to_string()),
+        "remote.defaultAddr" => global
+            .remote
+            .as_ref()
+            .and_then(|r| r.default_addr.as_deref())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(not set)".to_string()),
+        "remote.savedDirs" => global
+            .remote
+            .as_ref()
+            .and_then(|r| r.saved_dirs.as_ref())
+            .map(|v| format_vec(v))
+            .unwrap_or_else(|| "(empty)".to_string()),
         _ => "?".to_string(),
     }
 }
@@ -469,6 +507,12 @@ pub fn validate_value(field: &ConfigFieldDef, value: &str) -> Result<()> {
                 );
             }
         }
+        "remote.defaultAddr" => {
+            // Any URL string is valid; empty string clears.
+        }
+        "remote.savedDirs" => {
+            // Comma-separated absolute paths; empty string clears.
+        }
         _ => {}
     }
     Ok(())
@@ -522,6 +566,14 @@ pub fn apply_to_global(field: &ConfigFieldDef, value: &str, global: &mut GlobalC
         "headless.alwaysNonInteractive" => {
             let headless = global.headless.get_or_insert_with(HeadlessConfig::default);
             headless.always_non_interactive = Some(value.trim() == "true");
+        }
+        "remote.defaultAddr" => {
+            let remote = global.remote.get_or_insert_with(crate::config::RemoteConfig::default);
+            remote.default_addr = if value.trim().is_empty() { None } else { Some(value.to_string()) };
+        }
+        "remote.savedDirs" => {
+            let remote = global.remote.get_or_insert_with(crate::config::RemoteConfig::default);
+            remote.saved_dirs = Some(parse_vec_value(value));
         }
         _ => {}
     }
@@ -951,6 +1003,9 @@ mod tests {
             // headless fields added in work item 0058
             "headless.workDirs",
             "headless.alwaysNonInteractive",
+            // remote fields added in work item 0059
+            "remote.defaultAddr",
+            "remote.savedDirs",
         ] {
             assert!(find_field(key).is_some(), "expected Some for key '{}'", key);
         }
@@ -1525,6 +1580,171 @@ mod tests {
             err.to_string().contains("outside the repository root"),
             "expected path escape rejection, got: {}",
             err
+        );
+    }
+
+    // ─── remote.* fields (work item 0059) ─────────────────────────────────────
+
+    #[test]
+    fn find_field_returns_some_for_remote_default_addr() {
+        assert!(find_field("remote.defaultAddr").is_some());
+    }
+
+    #[test]
+    fn find_field_returns_some_for_remote_saved_dirs() {
+        assert!(find_field("remote.savedDirs").is_some());
+    }
+
+    #[test]
+    fn global_display_remote_default_addr_shows_builtin_when_absent() {
+        let field = find_field("remote.defaultAddr").unwrap();
+        let global = GlobalConfig::default();
+        let result = global_display(field, &global);
+        // When not set, global_display appends " (built-in)" using builtin_default.
+        assert!(
+            result.contains("not set") || result.contains("built-in"),
+            "expected '(not set) (built-in)' for absent remote.defaultAddr; got: {result}"
+        );
+    }
+
+    #[test]
+    fn global_display_remote_default_addr_shows_value_when_set() {
+        let field = find_field("remote.defaultAddr").unwrap();
+        let global = GlobalConfig {
+            remote: Some(crate::config::RemoteConfig {
+                default_addr: Some("http://1.2.3.4:9876".to_string()),
+                saved_dirs: None,
+            }),
+            ..Default::default()
+        };
+        let result = global_display(field, &global);
+        assert_eq!(result, "http://1.2.3.4:9876");
+    }
+
+    #[test]
+    fn global_display_remote_saved_dirs_shows_builtin_when_absent() {
+        let field = find_field("remote.savedDirs").unwrap();
+        let global = GlobalConfig::default();
+        let result = global_display(field, &global);
+        assert!(
+            result.contains("empty") || result.contains("built-in"),
+            "expected '(empty) (built-in)' for absent remote.savedDirs; got: {result}"
+        );
+    }
+
+    #[test]
+    fn global_display_remote_saved_dirs_shows_formatted_value_when_set() {
+        let field = find_field("remote.savedDirs").unwrap();
+        let global = GlobalConfig {
+            remote: Some(crate::config::RemoteConfig {
+                default_addr: None,
+                saved_dirs: Some(vec!["/workspace/a".to_string(), "/workspace/b".to_string()]),
+            }),
+            ..Default::default()
+        };
+        let result = global_display(field, &global);
+        assert!(result.contains("/workspace/a"), "expected dirs in display; got: {result}");
+        assert!(result.contains("/workspace/b"), "expected dirs in display; got: {result}");
+    }
+
+    #[test]
+    fn effective_display_remote_default_addr_returns_not_set_when_absent() {
+        let field = find_field("remote.defaultAddr").unwrap();
+        let global = GlobalConfig::default();
+        assert_eq!(effective_display(field, &global, None), "(not set)");
+    }
+
+    #[test]
+    fn effective_display_remote_saved_dirs_returns_empty_when_absent() {
+        let field = find_field("remote.savedDirs").unwrap();
+        let global = GlobalConfig::default();
+        assert_eq!(effective_display(field, &global, None), "(empty)");
+    }
+
+    #[test]
+    fn effective_display_remote_default_addr_returns_value_when_set() {
+        let field = find_field("remote.defaultAddr").unwrap();
+        let global = GlobalConfig {
+            remote: Some(crate::config::RemoteConfig {
+                default_addr: Some("http://1.2.3.4:9876".to_string()),
+                saved_dirs: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(effective_display(field, &global, None), "http://1.2.3.4:9876");
+    }
+
+    #[test]
+    fn set_remote_default_addr_round_trips_through_global_config() {
+        use tempfile::TempDir;
+        let _guard = GLOBAL_ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        // SAFETY: test-only env mutation; serialised by GLOBAL_ENV_LOCK.
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+
+        set("remote.defaultAddr", "http://1.2.3.4:9876", true, None).unwrap();
+        let loaded = crate::config::load_global_config().unwrap();
+
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+
+        assert_eq!(
+            loaded.remote.as_ref().and_then(|r| r.default_addr.as_deref()),
+            Some("http://1.2.3.4:9876"),
+            "remote.defaultAddr must persist to disk"
+        );
+    }
+
+    #[test]
+    fn set_remote_saved_dirs_comma_separated_persists_as_json_array() {
+        use tempfile::TempDir;
+        let _guard = GLOBAL_ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+
+        set("remote.savedDirs", "/workspace/a,/workspace/b", true, None).unwrap();
+        let loaded = crate::config::load_global_config().unwrap();
+
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+
+        assert_eq!(
+            loaded.remote.as_ref().and_then(|r| r.saved_dirs.as_deref()),
+            Some(["/workspace/a".to_string(), "/workspace/b".to_string()].as_slice()),
+            "comma-separated paths must be stored as a JSON array"
+        );
+    }
+
+    #[test]
+    fn set_remote_default_addr_without_global_flag_fails() {
+        let err = set("remote.defaultAddr", "http://1.2.3.4:9876", false, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("global-only") || msg.contains("--global"),
+            "expected global-only scope error; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn set_remote_saved_dirs_without_global_flag_fails() {
+        let err = set("remote.savedDirs", "/workspace", false, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("global-only") || msg.contains("--global"),
+            "expected global-only scope error; got: {msg}"
+        );
+    }
+
+    /// Verify that the `config show` table includes rows for both remote fields.
+    /// Tests the field definitions in ALL_FIELDS rather than capturing stdout.
+    #[test]
+    fn all_fields_includes_remote_default_addr_and_saved_dirs() {
+        let keys: Vec<&str> = ALL_FIELDS.iter().map(|f| f.key).collect();
+        assert!(
+            keys.contains(&"remote.defaultAddr"),
+            "ALL_FIELDS must include remote.defaultAddr for config show; got: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"remote.savedDirs"),
+            "ALL_FIELDS must include remote.savedDirs for config show; got: {keys:?}"
         );
     }
 }

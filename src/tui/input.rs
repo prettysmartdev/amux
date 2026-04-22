@@ -1,5 +1,5 @@
 use crate::commands::new::WorkItemKind;
-use crate::tui::state::{App, TabState, ConfigDialogState, ContainerWindowState, Dialog, ExecutionPhase, Focus};
+use crate::tui::state::{App, TabState, ConfigDialogState, ContainerWindowState, Dialog, ExecutionPhase, Focus, PendingCommand};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 use strsim::levenshtein;
@@ -135,6 +135,16 @@ pub enum Action {
         run_audit: bool,
         work_items: Option<crate::config::WorkItemsConfig>,
     },
+    /// Remote: user selected a session from the picker.
+    RemoteSessionChosen { session_id: String },
+    /// Remote: user selected a saved directory from the picker.
+    RemoteSavedDirChosen { dir: String },
+    /// Remote: user accepted saving the used directory.
+    RemoteSaveDirAccepted,
+    /// Remote: user declined saving the used directory.
+    RemoteSaveDirDeclined,
+    /// Remote: user selected a session to kill from the kill picker.
+    RemoteSessionKillChosen { session_id: String },
 }
 
 /// Dispatch a key press to the correct handler based on application state.
@@ -267,6 +277,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         Dialog::InitWorkItemsTemplateInput { agent, aspec, replace_aspec, run_audit, dir, input } => {
             return handle_init_work_items_template_input(app.active_tab_mut(), key, agent, aspec, replace_aspec, run_audit, dir, input)
+        }
+        Dialog::RemoteSessionPicker { sessions, selected, remote_addr, command, follow } => {
+            return handle_remote_session_picker(app.active_tab_mut(), key, sessions, selected, remote_addr, command, follow)
+        }
+        Dialog::RemoteSavedDirPicker { dirs, selected, remote_addr } => {
+            return handle_remote_saved_dir_picker(app.active_tab_mut(), key, dirs, selected, remote_addr)
+        }
+        Dialog::RemoteSaveDirConfirm { dir, remote_addr } => {
+            return handle_remote_save_dir_confirm(app.active_tab_mut(), key, dir, remote_addr)
+        }
+        Dialog::RemoteSessionKillPicker { sessions, selected, remote_addr } => {
+            return handle_remote_session_kill_picker(app.active_tab_mut(), key, sessions, selected, remote_addr)
         }
         Dialog::None => {}
     }
@@ -1508,9 +1530,158 @@ fn handle_worktree_pre_commit_message(
     }
 }
 
+// --- Remote dialog handlers ---
+
+fn handle_remote_session_picker(
+    tab: &mut TabState,
+    key: KeyEvent,
+    sessions: Vec<crate::commands::remote::RemoteSessionEntry>,
+    mut selected: usize,
+    remote_addr: String,
+    command: Vec<String>,
+    follow: bool,
+) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::None
+        }
+        KeyCode::Up => {
+            if selected > 0 { selected -= 1; }
+            tab.dialog = Dialog::RemoteSessionPicker { sessions, selected, remote_addr, command, follow };
+            Action::None
+        }
+        KeyCode::Down => {
+            if selected + 1 < sessions.len() { selected += 1; }
+            tab.dialog = Dialog::RemoteSessionPicker { sessions, selected, remote_addr, command, follow };
+            Action::None
+        }
+        KeyCode::Enter => {
+            if let Some(s) = sessions.get(selected) {
+                let session_id = s.id.clone();
+                tab.dialog = Dialog::None;
+                Action::RemoteSessionChosen { session_id }
+            } else {
+                tab.dialog = Dialog::None;
+                Action::None
+            }
+        }
+        _ => {
+            tab.dialog = Dialog::RemoteSessionPicker { sessions, selected, remote_addr, command, follow };
+            Action::None
+        }
+    }
+}
+
+fn handle_remote_saved_dir_picker(
+    tab: &mut TabState,
+    key: KeyEvent,
+    dirs: Vec<String>,
+    mut selected: usize,
+    remote_addr: String,
+) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::None
+        }
+        KeyCode::Up => {
+            if selected > 0 { selected -= 1; }
+            tab.dialog = Dialog::RemoteSavedDirPicker { dirs, selected, remote_addr };
+            Action::None
+        }
+        KeyCode::Down => {
+            if selected + 1 < dirs.len() { selected += 1; }
+            tab.dialog = Dialog::RemoteSavedDirPicker { dirs, selected, remote_addr };
+            Action::None
+        }
+        KeyCode::Enter => {
+            if let Some(dir) = dirs.get(selected) {
+                let dir = dir.clone();
+                tab.dialog = Dialog::None;
+                Action::RemoteSavedDirChosen { dir }
+            } else {
+                tab.dialog = Dialog::None;
+                Action::None
+            }
+        }
+        _ => {
+            tab.dialog = Dialog::RemoteSavedDirPicker { dirs, selected, remote_addr };
+            Action::None
+        }
+    }
+}
+
+fn handle_remote_save_dir_confirm(
+    tab: &mut TabState,
+    key: KeyEvent,
+    dir: String,
+    remote_addr: String,
+) -> Action {
+    let _ = dir;
+    let _ = remote_addr;
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            tab.dialog = Dialog::None;
+            Action::RemoteSaveDirAccepted
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter => {
+            // Decline saving the directory but proceed with the remote session start.
+            tab.dialog = Dialog::None;
+            Action::RemoteSaveDirDeclined
+        }
+        KeyCode::Esc => {
+            // Cancel entirely: close the dialog and abort the pending session start.
+            tab.dialog = Dialog::None;
+            tab.pending_command = PendingCommand::None;
+            Action::None
+        }
+        _ => Action::None
+    }
+}
+
+fn handle_remote_session_kill_picker(
+    tab: &mut TabState,
+    key: KeyEvent,
+    sessions: Vec<crate::commands::remote::RemoteSessionEntry>,
+    mut selected: usize,
+    remote_addr: String,
+) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            tab.dialog = Dialog::None;
+            Action::None
+        }
+        KeyCode::Up => {
+            if selected > 0 { selected -= 1; }
+            tab.dialog = Dialog::RemoteSessionKillPicker { sessions, selected, remote_addr };
+            Action::None
+        }
+        KeyCode::Down => {
+            if selected + 1 < sessions.len() { selected += 1; }
+            tab.dialog = Dialog::RemoteSessionKillPicker { sessions, selected, remote_addr };
+            Action::None
+        }
+        KeyCode::Enter => {
+            if let Some(s) = sessions.get(selected) {
+                let session_id = s.id.clone();
+                tab.dialog = Dialog::None;
+                Action::RemoteSessionKillChosen { session_id }
+            } else {
+                tab.dialog = Dialog::None;
+                Action::None
+            }
+        }
+        _ => {
+            tab.dialog = Dialog::RemoteSessionKillPicker { sessions, selected, remote_addr };
+            Action::None
+        }
+    }
+}
+
 // --- Autocomplete ---
 
-const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "exec", "specs", "claws", "status", "config"];
+const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "exec", "specs", "claws", "status", "config", "remote"];
 
 /// Return suggestions for the current input string.
 pub fn autocomplete_suggestions(input: &str) -> Vec<String> {
@@ -2859,6 +3030,271 @@ mod tests {
             app.active_tab().dialog,
             Dialog::QuitConfirm,
             "Ctrl-, should not affect other active dialogs"
+        );
+    }
+
+    // ── SUBCOMMANDS / autocomplete (work item 0059) ──────────────────────────
+
+    #[test]
+    fn subcommands_list_includes_remote() {
+        assert!(
+            SUBCOMMANDS.contains(&"remote"),
+            "SUBCOMMANDS must include 'remote'; current list: {SUBCOMMANDS:?}"
+        );
+    }
+
+    #[test]
+    fn closest_subcommand_corrects_remote_typo() {
+        // "remte" is distance 2 from "remote" (well within the threshold of 4).
+        assert_eq!(
+            closest_subcommand("remte"),
+            Some("remote".to_string()),
+            "closest_subcommand should correct 'remte' → 'remote'"
+        );
+    }
+
+    // ── handle_remote_session_picker (work item 0059) ────────────────────────
+
+    fn make_sessions() -> Vec<crate::commands::remote::RemoteSessionEntry> {
+        vec![
+            crate::commands::remote::RemoteSessionEntry {
+                id: "sess-aaa".to_string(),
+                workdir: "/workspace/a".to_string(),
+            },
+            crate::commands::remote::RemoteSessionEntry {
+                id: "sess-bbb".to_string(),
+                workdir: "/workspace/b".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn remote_session_picker_esc_closes_dialog() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        let action = handle_remote_session_picker(
+            &mut tab,
+            key,
+            make_sessions(),
+            0,
+            "http://localhost:9876".to_string(),
+            vec!["status".to_string()],
+            false,
+        );
+        assert!(matches!(action, Action::None), "Esc must return Action::None");
+        assert_eq!(tab.dialog, Dialog::None, "Esc must close the dialog");
+    }
+
+    #[test]
+    fn remote_session_picker_down_increments_selection() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::empty());
+        let action = handle_remote_session_picker(
+            &mut tab,
+            key,
+            make_sessions(),
+            0,
+            "http://localhost:9876".to_string(),
+            vec![],
+            false,
+        );
+        assert!(matches!(action, Action::None));
+        match &tab.dialog {
+            Dialog::RemoteSessionPicker { selected, .. } => {
+                assert_eq!(*selected, 1, "Down must increment selected from 0 to 1");
+            }
+            other => panic!("expected RemoteSessionPicker dialog, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn remote_session_picker_down_does_not_exceed_last() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::empty());
+        // selected = 1 (last index for 2-item list)
+        handle_remote_session_picker(
+            &mut tab,
+            key,
+            make_sessions(),
+            1,
+            "http://localhost:9876".to_string(),
+            vec![],
+            false,
+        );
+        match &tab.dialog {
+            Dialog::RemoteSessionPicker { selected, .. } => {
+                assert_eq!(*selected, 1, "Down at last item must not exceed bounds");
+            }
+            other => panic!("expected RemoteSessionPicker dialog, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn remote_session_picker_up_decrements_selection() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+        handle_remote_session_picker(
+            &mut tab,
+            key,
+            make_sessions(),
+            1,
+            "http://localhost:9876".to_string(),
+            vec![],
+            false,
+        );
+        match &tab.dialog {
+            Dialog::RemoteSessionPicker { selected, .. } => {
+                assert_eq!(*selected, 0, "Up must decrement selected from 1 to 0");
+            }
+            other => panic!("expected RemoteSessionPicker dialog, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn remote_session_picker_up_does_not_underflow() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+        handle_remote_session_picker(
+            &mut tab,
+            key,
+            make_sessions(),
+            0,
+            "http://localhost:9876".to_string(),
+            vec![],
+            false,
+        );
+        match &tab.dialog {
+            Dialog::RemoteSessionPicker { selected, .. } => {
+                assert_eq!(*selected, 0, "Up at index 0 must not underflow");
+            }
+            other => panic!("expected RemoteSessionPicker dialog, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn remote_session_picker_enter_returns_chosen_session() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        let action = handle_remote_session_picker(
+            &mut tab,
+            key,
+            make_sessions(),
+            1,
+            "http://localhost:9876".to_string(),
+            vec!["status".to_string()],
+            false,
+        );
+        match action {
+            Action::RemoteSessionChosen { session_id } => {
+                assert_eq!(session_id, "sess-bbb", "Enter must return the highlighted session id");
+            }
+            _ => panic!("expected Action::RemoteSessionChosen, got something else"),
+        }
+        assert_eq!(tab.dialog, Dialog::None, "Enter must close the dialog");
+    }
+
+    #[test]
+    fn remote_session_picker_enter_on_empty_list_returns_none() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        let action = handle_remote_session_picker(
+            &mut tab,
+            key,
+            vec![],
+            0,
+            "http://localhost:9876".to_string(),
+            vec![],
+            false,
+        );
+        assert!(matches!(action, Action::None), "Enter on empty list must return Action::None");
+        assert_eq!(tab.dialog, Dialog::None);
+    }
+
+    // ── handle_remote_save_dir_confirm (work item 0059) ──────────────────────
+
+    #[test]
+    fn remote_save_dir_confirm_y_returns_accepted() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        let key = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty());
+        let action = handle_remote_save_dir_confirm(
+            &mut tab,
+            key,
+            "/workspace/project".to_string(),
+            "http://localhost:9876".to_string(),
+        );
+        assert!(
+            matches!(action, Action::RemoteSaveDirAccepted),
+            "'y' must return RemoteSaveDirAccepted"
+        );
+        assert_eq!(tab.dialog, Dialog::None, "'y' must close the dialog");
+    }
+
+    #[test]
+    fn remote_save_dir_confirm_uppercase_y_returns_accepted() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        let key = KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::empty());
+        let action = handle_remote_save_dir_confirm(
+            &mut tab,
+            key,
+            "/workspace/project".to_string(),
+            "http://localhost:9876".to_string(),
+        );
+        assert!(matches!(action, Action::RemoteSaveDirAccepted), "'Y' must return RemoteSaveDirAccepted");
+    }
+
+    #[test]
+    fn remote_save_dir_confirm_n_returns_declined() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty());
+        let action = handle_remote_save_dir_confirm(
+            &mut tab,
+            key,
+            "/workspace/project".to_string(),
+            "http://localhost:9876".to_string(),
+        );
+        assert!(
+            matches!(action, Action::RemoteSaveDirDeclined),
+            "'n' must return RemoteSaveDirDeclined"
+        );
+        assert_eq!(tab.dialog, Dialog::None, "'n' must close the dialog");
+    }
+
+    #[test]
+    fn remote_save_dir_confirm_enter_returns_declined() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        let action = handle_remote_save_dir_confirm(
+            &mut tab,
+            key,
+            "/workspace/project".to_string(),
+            "http://localhost:9876".to_string(),
+        );
+        assert!(
+            matches!(action, Action::RemoteSaveDirDeclined),
+            "Enter must return RemoteSaveDirDeclined (proceed without saving)"
+        );
+    }
+
+    #[test]
+    fn remote_save_dir_confirm_esc_cancels_and_clears_pending_command() {
+        let mut tab = crate::tui::state::TabState::new(std::path::PathBuf::new());
+        // Set a pending command so we can verify Esc clears it.
+        tab.pending_command = PendingCommand::RemoteSessionStart {
+            dir: "/workspace/project".to_string(),
+            remote_addr: "http://localhost:9876".to_string(),
+        };
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        let action = handle_remote_save_dir_confirm(
+            &mut tab,
+            key,
+            "/workspace/project".to_string(),
+            "http://localhost:9876".to_string(),
+        );
+        assert!(matches!(action, Action::None), "Esc must return Action::None (abort entirely)");
+        assert_eq!(tab.dialog, Dialog::None, "Esc must close the dialog");
+        assert!(
+            matches!(tab.pending_command, PendingCommand::None),
+            "Esc must clear pending_command to abort the session start"
         );
     }
 }

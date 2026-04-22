@@ -187,6 +187,12 @@ pub enum Command {
         #[command(subcommand)]
         action: HeadlessAction,
     },
+
+    /// Connect to a remote headless amux instance and execute commands.
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
+    },
 }
 
 /// Subcommands for `amux config`.
@@ -365,6 +371,69 @@ pub enum HeadlessAction {
 
     /// Show headless server status (PID, port, sessions, uptime).
     Status,
+}
+
+/// Subcommands for `amux remote`.
+#[derive(Subcommand)]
+pub enum RemoteAction {
+    /// Execute a command on the remote headless amux host.
+    Run {
+        /// The amux subcommand and arguments to execute on the remote host
+        /// (e.g. "execute prompt hello --yolo").
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+
+        /// Address of the remote headless amux host (e.g. http://1.2.3.4:9876).
+        /// Overrides AMUX_REMOTE_ADDR env var and remote.defaultAddr config.
+        #[arg(long)]
+        remote_addr: Option<String>,
+
+        /// Session ID to run the command in. Required in CLI/headless modes.
+        /// In TUI mode, if omitted, shows an interactive session picker.
+        /// Overrides AMUX_REMOTE_SESSION env var.
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Stream logs from the remote host until the command completes,
+        /// then print a summary table.
+        #[arg(long, short = 'f')]
+        follow: bool,
+    },
+
+    /// Manage sessions on the remote headless amux host.
+    Session {
+        #[command(subcommand)]
+        action: RemoteSessionAction,
+    },
+}
+
+/// Subcommands for `amux remote session`.
+#[derive(Subcommand)]
+pub enum RemoteSessionAction {
+    /// Start a new session on the remote host for the given directory.
+    Start {
+        /// Working directory to use for the new session (absolute path on remote host).
+        /// Required in CLI/headless modes.
+        /// In TUI mode, if omitted, shows an interactive selection from remote.savedDirs.
+        dir: Option<String>,
+
+        /// Address of the remote headless amux host.
+        /// Overrides AMUX_REMOTE_ADDR env var and remote.defaultAddr config.
+        #[arg(long)]
+        remote_addr: Option<String>,
+    },
+
+    /// Kill a session on the remote host.
+    Kill {
+        /// Session ID to kill. Required in CLI/headless modes.
+        /// In TUI mode, if omitted, shows an interactive session picker.
+        session_id: Option<String>,
+
+        /// Address of the remote headless amux host.
+        /// Overrides AMUX_REMOTE_ADDR env var and remote.defaultAddr config.
+        #[arg(long)]
+        remote_addr: Option<String>,
+    },
 }
 
 /// Subcommands for `amux claws`.
@@ -1925,6 +1994,227 @@ mod tests {
                     "exec wf alias must accept --work-item flag");
             }
             _ => panic!("expected exec workflow via wf alias"),
+        }
+    }
+
+    // ─── RemoteAction parsing (work item 0059) ──────────────────────────────
+
+    #[test]
+    fn remote_run_parses_command_and_follow_flag() {
+        // --follow must come before the first positional arg because trailing_var_arg = true
+        // causes clap to capture everything after the first positional into `command`.
+        let cli = parse(&["amux", "remote", "run", "--follow", "execute", "prompt", "hello"]);
+        match cli.command.unwrap() {
+            Command::Remote {
+                action: RemoteAction::Run { command, follow, session, remote_addr },
+            } => {
+                assert_eq!(command, vec!["execute", "prompt", "hello"]);
+                assert!(follow, "--follow must be true");
+                assert!(session.is_none());
+                assert!(remote_addr.is_none());
+            }
+            _ => panic!("expected remote run"),
+        }
+    }
+
+    #[test]
+    fn remote_run_short_follow_flag_f_is_accepted() {
+        // -f must come before the first positional arg (trailing_var_arg = true).
+        let cli = parse(&["amux", "remote", "run", "-f", "implement", "0042"]);
+        match cli.command.unwrap() {
+            Command::Remote { action: RemoteAction::Run { follow, command, .. } } => {
+                assert!(follow, "-f must be accepted as short form of --follow");
+                assert_eq!(command, vec!["implement", "0042"]);
+            }
+            _ => panic!("expected remote run"),
+        }
+    }
+
+    #[test]
+    fn remote_run_parses_remote_addr_and_session_flags() {
+        let cli = parse(&[
+            "amux", "remote", "run",
+            "--remote-addr", "http://1.2.3.4:9876",
+            "--session", "abc123",
+            "implement", "0042",
+        ]);
+        match cli.command.unwrap() {
+            Command::Remote {
+                action: RemoteAction::Run { command, remote_addr, session, follow },
+            } => {
+                assert_eq!(command, vec!["implement", "0042"]);
+                assert_eq!(remote_addr.as_deref(), Some("http://1.2.3.4:9876"));
+                assert_eq!(session.as_deref(), Some("abc123"));
+                assert!(!follow);
+            }
+            _ => panic!("expected remote run"),
+        }
+    }
+
+    #[test]
+    fn remote_session_start_parses_with_dir() {
+        let cli = parse(&["amux", "remote", "session", "start", "/workspace/proj"]);
+        match cli.command.unwrap() {
+            Command::Remote {
+                action: RemoteAction::Session {
+                    action: RemoteSessionAction::Start { dir, remote_addr },
+                },
+            } => {
+                assert_eq!(dir.as_deref(), Some("/workspace/proj"));
+                assert!(remote_addr.is_none());
+            }
+            _ => panic!("expected remote session start"),
+        }
+    }
+
+    #[test]
+    fn remote_session_start_parses_with_no_args() {
+        let cli = parse(&["amux", "remote", "session", "start"]);
+        match cli.command.unwrap() {
+            Command::Remote {
+                action: RemoteAction::Session {
+                    action: RemoteSessionAction::Start { dir, .. },
+                },
+            } => {
+                assert!(dir.is_none(), "dir must be None when no arg given; got: {dir:?}");
+            }
+            _ => panic!("expected remote session start"),
+        }
+    }
+
+    #[test]
+    fn remote_session_kill_parses_with_no_session_id() {
+        let cli = parse(&["amux", "remote", "session", "kill"]);
+        match cli.command.unwrap() {
+            Command::Remote {
+                action: RemoteAction::Session {
+                    action: RemoteSessionAction::Kill { session_id, .. },
+                },
+            } => {
+                assert!(
+                    session_id.is_none(),
+                    "session_id must be None; got: {session_id:?}"
+                );
+            }
+            _ => panic!("expected remote session kill"),
+        }
+    }
+
+    // ─── CLI/spec parity: remote flags ───────────────────────────────────────
+
+    #[test]
+    fn cli_spec_parity_remote_run() {
+        use crate::commands::spec;
+        use clap::CommandFactory;
+
+        let mut cmd = Cli::command();
+        let remote = cmd
+            .find_subcommand_mut("remote")
+            .expect("remote subcommand must exist in CLI");
+        let run = remote
+            .find_subcommand("run")
+            .expect("remote run subcommand must exist in CLI");
+
+        let cli_flags: Vec<String> = run
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .filter(|&name| name != "help")
+            .map(str::to_string)
+            .collect();
+
+        let spec_flags: Vec<&str> = spec::REMOTE_RUN_FLAGS.iter().map(|f| f.name).collect();
+
+        for flag in &cli_flags {
+            assert!(
+                spec_flags.contains(&flag.as_str()),
+                "CLI flag --{flag} is missing from REMOTE_RUN_FLAGS in spec.rs; spec has: {spec_flags:?}"
+            );
+        }
+        for flag in &spec_flags {
+            assert!(
+                cli_flags.contains(&flag.to_string()),
+                "Spec flag --{flag} is missing from CLI `remote run`; CLI has: {cli_flags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_spec_parity_remote_session_start() {
+        use crate::commands::spec;
+        use clap::CommandFactory;
+
+        let mut cmd = Cli::command();
+        let remote = cmd
+            .find_subcommand_mut("remote")
+            .expect("remote subcommand must exist in CLI");
+        let session = remote
+            .find_subcommand_mut("session")
+            .expect("remote session subcommand must exist in CLI");
+        let start = session
+            .find_subcommand("start")
+            .expect("remote session start must exist in CLI");
+
+        let cli_flags: Vec<String> = start
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .filter(|&name| name != "help")
+            .map(str::to_string)
+            .collect();
+
+        let spec_flags: Vec<&str> =
+            spec::REMOTE_SESSION_START_FLAGS.iter().map(|f| f.name).collect();
+
+        for flag in &cli_flags {
+            assert!(
+                spec_flags.contains(&flag.as_str()),
+                "CLI flag --{flag} is missing from REMOTE_SESSION_START_FLAGS; spec has: {spec_flags:?}"
+            );
+        }
+        for flag in &spec_flags {
+            assert!(
+                cli_flags.contains(&flag.to_string()),
+                "Spec flag --{flag} is missing from CLI `remote session start`; CLI has: {cli_flags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_spec_parity_remote_session_kill() {
+        use crate::commands::spec;
+        use clap::CommandFactory;
+
+        let mut cmd = Cli::command();
+        let remote = cmd
+            .find_subcommand_mut("remote")
+            .expect("remote subcommand must exist in CLI");
+        let session = remote
+            .find_subcommand_mut("session")
+            .expect("remote session subcommand must exist in CLI");
+        let kill = session
+            .find_subcommand("kill")
+            .expect("remote session kill must exist in CLI");
+
+        let cli_flags: Vec<String> = kill
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .filter(|&name| name != "help")
+            .map(str::to_string)
+            .collect();
+
+        let spec_flags: Vec<&str> =
+            spec::REMOTE_SESSION_KILL_FLAGS.iter().map(|f| f.name).collect();
+
+        for flag in &cli_flags {
+            assert!(
+                spec_flags.contains(&flag.as_str()),
+                "CLI flag --{flag} is missing from REMOTE_SESSION_KILL_FLAGS; spec has: {spec_flags:?}"
+            );
+        }
+        for flag in &spec_flags {
+            assert!(
+                cli_flags.contains(&flag.to_string()),
+                "Spec flag --{flag} is missing from CLI `remote session kill`; CLI has: {cli_flags:?}"
+            );
         }
     }
 

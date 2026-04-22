@@ -253,6 +253,44 @@ pub enum Dialog {
         /// `false` when triggered by `chat` or a non-workflow `implement`.
         from_workflow: bool,
     },
+    /// Remote run: show a picker to choose a session from the remote host.
+    RemoteSessionPicker {
+        /// Sessions fetched from the remote host.
+        sessions: Vec<crate::commands::remote::RemoteSessionEntry>,
+        /// Currently highlighted index.
+        selected: usize,
+        /// The resolved remote address.
+        remote_addr: String,
+        /// The passthrough command to run in the selected session.
+        command: Vec<String>,
+        /// Whether to stream logs after submission.
+        follow: bool,
+    },
+    /// Remote session start: show a picker of saved directories.
+    RemoteSavedDirPicker {
+        /// Saved directories from config.
+        dirs: Vec<String>,
+        /// Currently highlighted index.
+        selected: usize,
+        /// The resolved remote address.
+        remote_addr: String,
+    },
+    /// Remote session start: offer to save the newly used directory to config.
+    RemoteSaveDirConfirm {
+        /// The directory that was used.
+        dir: String,
+        /// The remote address (needed to complete the flow).
+        remote_addr: String,
+    },
+    /// Remote session kill: show a picker to choose which session to kill.
+    RemoteSessionKillPicker {
+        /// Sessions fetched from the remote host.
+        sessions: Vec<crate::commands::remote::RemoteSessionEntry>,
+        /// Currently highlighted index.
+        selected: usize,
+        /// The resolved remote address.
+        remote_addr: String,
+    },
 }
 
 /// Tracks which command is waiting for dialog answers (mount scope, auth).
@@ -350,6 +388,23 @@ pub enum PendingCommand {
         mount_ssh: bool,
         yolo: bool,
         auto: bool,
+    },
+    /// remote run: execute a command on the remote host.
+    RemoteRun {
+        remote_addr: String,
+        session_id: String,
+        command: Vec<String>,
+        follow: bool,
+    },
+    /// remote session start: create a new session on the remote host.
+    RemoteSessionStart {
+        remote_addr: String,
+        dir: String,
+    },
+    /// remote session kill: close a session on the remote host.
+    RemoteSessionKill {
+        remote_addr: String,
+        session_id: String,
     },
 }
 
@@ -677,6 +732,10 @@ pub struct TabState {
     /// active tab is no longer stuck due to user activity.
     /// Dialog rendering reads this value rather than any field inside the dialog variant.
     pub yolo_countdown_started_at: Option<Instant>,
+
+    /// Session ID of the last successfully started/used remote session on this tab.
+    /// Used as the default session when `remote run` is invoked without --session.
+    pub last_remote_session_id: Option<String>,
 }
 
 impl TabState {
@@ -756,6 +815,7 @@ impl TabState {
             yolo_countdown_expired: false,
             last_user_activity_time: None,
             yolo_countdown_started_at: None,
+            last_remote_session_id: None,
         }
     }
 

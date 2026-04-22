@@ -37,6 +37,9 @@ pub enum CommandId {
     HeadlessKill,
     HeadlessLogs,
     HeadlessStatus,
+    RemoteRun,
+    RemoteSessionStart,
+    RemoteSessionKill,
 }
 
 impl CommandId {
@@ -59,6 +62,9 @@ impl CommandId {
         CommandId::HeadlessKill,
         CommandId::HeadlessLogs,
         CommandId::HeadlessStatus,
+        CommandId::RemoteRun,
+        CommandId::RemoteSessionStart,
+        CommandId::RemoteSessionKill,
     ];
 }
 
@@ -121,6 +127,9 @@ impl ModeParity for CliMode {
             CommandId::HeadlessKill => ModeSupport::Implemented,
             CommandId::HeadlessLogs => ModeSupport::Implemented,
             CommandId::HeadlessStatus => ModeSupport::Implemented,
+            CommandId::RemoteRun => ModeSupport::Implemented,
+            CommandId::RemoteSessionStart => ModeSupport::Implemented,
+            CommandId::RemoteSessionKill => ModeSupport::Implemented,
         }
     }
 }
@@ -146,6 +155,10 @@ impl ModeParity for TuiMode {
             CommandId::HeadlessKill => ModeSupport::NotApplicable,
             CommandId::HeadlessLogs => ModeSupport::NotApplicable,
             CommandId::HeadlessStatus => ModeSupport::NotApplicable,
+            // Remote commands are available in TUI with interactive pickers.
+            CommandId::RemoteRun => ModeSupport::Implemented,
+            CommandId::RemoteSessionStart => ModeSupport::Implemented,
+            CommandId::RemoteSessionKill => ModeSupport::Implemented,
         }
     }
 }
@@ -172,6 +185,10 @@ impl ModeParity for HeadlessMode {
             CommandId::HeadlessKill => ModeSupport::Implemented,
             CommandId::HeadlessLogs => ModeSupport::Implemented,
             CommandId::HeadlessStatus => ModeSupport::Implemented,
+            // Remote commands are delegated to CLI (subprocess).
+            CommandId::RemoteRun => ModeSupport::DelegatesToCli,
+            CommandId::RemoteSessionStart => ModeSupport::DelegatesToCli,
+            CommandId::RemoteSessionKill => ModeSupport::DelegatesToCli,
         }
     }
 }
@@ -253,6 +270,116 @@ mod tests {
         }
     }
 
+    // ── Explicit remote command checks (work item 0059) ─────────────────────
+
+    #[test]
+    fn command_id_all_includes_remote_run() {
+        assert!(
+            CommandId::ALL.contains(&CommandId::RemoteRun),
+            "CommandId::ALL must contain RemoteRun; current list: {:?}",
+            CommandId::ALL
+        );
+    }
+
+    #[test]
+    fn command_id_all_includes_remote_session_start() {
+        assert!(
+            CommandId::ALL.contains(&CommandId::RemoteSessionStart),
+            "CommandId::ALL must contain RemoteSessionStart; current list: {:?}",
+            CommandId::ALL
+        );
+    }
+
+    #[test]
+    fn command_id_all_includes_remote_session_kill() {
+        assert!(
+            CommandId::ALL.contains(&CommandId::RemoteSessionKill),
+            "CommandId::ALL must contain RemoteSessionKill; current list: {:?}",
+            CommandId::ALL
+        );
+    }
+
+    #[test]
+    fn cli_mode_implements_remote_run() {
+        assert_eq!(
+            CliMode::command_support(CommandId::RemoteRun),
+            ModeSupport::Implemented,
+            "CLI mode must implement RemoteRun directly"
+        );
+    }
+
+    #[test]
+    fn cli_mode_implements_remote_session_start() {
+        assert_eq!(
+            CliMode::command_support(CommandId::RemoteSessionStart),
+            ModeSupport::Implemented,
+            "CLI mode must implement RemoteSessionStart directly"
+        );
+    }
+
+    #[test]
+    fn cli_mode_implements_remote_session_kill() {
+        assert_eq!(
+            CliMode::command_support(CommandId::RemoteSessionKill),
+            ModeSupport::Implemented,
+            "CLI mode must implement RemoteSessionKill directly"
+        );
+    }
+
+    #[test]
+    fn tui_mode_implements_remote_run() {
+        assert_eq!(
+            TuiMode::command_support(CommandId::RemoteRun),
+            ModeSupport::Implemented,
+            "TUI mode must implement RemoteRun (interactive session picker)"
+        );
+    }
+
+    #[test]
+    fn tui_mode_implements_remote_session_start() {
+        assert_eq!(
+            TuiMode::command_support(CommandId::RemoteSessionStart),
+            ModeSupport::Implemented,
+            "TUI mode must implement RemoteSessionStart (interactive dir picker)"
+        );
+    }
+
+    #[test]
+    fn tui_mode_implements_remote_session_kill() {
+        assert_eq!(
+            TuiMode::command_support(CommandId::RemoteSessionKill),
+            ModeSupport::Implemented,
+            "TUI mode must implement RemoteSessionKill (interactive session picker)"
+        );
+    }
+
+    #[test]
+    fn headless_mode_delegates_remote_run_to_cli() {
+        assert_eq!(
+            HeadlessMode::command_support(CommandId::RemoteRun),
+            ModeSupport::DelegatesToCli,
+            "Headless mode must delegate RemoteRun to CLI subprocess"
+        );
+    }
+
+    #[test]
+    fn headless_mode_delegates_remote_session_start_to_cli() {
+        assert_eq!(
+            HeadlessMode::command_support(CommandId::RemoteSessionStart),
+            ModeSupport::DelegatesToCli,
+            "Headless mode must delegate RemoteSessionStart to CLI subprocess"
+        );
+    }
+
+    #[test]
+    fn headless_mode_delegates_remote_session_kill_to_cli() {
+        assert_eq!(
+            HeadlessMode::command_support(CommandId::RemoteSessionKill),
+            ModeSupport::DelegatesToCli,
+            "Headless mode must delegate RemoteSessionKill to CLI subprocess"
+        );
+    }
+
     /// Cross-check: commands the TUI marks as Implemented must also appear in
     /// the TUI's execute_command match arms. We verify this indirectly through
     /// the spec::ALL_COMMANDS table — every TUI-implemented command must have
@@ -275,6 +402,9 @@ mod tests {
             (CommandId::SpecsAmend, &["specs amend"]),
             (CommandId::Status, &["status"]),
             // Config, Claws, and Headless use dialog-based or custom handling.
+            (CommandId::RemoteRun, &["remote run"]),
+            (CommandId::RemoteSessionStart, &["remote session start"]),
+            (CommandId::RemoteSessionKill, &["remote session kill"]),
         ];
 
         for (cmd, names) in expected_spec_names {

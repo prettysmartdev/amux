@@ -679,6 +679,82 @@ async fn handle_action(app: &mut App, action: Action) {
             );
             app.active_tab_mut().pending_command = PendingCommand::None;
         }
+
+        // ── Remote actions ────────────────────────────────────────────────────
+        Action::RemoteSessionChosen { session_id } => {
+            // The picker was shown during `remote run` — now we have a session ID.
+            // Extract the command and follow from the pending RemoteRun state if available,
+            // otherwise look for what was stored in the dialog before it was closed.
+            if let PendingCommand::RemoteRun { remote_addr, command, follow, .. } =
+                app.active_tab().pending_command.clone()
+            {
+                app.active_tab_mut().pending_command = PendingCommand::RemoteRun {
+                    remote_addr,
+                    session_id,
+                    command,
+                    follow,
+                };
+                launch_pending_command(app).await;
+            }
+        }
+
+        Action::RemoteSavedDirChosen { dir } => {
+            // Directory chosen from saved-dirs picker for `remote session start`.
+            // The remote_addr is in the pending command (stored before showing the picker).
+            if let PendingCommand::RemoteSessionStart { remote_addr, .. } =
+                app.active_tab().pending_command.clone()
+            {
+                // Check if dir is not yet saved; if so show save confirm.
+                let saved = crate::config::effective_remote_saved_dirs();
+                if !saved.contains(&dir) {
+                    app.active_tab_mut().pending_command = PendingCommand::RemoteSessionStart {
+                        remote_addr: remote_addr.clone(),
+                        dir: dir.clone(),
+                    };
+                    app.active_tab_mut().dialog = state::Dialog::RemoteSaveDirConfirm {
+                        dir,
+                        remote_addr,
+                    };
+                } else {
+                    app.active_tab_mut().pending_command = PendingCommand::RemoteSessionStart {
+                        remote_addr,
+                        dir,
+                    };
+                    launch_pending_command(app).await;
+                }
+            }
+        }
+
+        Action::RemoteSaveDirAccepted => {
+            // User accepted saving the directory — save it, then launch the pending command.
+            if let PendingCommand::RemoteSessionStart { ref dir, .. } =
+                app.active_tab().pending_command.clone()
+            {
+                let dir_clone = dir.clone();
+                if let Err(e) = crate::commands::remote::save_dir_to_config(&dir_clone) {
+                    app.active_tab_mut().push_output(format!("Warning: failed to save directory: {}", e));
+                }
+            }
+            launch_pending_command(app).await;
+        }
+
+        Action::RemoteSaveDirDeclined => {
+            // User declined saving — just launch the pending command.
+            launch_pending_command(app).await;
+        }
+
+        Action::RemoteSessionKillChosen { session_id } => {
+            // Session chosen from the kill picker.
+            if let PendingCommand::RemoteSessionKill { remote_addr, .. } =
+                app.active_tab().pending_command.clone()
+            {
+                app.active_tab_mut().pending_command = PendingCommand::RemoteSessionKill {
+                    remote_addr,
+                    session_id,
+                };
+                launch_pending_command(app).await;
+            }
+        }
     }
 }
 
@@ -1344,6 +1420,165 @@ async fn execute_command(app: &mut App, cmd: &str) {
             }
         }
 
+        "remote" => {
+            match parts.get(1) {
+                Some(&"run") => {
+                    let run_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "remote run").unwrap();
+                    let flags = flag_parser::parse_flags(&parts, run_spec);
+                    let remote_addr_flag = flag_parser::flag_string(&flags, "remote-addr").map(str::to_string);
+                    let session_flag = flag_parser::flag_string(&flags, "session").map(str::to_string);
+                    // Detect --follow (long form) or -f (short form; flag_parser only handles --).
+                    let follow = flag_parser::flag_bool(&flags, "follow")
+                        || parts.iter().skip(2).any(|s| *s == "-f");
+
+                    // Extract pass-through command: everything after "remote run" that isn't a parsed flag.
+                    let command = extract_passthrough_command(&parts, 2);
+                    if command.is_empty() {
+                        app.active_tab_mut().input_error =
+                            Some("Usage: remote run <subcommand> [args] [--session=ID] [--follow] [--remote-addr=URL]".into());
+                        return;
+                    }
+
+                    let addr = match crate::commands::remote::resolve_remote_addr(remote_addr_flag.as_deref()) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            app.active_tab_mut().input_error = Some(e.to_string());
+                            return;
+                        }
+                    };
+
+                    // Resolve session: flag → env var → last_remote_session_id → picker.
+                    let session_id = crate::commands::remote::resolve_remote_session(session_flag.as_deref())
+                        .or_else(|| app.active_tab().last_remote_session_id.clone());
+
+                    if let Some(sid) = session_id {
+                        app.active_tab_mut().pending_command = PendingCommand::RemoteRun {
+                            remote_addr: addr,
+                            session_id: sid,
+                            command,
+                            follow,
+                        };
+                        launch_pending_command(app).await;
+                    } else {
+                        // No session resolved — store partial pending command then show picker.
+                        // RemoteSessionChosen will fill in the session_id.
+                        app.active_tab_mut().pending_command = PendingCommand::RemoteRun {
+                            remote_addr: addr.clone(),
+                            session_id: String::new(), // filled in by RemoteSessionChosen
+                            command: command.clone(),
+                            follow,
+                        };
+                        fetch_and_show_session_picker(app, addr, command, follow).await;
+                    }
+                }
+                Some(&"session") => {
+                    match parts.get(2) {
+                        Some(&"start") => {
+                            let start_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "remote session start").unwrap();
+                            let flags = flag_parser::parse_flags(&parts, start_spec);
+                            let remote_addr_flag = flag_parser::flag_string(&flags, "remote-addr").map(str::to_string);
+
+                            let addr = match crate::commands::remote::resolve_remote_addr(remote_addr_flag.as_deref()) {
+                                Ok(a) => a,
+                                Err(e) => {
+                                    app.active_tab_mut().input_error = Some(e.to_string());
+                                    return;
+                                }
+                            };
+
+                            // Extract positional dir arg (not a flag).
+                            let dir_arg: Option<String> = parts.iter()
+                                .skip(3)
+                                .find(|s| !s.starts_with("--"))
+                                .map(|s| s.to_string());
+
+                            if let Some(dir) = dir_arg {
+                                // Check if dir is saved; if not, show save-dir confirm.
+                                let saved = crate::config::effective_remote_saved_dirs();
+                                if !saved.contains(&dir) {
+                                    app.active_tab_mut().dialog = state::Dialog::RemoteSaveDirConfirm {
+                                        dir: dir.clone(),
+                                        remote_addr: addr.clone(),
+                                    };
+                                    app.active_tab_mut().pending_command = PendingCommand::RemoteSessionStart {
+                                        remote_addr: addr,
+                                        dir,
+                                    };
+                                } else {
+                                    app.active_tab_mut().pending_command = PendingCommand::RemoteSessionStart {
+                                        remote_addr: addr,
+                                        dir,
+                                    };
+                                    launch_pending_command(app).await;
+                                }
+                            } else {
+                                // No dir provided — show saved dirs picker.
+                                let saved = crate::config::effective_remote_saved_dirs();
+                                if saved.is_empty() {
+                                    app.active_tab_mut().input_error =
+                                        Some("No saved directories. Pass a directory argument or configure remote.savedDirs.".into());
+                                } else {
+                                    // Store a pending command with a placeholder dir so the addr is
+                                    // available when RemoteSavedDirChosen fires.
+                                    app.active_tab_mut().pending_command = PendingCommand::RemoteSessionStart {
+                                        remote_addr: addr.clone(),
+                                        dir: String::new(), // filled in by RemoteSavedDirChosen
+                                    };
+                                    app.active_tab_mut().dialog = state::Dialog::RemoteSavedDirPicker {
+                                        dirs: saved,
+                                        selected: 0,
+                                        remote_addr: addr,
+                                    };
+                                }
+                            }
+                        }
+                        Some(&"kill") => {
+                            let kill_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "remote session kill").unwrap();
+                            let flags = flag_parser::parse_flags(&parts, kill_spec);
+                            let remote_addr_flag = flag_parser::flag_string(&flags, "remote-addr").map(str::to_string);
+
+                            let addr = match crate::commands::remote::resolve_remote_addr(remote_addr_flag.as_deref()) {
+                                Ok(a) => a,
+                                Err(e) => {
+                                    app.active_tab_mut().input_error = Some(e.to_string());
+                                    return;
+                                }
+                            };
+
+                            // Extract positional session ID.
+                            let session_arg: Option<String> = parts.iter()
+                                .skip(3)
+                                .find(|s| !s.starts_with("--"))
+                                .map(|s| s.to_string());
+
+                            if let Some(sid) = session_arg {
+                                app.active_tab_mut().pending_command = PendingCommand::RemoteSessionKill {
+                                    remote_addr: addr,
+                                    session_id: sid,
+                                };
+                                launch_pending_command(app).await;
+                            } else {
+                                // Store partial pending command then show kill picker.
+                                app.active_tab_mut().pending_command = PendingCommand::RemoteSessionKill {
+                                    remote_addr: addr.clone(),
+                                    session_id: String::new(), // filled in by RemoteSessionKillChosen
+                                };
+                                fetch_and_show_session_kill_picker(app, addr).await;
+                            }
+                        }
+                        _ => {
+                            app.active_tab_mut().input_error =
+                                Some("Usage: remote session <start|kill>".into());
+                        }
+                    }
+                }
+                _ => {
+                    app.active_tab_mut().input_error =
+                        Some("Usage: remote <run|session>  e.g. remote run implement 0001, remote session start /path".into());
+                }
+            }
+        }
+
         unknown => {
             let suggestion = input::closest_subcommand(unknown)
                 .map(|s| format!("  Did you mean: {}", s))
@@ -1412,8 +1647,173 @@ async fn launch_pending_command(app: &mut App) {
         PendingCommand::ExecWorkflow { workflow, work_item, agent, model, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto } => {
             launch_exec_workflow(app, workflow, work_item, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto, agent, model).await;
         }
+        PendingCommand::RemoteRun { remote_addr, session_id, command, follow } => {
+            launch_remote_run(app, remote_addr, session_id, command, follow).await;
+        }
+        PendingCommand::RemoteSessionStart { remote_addr, dir } => {
+            launch_remote_session_start(app, remote_addr, dir).await;
+        }
+        PendingCommand::RemoteSessionKill { remote_addr, session_id } => {
+            launch_remote_session_kill(app, remote_addr, session_id).await;
+        }
         PendingCommand::None => {}
     }
+}
+
+/// Extract the pass-through command tokens from the parts slice starting at `offset`.
+///
+/// Only strips `remote run`-specific flags and their values:
+///   - `--remote-addr <val>` (value-taking, both space and `=` forms)
+///   - `--session <val>` (value-taking, both space and `=` forms)
+///   - `--follow` (boolean)
+///   - `-f` (boolean short form)
+///
+/// Every other token — including inner-command flags like `--yolo` or `-n` — is
+/// preserved intact so the forwarded command is identical to what the user typed.
+fn extract_passthrough_command(parts: &[&str], offset: usize) -> Vec<String> {
+    // Flags that take a following value token (space-separated form).
+    const VALUE_FLAGS: &[&str] = &["--remote-addr", "--session"];
+    // Boolean flags that consume only themselves.
+    const BOOL_FLAGS: &[&str] = &["--follow", "-f"];
+
+    let mut result = Vec::new();
+    let mut i = offset;
+    while i < parts.len() {
+        let t = parts[i];
+
+        // Space-separated value flag: skip flag token and its value.
+        if VALUE_FLAGS.contains(&t) {
+            i += 2; // skip both the flag and its value
+            continue;
+        }
+
+        // Boolean flag: skip it.
+        if BOOL_FLAGS.contains(&t) {
+            i += 1;
+            continue;
+        }
+
+        // `--flag=value` form for value-taking flags.
+        if let Some((key, _val)) = t.split_once('=') {
+            if VALUE_FLAGS.contains(&key) {
+                i += 1;
+                continue;
+            }
+        }
+
+        // Everything else (positional args, inner-command flags like --yolo) is kept.
+        result.push(t.to_string());
+        i += 1;
+    }
+    result
+}
+
+/// Fetch sessions from the remote host and show a session picker dialog.
+/// Pre-selects the row matching `last_remote_session_id` if present.
+async fn fetch_and_show_session_picker(app: &mut App, addr: String, command: Vec<String>, follow: bool) {
+    // Read the last-used session ID before any mutable borrow.
+    let last_session_id = app.active_tab().last_remote_session_id.clone();
+    match crate::commands::remote::fetch_sessions(&addr).await {
+        Ok(sessions) if sessions.is_empty() => {
+            app.active_tab_mut().input_error =
+                Some(format!("No active sessions on {}. Use 'remote session start' to create one.", addr));
+        }
+        Ok(sessions) => {
+            // Pre-select the last-used session so the user just presses Enter for the
+            // common case of re-running against the same session.
+            let selected = last_session_id
+                .as_deref()
+                .and_then(|id| sessions.iter().position(|s| s.id == id))
+                .unwrap_or(0);
+            app.active_tab_mut().dialog = state::Dialog::RemoteSessionPicker {
+                sessions,
+                selected,
+                remote_addr: addr,
+                command,
+                follow,
+            };
+        }
+        Err(e) => {
+            app.active_tab_mut().input_error = Some(format!("Failed to fetch sessions: {}", e));
+        }
+    }
+}
+
+/// Fetch sessions from the remote host and show a session kill picker dialog.
+async fn fetch_and_show_session_kill_picker(app: &mut App, addr: String) {
+    match crate::commands::remote::fetch_sessions(&addr).await {
+        Ok(sessions) if sessions.is_empty() => {
+            app.active_tab_mut().input_error =
+                Some(format!("No active sessions on {}.", addr));
+        }
+        Ok(sessions) => {
+            app.active_tab_mut().dialog = state::Dialog::RemoteSessionKillPicker {
+                sessions,
+                selected: 0,
+                remote_addr: addr,
+            };
+        }
+        Err(e) => {
+            app.active_tab_mut().input_error = Some(format!("Failed to fetch sessions: {}", e));
+        }
+    }
+}
+
+/// Launch a remote run command as a background text task.
+async fn launch_remote_run(app: &mut App, remote_addr: String, session_id: String, command: Vec<String>, follow: bool) {
+    // Guard: session_id should always be resolved before this point.
+    // An empty string means the picker flow was bypassed incorrectly.
+    if session_id.is_empty() {
+        app.active_tab_mut().input_error =
+            Some("Cannot launch: session ID was not resolved. Please specify --session or select one from the picker.".into());
+        app.active_tab_mut().pending_command = PendingCommand::None;
+        return;
+    }
+    let label = format!("remote run {} (session: {})", command.join(" "), &session_id[..8.min(session_id.len())]);
+    app.active_tab_mut().start_command(label);
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+    app.active_tab_mut().exit_rx = Some(exit_rx);
+    let tx = app.active_tab().output_tx.clone();
+    // Track the session so subsequent `remote run` commands default to it.
+    app.active_tab_mut().last_remote_session_id = Some(session_id.clone());
+    spawn_text_command(tx, exit_tx, move |sink| async move {
+        crate::commands::remote::run_remote_run(&remote_addr, &session_id, &command, follow, &sink).await
+    });
+}
+
+/// Launch a remote session start command as a background text task.
+async fn launch_remote_session_start(app: &mut App, remote_addr: String, dir: String) {
+    // Guard: dir should always be resolved before this point.
+    if dir.is_empty() {
+        app.active_tab_mut().input_error =
+            Some("Cannot launch: working directory was not resolved. Please specify a directory or select one from the picker.".into());
+        app.active_tab_mut().pending_command = PendingCommand::None;
+        return;
+    }
+    let label = format!("remote session start {}", dir);
+    app.active_tab_mut().start_command(label);
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+    app.active_tab_mut().exit_rx = Some(exit_rx);
+    let tx = app.active_tab().output_tx.clone();
+    spawn_text_command(tx, exit_tx, move |sink| async move {
+        let session_id = crate::commands::remote::run_remote_session_start(&remote_addr, &dir).await?;
+        sink.println(format!("Session created: {}", session_id));
+        Ok(())
+    });
+}
+
+/// Launch a remote session kill command as a background text task.
+async fn launch_remote_session_kill(app: &mut App, remote_addr: String, session_id: String) {
+    let label = format!("remote session kill {}", &session_id[..8.min(session_id.len())]);
+    app.active_tab_mut().start_command(label);
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+    app.active_tab_mut().exit_rx = Some(exit_rx);
+    let tx = app.active_tab().output_tx.clone();
+    spawn_text_command(tx, exit_tx, move |sink| async move {
+        crate::commands::remote::run_remote_session_kill(&remote_addr, &session_id).await?;
+        sink.println(format!("Session {} killed.", session_id));
+        Ok(())
+    });
 }
 
 /// Launch the ready flow as a single background task calling `ready_flow::execute()`.
@@ -6883,6 +7283,138 @@ mod tests {
     }
 
     // ── Regression: audit deferred removal ───────────────────────────────────
+
+    // ── extract_passthrough_command (work item 0059) ─────────────────────────
+
+    /// Helper: split a string and call `extract_passthrough_command` at offset 2
+    /// (simulating `["remote", "run", ...rest...]`).
+    fn passthrough(input: &str) -> Vec<String> {
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        extract_passthrough_command(&parts, 2)
+    }
+
+    #[test]
+    fn passthrough_strips_remote_addr_space_form() {
+        // "remote run --remote-addr http://host:9876 status" → ["status"]
+        let result = passthrough("remote run --remote-addr http://host:9876 status");
+        assert_eq!(result, vec!["status"]);
+    }
+
+    #[test]
+    fn passthrough_strips_remote_addr_eq_form() {
+        // "remote run --remote-addr=http://host:9876 status" → ["status"]
+        let result = passthrough("remote run --remote-addr=http://host:9876 status");
+        assert_eq!(result, vec!["status"]);
+    }
+
+    #[test]
+    fn passthrough_strips_session_space_form() {
+        // "remote run --session abc123 status" → ["status"]
+        let result = passthrough("remote run --session abc123 status");
+        assert_eq!(result, vec!["status"]);
+    }
+
+    #[test]
+    fn passthrough_strips_session_eq_form() {
+        // "remote run --session=abc123 status" → ["status"]
+        let result = passthrough("remote run --session=abc123 status");
+        assert_eq!(result, vec!["status"]);
+    }
+
+    #[test]
+    fn passthrough_strips_follow_long_form() {
+        // "remote run --follow status" → ["status"]
+        let result = passthrough("remote run --follow status");
+        assert_eq!(result, vec!["status"]);
+    }
+
+    #[test]
+    fn passthrough_strips_follow_short_form() {
+        // "remote run -f status" → ["status"]
+        let result = passthrough("remote run -f status");
+        assert_eq!(result, vec!["status"]);
+    }
+
+    #[test]
+    fn passthrough_preserves_inner_command_flags() {
+        // Inner command's own flags must pass through untouched.
+        let result = passthrough("remote run exec prompt hello --yolo -n");
+        assert_eq!(result, vec!["exec", "prompt", "hello", "--yolo", "-n"]);
+    }
+
+    #[test]
+    fn passthrough_strips_all_outer_flags_mixed() {
+        // All outer flags present at once; only inner args survive.
+        let result = passthrough(
+            "remote run --remote-addr http://host:9876 --session abc --follow exec prompt hi",
+        );
+        assert_eq!(result, vec!["exec", "prompt", "hi"]);
+    }
+
+    #[test]
+    fn passthrough_empty_after_offset_returns_empty() {
+        // "remote run" with nothing after → empty vec
+        let result = passthrough("remote run");
+        assert!(result.is_empty());
+    }
+
+    // ── session picker pre-selection (work item 0059) ────────────────────────
+
+    /// `fetch_and_show_session_picker` pre-selects the row whose `id` matches
+    /// `last_remote_session_id`.  We test the selection-index computation in
+    /// isolation — the same logic that lives inside the function — so that the
+    /// test remains fast and free of network calls.
+    #[test]
+    fn session_picker_preselects_matching_last_session_id() {
+        use crate::commands::remote::RemoteSessionEntry;
+        let sessions = vec![
+            RemoteSessionEntry { id: "sess-a".to_string(), workdir: "/a".to_string() },
+            RemoteSessionEntry { id: "sess-b".to_string(), workdir: "/b".to_string() },
+            RemoteSessionEntry { id: "sess-c".to_string(), workdir: "/c".to_string() },
+        ];
+        // Mirrors: last_session_id.as_deref().and_then(|id| sessions.iter().position(…)).unwrap_or(0)
+        let last_id: Option<String> = Some("sess-b".to_string());
+        let selected = last_id
+            .as_deref()
+            .and_then(|id| sessions.iter().position(|s| s.id == id))
+            .unwrap_or(0);
+        assert_eq!(
+            selected, 1,
+            "must pre-select index 1 for 'sess-b' in a 3-item list"
+        );
+    }
+
+    #[test]
+    fn session_picker_defaults_to_zero_when_last_id_not_in_list() {
+        use crate::commands::remote::RemoteSessionEntry;
+        let sessions = vec![
+            RemoteSessionEntry { id: "sess-x".to_string(), workdir: "/x".to_string() },
+            RemoteSessionEntry { id: "sess-y".to_string(), workdir: "/y".to_string() },
+        ];
+        let last_id: Option<String> = Some("sess-gone".to_string()); // not in list
+        let selected = last_id
+            .as_deref()
+            .and_then(|id| sessions.iter().position(|s| s.id == id))
+            .unwrap_or(0);
+        assert_eq!(
+            selected, 0,
+            "must default to 0 when last_remote_session_id is not in the sessions list"
+        );
+    }
+
+    #[test]
+    fn session_picker_defaults_to_zero_when_no_last_id() {
+        use crate::commands::remote::RemoteSessionEntry;
+        let sessions = vec![
+            RemoteSessionEntry { id: "sess-a".to_string(), workdir: "/a".to_string() },
+        ];
+        let last_id: Option<String> = None;
+        let selected = last_id
+            .as_deref()
+            .and_then(|id| sessions.iter().position(|s| s.id == id))
+            .unwrap_or(0);
+        assert_eq!(selected, 0, "must default to 0 when last_remote_session_id is None");
+    }
 
     #[test]
     fn tui_init_qa_has_no_pending_audit_state() {

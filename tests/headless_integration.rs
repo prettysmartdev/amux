@@ -900,3 +900,178 @@ async fn create_command_with_exec_subcommand_is_accepted_not_rejected() {
         resp.text().await.unwrap_or_default()
     );
 }
+
+// ---------------------------------------------------------------------------
+// remote subcommand accepted (work item 0059)
+// ---------------------------------------------------------------------------
+
+/// Submitting `subcommand = "remote"` must be accepted (202) rather than
+/// rejected (400) — "remote" was added to KNOWN_SUBCOMMANDS in WI 0059.
+#[tokio::test]
+async fn create_command_with_remote_subcommand_is_accepted_not_rejected() {
+    let workdir = TempDir::new().unwrap();
+    let canonical = std::fs::canonicalize(workdir.path()).unwrap();
+    let (_root, base) = start_test_server(vec![canonical.clone()]).await;
+    let client = reqwest::Client::new();
+
+    let create: serde_json::Value = client
+        .post(format!("{base}/v1/sessions"))
+        .json(&serde_json::json!({ "workdir": canonical.to_str().unwrap() }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session_id = create["session_id"].as_str().unwrap().to_string();
+
+    let resp = client
+        .post(format!("{base}/v1/commands"))
+        .header("x-amux-session", &session_id)
+        .json(&serde_json::json!({
+            "subcommand": "remote",
+            "args": ["run", "status"]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        202,
+        "remote subcommand must be accepted with 202; body: {}",
+        resp.text().await.unwrap_or_default()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SSE log streaming endpoint (work item 0059)
+// ---------------------------------------------------------------------------
+
+/// Seed a "done" command into the same DB the test server uses (WAL mode allows
+/// multiple connections to the same file), then exercise the SSE endpoint.
+///
+/// Uses caller-supplied IDs so the caller can later construct the endpoint URL.
+/// Each test creates a fresh isolated DB via `start_test_server`, so fixed IDs
+/// are safe across concurrent test runs.
+async fn seed_done_command(
+    root_dir: &TempDir,
+    workdir_canonical: &std::path::Path,
+    session_id: &str,
+    command_id: &str,
+) {
+    let cmd_dir = root_dir
+        .path()
+        .join("sessions")
+        .join(session_id)
+        .join("commands")
+        .join(command_id);
+    std::fs::create_dir_all(&cmd_dir).unwrap();
+    let log_path = cmd_dir.join("output.log");
+    std::fs::write(&log_path, "hello from log\nworld\n").unwrap();
+
+    let conn = db::open_db(root_dir.path()).unwrap();
+    db::insert_session(&conn, session_id, workdir_canonical.to_str().unwrap(), "2024-01-01T00:00:00Z")
+        .unwrap();
+    db::insert_command(&conn, command_id, session_id, "status", "[]", log_path.to_str().unwrap())
+        .unwrap();
+    db::update_command_started(&conn, command_id, "2024-01-01T00:00:01Z").unwrap();
+    db::update_command_finished(&conn, command_id, "done", Some(0), "2024-01-01T00:00:02Z").unwrap();
+}
+
+#[tokio::test]
+async fn sse_returns_404_for_unknown_command_id() {
+    let (_root, base) = start_test_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/v1/commands/no-such-command-id/logs/stream"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn sse_endpoint_returns_text_event_stream_content_type() {
+    let workdir = TempDir::new().unwrap();
+    let canonical = std::fs::canonicalize(workdir.path()).unwrap();
+    let (root_dir, base) = start_test_server(vec![canonical.clone()]).await;
+    let client = reqwest::Client::new();
+
+    let command_id = "cmd-sse-content-type-test";
+    seed_done_command(&root_dir, &canonical, "sess-sse-ct", command_id).await;
+
+    let resp = client
+        .get(format!("{base}/v1/commands/{command_id}/logs/stream"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.contains("text/event-stream"),
+        "SSE endpoint must return Content-Type: text/event-stream; got: {ct:?}"
+    );
+}
+
+#[tokio::test]
+async fn sse_done_command_sends_amux_done_sentinel() {
+    let workdir = TempDir::new().unwrap();
+    let canonical = std::fs::canonicalize(workdir.path()).unwrap();
+    let (root_dir, base) = start_test_server(vec![canonical.clone()]).await;
+    let client = reqwest::Client::new();
+
+    let command_id = "cmd-sse-sentinel-test";
+    seed_done_command(&root_dir, &canonical, "sess-sse-sentinel", command_id).await;
+
+    let resp = client
+        .get(format!("{base}/v1/commands/{command_id}/logs/stream"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("[amux:done]"),
+        "SSE stream for a completed command must contain the [amux:done] sentinel; got: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn sse_done_command_includes_log_content_before_sentinel() {
+    let workdir = TempDir::new().unwrap();
+    let canonical = std::fs::canonicalize(workdir.path()).unwrap();
+    let (root_dir, base) = start_test_server(vec![canonical.clone()]).await;
+    let client = reqwest::Client::new();
+
+    let command_id = "cmd-sse-log-content-test";
+    seed_done_command(&root_dir, &canonical, "sess-sse-log", command_id).await;
+
+    let resp = client
+        .get(format!("{base}/v1/commands/{command_id}/logs/stream"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("hello from log"),
+        "SSE stream must include existing log content before [amux:done]; got: {body:?}"
+    );
+    // Sentinel must appear after the log lines.
+    let done_pos = body.find("[amux:done]").expect("must contain [amux:done]");
+    let log_pos = body.find("hello from log").expect("must contain log content");
+    assert!(
+        log_pos < done_pos,
+        "log content must appear before [amux:done] sentinel"
+    );
+}
