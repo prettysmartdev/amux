@@ -52,6 +52,7 @@ dependencies = [
  "portable-pty",
  "ratatui",
  "reqwest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

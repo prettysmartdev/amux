@@ -139,6 +139,43 @@ When a workflow step completes, a 60-second yolo countdown starts. If the agent 
 
 For lighter autonomy, `--auto` approves file edits automatically but still requires permission for other commands.
 
+### Run agents from scripts and CI
+
+`amux headless start` runs an HTTP server that accepts session and command requests. Useful when you want to drive agent runs from a script, a CI pipeline, or a remote machine without a terminal session.
+
+```sh
+# Start the server (prints an API key on first run)
+amux headless start --port 9090
+
+# Create a session bound to a directory
+curl -s -X POST http://localhost:9090/v1/sessions \
+  -H "Authorization: Bearer <key>" \
+  -H "Content-Type: application/json" \
+  -d '{"workdir": "/workspace/myproject"}'
+
+# Submit a command to that session
+curl -s -X POST http://localhost:9090/v1/commands \
+  -H "Authorization: Bearer <key>" \
+  -H "x-amux-session: <session-id>" \
+  -H "Content-Type: application/json" \
+  -d '{"subcommand": "implement", "args": ["0027"]}'
+
+# Poll for completion, then fetch the log
+curl -s http://localhost:9090/v1/commands/<command-id>
+curl -s http://localhost:9090/v1/commands/<command-id>/logs
+```
+
+From another machine, use `amux remote` — it handles the HTTP calls and formats the output:
+
+```sh
+amux remote session start /workspace/myproject --remote-addr http://build-host:9090
+amux remote run implement 0027 --session <id> --follow
+```
+
+Commands run inside containers with the same isolation as interactive sessions. All inputs and outputs are stored in `~/.amux/headless/` on the server.
+
+See [Headless Mode](docs/08-headless-mode.md) and [Remote Mode](docs/09-remote-mode.md) for details.
+
 ### Keep a persistent background agent
 
 `amux claws` manages a long-lived [nanoclaw](https://github.com/qwibitai/nanoclaw) container — a machine-global background agent accessible via your messaging app (Slack, Discord, WhatsApp). Unlike per-project sessions, it survives reboots and accumulates context across sessions.
@@ -180,6 +217,12 @@ amux status [--watch]                 # dashboard of all running agent container
 amux config show                      # view all config values
 amux claws init                       # set up the persistent nanoclaw container
 amux claws ready                      # check / restart nanoclaw
+amux headless start [--port <n>]      # start the HTTP server (generates API key on first run)
+amux headless status                  # check if the server is running
+amux headless kill                    # stop the server
+amux remote run <cmd> [--follow]      # run a command on a remote headless server
+amux remote session start <dir>       # create a session on a remote server
+amux remote session kill <id>         # close a session on a remote server
 ```
 
 All commands work in both TUI mode (without the `amux` prefix) and CLI mode.
@@ -196,6 +239,8 @@ All commands work in both TUI mode (without the `amux` prefix) and CLI mode.
 - [Yolo Mode](docs/05-yolo-mode.md)
 - [Nanoclaw](docs/06-nanoclaw.md)
 - [Configuration](docs/07-configuration.md)
+- [Headless Mode](docs/08-headless-mode.md)
+- [Remote Mode](docs/09-remote-mode.md)
 - [Architecture](docs/architecture.md)
 
 ---

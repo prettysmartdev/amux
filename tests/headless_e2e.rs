@@ -70,6 +70,7 @@ async fn e2e_headless_start_subprocess_responds_to_http() {
             &port.to_string(),
             "--workdirs",
             workdir.path().to_str().unwrap(),
+            "--dangerously-skip-auth",
         ])
         .env("AMUX_HEADLESS_ROOT", root_dir.path())
         // Suppress tracing output so it doesn't pollute the test runner.

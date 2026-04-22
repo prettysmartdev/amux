@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -17,6 +17,15 @@ use tower_http::trace::TraceLayer;
 
 use super::db;
 
+/// Controls whether the server requires API-key authentication.
+#[derive(Clone)]
+pub enum AuthMode {
+    /// All requests must include a valid `Authorization: Bearer <key>` header.
+    Enabled { key_hash: String },
+    /// No authentication required (`--dangerously-skip-auth`).
+    Disabled,
+}
+
 /// Shared server state accessible from all handlers.
 pub struct AppState {
     pub db: Mutex<Connection>,
@@ -28,6 +37,69 @@ pub struct AppState {
     pub busy_sessions: Mutex<HashSet<String>>,
     /// Handles for spawned command-execution tasks; drained on graceful shutdown.
     pub task_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Authentication mode for this server instance.
+    pub auth_mode: AuthMode,
+}
+
+/// Axum middleware that validates the `Authorization` header against the stored
+/// key hash using constant-time comparison.
+///
+/// Accepted formats (case-insensitive prefix stripping):
+///   - `Authorization: Bearer <key>`
+///   - `Authorization: <key>` (raw key, no prefix)
+async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    if let AuthMode::Enabled { ref key_hash } = state.auth_mode {
+        let auth_header = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok());
+
+        match auth_header {
+            None | Some("") => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    error_json(
+                        "API key required. Pass the key via the Authorization header \
+                         (e.g. Authorization: Bearer <key>).",
+                    ),
+                )
+                    .into_response();
+            }
+            Some(header) => {
+                // Strip "Bearer " prefix case-insensitively; accept raw key too.
+                // Use `.get(..7)` rather than `header[..7]` to avoid a byte-index
+                // panic on multi-byte UTF-8 sequences (valid HTTP headers are ASCII,
+                // but defensive slicing costs nothing).
+                let provided_key = if header
+                    .get(..7)
+                    .map_or(false, |prefix| prefix.eq_ignore_ascii_case("bearer "))
+                {
+                    &header[7..]
+                } else {
+                    header
+                };
+
+                let provided_hash = super::auth::hash_api_key(provided_key);
+
+                // Constant-time comparison of hex-encoded SHA-256 digests to
+                // prevent timing attacks (per spec: ring::constant_time).
+                if ring::constant_time::verify_slices_are_equal(
+                    provided_hash.as_bytes(),
+                    key_hash.as_bytes(),
+                )
+                .is_err()
+                {
+                    return (StatusCode::UNAUTHORIZED, error_json("Invalid API key."))
+                        .into_response();
+                }
+            }
+        }
+    }
+    next.run(req).await
 }
 
 /// Build the axum router with all headless API routes.
@@ -41,6 +113,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/commands/:id", get(handle_get_command))
         .route("/v1/commands/:id/logs", get(handle_get_command_logs))
         .route("/v1/commands/:id/logs/stream", get(handle_stream_command_logs))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -108,6 +181,13 @@ struct StatusResponse {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+/// Query parameters for the sessions list endpoint.
+#[derive(Deserialize, Default)]
+struct ListSessionsQuery {
+    #[serde(default)]
+    status: Option<String>,
 }
 
 fn error_json(msg: impl Into<String>) -> Json<ErrorResponse> {
@@ -226,9 +306,10 @@ async fn handle_create_session(
 
 async fn handle_list_sessions(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ListSessionsQuery>,
 ) -> impl IntoResponse {
     let db = state.db.lock().await;
-    match db::list_sessions(&db) {
+    match db::list_sessions_by_status(&db, query.status.as_deref()) {
         Ok(sessions) => {
             let list: Vec<SessionResponse> = sessions
                 .into_iter()
@@ -980,9 +1061,27 @@ pub async fn start_server(
     port: u16,
     workdirs: Vec<PathBuf>,
     headless_root: PathBuf,
+    auth_mode: AuthMode,
     runtime: Arc<dyn crate::runtime::AgentRuntime>,
 ) -> Result<()> {
     let db_conn = db::open_db(&headless_root)?;
+
+    // Startup cleanup: remove closed sessions older than 24 hours and log
+    // each deletion individually for auditability.
+    match db::delete_closed_sessions_older_than(&db_conn, 24) {
+        Ok(ref deleted) if deleted.is_empty() => {}
+        Ok(deleted) => {
+            for (sid, cmd_count) in &deleted {
+                tracing::info!(
+                    session_id = %sid,
+                    commands = cmd_count,
+                    "Purging stale closed session"
+                );
+            }
+            tracing::info!(total = deleted.len(), "Startup cleanup: removed stale closed sessions");
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to clean up old sessions"),
+    }
 
     let state = Arc::new(AppState {
         db: Mutex::new(db_conn),
@@ -992,6 +1091,7 @@ pub async fn start_server(
         runtime,
         busy_sessions: Mutex::new(HashSet::new()),
         task_handles: Mutex::new(Vec::new()),
+        auth_mode,
     });
 
     let app = build_router(state.clone());

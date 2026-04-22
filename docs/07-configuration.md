@@ -55,6 +55,7 @@ Applies to all projects on the machine unless overridden by a per-repo config.
   },
   "remote": {
     "defaultAddr": "http://build-server.example.com:9876",
+    "defaultAPIKey": "a3f8b2c1...64-char-hex...",
     "savedDirs": ["/home/user/my-project"]
   }
 }
@@ -70,6 +71,7 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 | `headless.workDirs` | string array | `[]` | Working directories pre-approved for headless mode session creation. Merged with `--workdirs` flags at server startup. See [Headless Mode](08-headless-mode.md#working-directory-allowlist) |
 | `headless.alwaysNonInteractive` | boolean | `false` | When `true`, all dispatched commands automatically run in non-interactive mode. Useful for headless servers where no TTY is available. See [Headless Mode](08-headless-mode.md#alwaysnoninteractive) |
 | `remote.defaultAddr` | string | (not set) | Default address of the remote headless amux server (e.g. `http://host:9876`). Overridden by `--remote-addr` or `AMUX_REMOTE_ADDR`. See [Remote Mode](09-remote-mode.md#connecting-to-a-remote-host) |
+| `remote.defaultAPIKey` | string | (not set) | API key sent with every request to `remote.defaultAddr`. **Only sent when the target address exactly matches `remote.defaultAddr`** — never forwarded to other hosts. Overridden by `--api-key` or `AMUX_API_KEY`. See [Remote Mode](09-remote-mode.md#api-key-authentication) |
 | `remote.savedDirs` | string array | `[]` | Absolute paths (on the remote host) shown in the TUI saved-dir picker for `remote session start`. See [Remote Mode](09-remote-mode.md#configuration) |
 
 **Note:** `runtime` is a global (machine-level) setting only. It is not available in the per-repo config — container runtime is a property of the machine, not the project.
@@ -89,6 +91,7 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 | `headless.workDirs` | Global only (merged with `--workdirs` flags at startup) |
 | `headless.alwaysNonInteractive` | Global only |
 | `remote.defaultAddr` | Global only (overridden per-invocation by `--remote-addr` or `AMUX_REMOTE_ADDR`) |
+| `remote.defaultAPIKey` | Global only (overridden per-invocation by `--api-key` or `AMUX_API_KEY`; only sent to `remote.defaultAddr`) |
 | `remote.savedDirs` | Global only |
 
 For `yoloDisallowedTools` and `envPassthrough`, if a per-repo list is set it **replaces** the global list entirely — lists are not merged. To inherit the global list for a repo, omit the field from the repo config.
@@ -120,6 +123,7 @@ work_items.template              N/A                 (not set)         (not set)
 headless.workDirs                (not set)           N/A               (not set)          —
 headless.alwaysNonInteractive    false (built-in)    N/A               false              —
 remote.defaultAddr               (not set)           N/A               (not set)          —
+remote.defaultAPIKey             (not set)           N/A               (not set)          —
 remote.savedDirs                 (empty)             N/A               (empty)            —
 ```
 
@@ -154,7 +158,7 @@ When neither scope has the field set, the built-in default is shown for both Glo
 Passing an unknown field name prints a helpful error listing all valid names:
 
 ```
-error: Unknown config field 'scrollback'. Valid fields: default_agent, runtime, terminal_scrollback_lines, yolo_disallowed_tools, env_passthrough, agent, auto_agent_auth_accepted, headless.workDirs, headless.alwaysNonInteractive, remote.defaultAddr, remote.savedDirs
+error: Unknown config field 'scrollback'. Valid fields: default_agent, runtime, terminal_scrollback_lines, yolo_disallowed_tools, env_passthrough, agent, auto_agent_auth_accepted, headless.workDirs, headless.alwaysNonInteractive, remote.defaultAddr, remote.defaultAPIKey, remote.savedDirs
 ```
 
 ### `amux config set [--global] <field> <value>`
@@ -192,6 +196,9 @@ amux config set --global headless.alwaysNonInteractive true
 # Set the default remote headless server address
 amux config set --global remote.defaultAddr http://build-server.example.com:9876
 
+# Store the API key for the default remote server
+amux config set --global remote.defaultAPIKey <your-api-key>
+
 # Configure saved directories for the remote session start picker
 amux config set --global remote.savedDirs "/home/user/my-project,/home/user/other-project"
 ```
@@ -215,6 +222,8 @@ error: 'work_items.dir' is a repo-only field. Cannot be set with --global.
 error: 'headless.workDirs' is a global-only field. Use --global to set it.
 
 error: 'remote.defaultAddr' is a global-only field. Use --global to set it.
+
+error: 'remote.defaultAPIKey' is a global-only field. Use --global to set it.
 
 error: 'remote.savedDirs' is a global-only field. Use --global to set it.
 ```

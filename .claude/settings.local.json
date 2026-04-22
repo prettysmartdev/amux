@@ -107,7 +107,8 @@
       "Bash(perl:*)",
       "Bash(ls /workspace/Dockerfile*)",
       "Read(//usr/local/cargo/**)",
-      "Read(//home/**)"
+      "Read(//home/**)",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }

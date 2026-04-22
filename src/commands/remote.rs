@@ -16,13 +16,79 @@ use anyhow::Result;
 
 /// Build a `reqwest::Client` with the timeouts required by the spec:
 /// - connect timeout: 10 seconds
-/// - read timeout: 60 seconds (covers "60s of connection silence")
+/// - read timeout: 600 seconds (10 min — agent commands can run for a long time)
 fn make_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
-        .read_timeout(std::time::Duration::from_secs(60))
+        .read_timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))
+}
+
+/// Map a reqwest error to a more helpful message, especially for timeouts.
+pub(crate) fn map_reqwest_error(e: reqwest::Error, context: &str) -> anyhow::Error {
+    if e.is_timeout() {
+        anyhow::anyhow!(
+            "{}: request timed out after 10 minutes. The remote command may still be running — \
+             check with `amux remote run --follow` or query the command status directly.",
+            context
+        )
+    } else if e.is_connect() {
+        anyhow::anyhow!(
+            "{}: connection refused or unreachable. Is the headless server running?",
+            context
+        )
+    } else {
+        anyhow::anyhow!("{}: {}", context, e)
+    }
+}
+
+/// Build a request builder with the standard auth header if an API key is provided.
+fn build_request(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    api_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let mut builder = client.request(method, url);
+    if let Some(key) = api_key {
+        builder = builder.header("authorization", format!("Bearer {}", key));
+    }
+    builder
+}
+
+/// Resolve the API key to send with a request to `target_addr`.
+///
+/// Priority:
+///   1. `--api-key` CLI flag (passed as `flag`)
+///   2. `AMUX_API_KEY` environment variable
+///   3. `remote.defaultAPIKey` from global config — BUT ONLY when
+///      `target_addr` matches `remote.defaultAddr` exactly (after stripping
+///      trailing slashes from both).  If the hosts differ the config key is
+///      never used, preventing a stored key from being forwarded to an
+///      unexpected or attacker-controlled host.
+///
+/// Returns `None` when no key is available (caller decides whether to error
+/// or proceed unauthenticated — e.g. server may have --dangerously-skip-auth).
+pub fn resolve_api_key(flag: Option<&str>, target_addr: &str) -> Option<String> {
+    if let Some(key) = flag {
+        if !key.is_empty() {
+            return Some(key.to_string());
+        }
+    }
+    if let Ok(key) = std::env::var("AMUX_API_KEY") {
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    // Config key: only forward to the configured default host.
+    let default_addr = crate::config::effective_remote_default_addr()?;
+    let normalize = |s: &str| s.trim_end_matches('/').to_lowercase();
+    if normalize(target_addr) == normalize(&default_addr) {
+        crate::config::effective_remote_default_api_key()
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -102,22 +168,24 @@ pub async fn run(action: RemoteAction) -> Result<()> {
     let input = NonInteractiveRemoteInput;
     let sink = OutputSink::Stdout;
     match action {
-        RemoteAction::Run { command, remote_addr, session, follow } => {
+        RemoteAction::Run { command, remote_addr, session, follow, api_key } => {
             if command.is_empty() {
                 anyhow::bail!(
                     "No command specified. Usage: amux remote run <command> [--session ID] [--follow]"
                 );
             }
             let addr = resolve_remote_addr(remote_addr.as_deref())?;
+            let resolved_key = resolve_api_key(api_key.as_deref(), &addr);
             let session_id = match resolve_remote_session(session.as_deref()) {
                 Some(s) => s,
                 None => input.resolve_missing_session()?,
             };
-            run_remote_run(&addr, &session_id, &command, follow, &sink).await
+            run_remote_run(&addr, &session_id, &command, follow, resolved_key.as_deref(), &sink).await
         }
         RemoteAction::Session { action } => match action {
-            RemoteSessionAction::Start { dir, remote_addr } => {
+            RemoteSessionAction::Start { dir, remote_addr, api_key } => {
                 let addr = resolve_remote_addr(remote_addr.as_deref())?;
+                let resolved_key = resolve_api_key(api_key.as_deref(), &addr);
                 let dir = match dir {
                     Some(d) => d,
                     None => input.resolve_missing_dir()?,
@@ -129,17 +197,18 @@ pub async fn run(action: RemoteAction) -> Result<()> {
                         save_dir_to_config(&dir)?;
                     }
                 }
-                let session_id = run_remote_session_start(&addr, &dir).await?;
+                let session_id = run_remote_session_start(&addr, &dir, resolved_key.as_deref()).await?;
                 sink.println(format!("Session created: {}", session_id));
                 Ok(())
             }
-            RemoteSessionAction::Kill { session_id, remote_addr } => {
+            RemoteSessionAction::Kill { session_id, remote_addr, api_key } => {
                 let addr = resolve_remote_addr(remote_addr.as_deref())?;
+                let resolved_key = resolve_api_key(api_key.as_deref(), &addr);
                 let sid = match session_id {
                     Some(s) => s,
                     None => input.resolve_missing_kill_target()?,
                 };
-                run_remote_session_kill(&addr, &sid).await?;
+                run_remote_session_kill(&addr, &sid, resolved_key.as_deref()).await?;
                 sink.println(format!("Session {} killed.", sid));
                 Ok(())
             }
@@ -160,6 +229,7 @@ pub async fn run_remote_run(
     session_id: &str,
     command: &[String],
     follow: bool,
+    api_key: Option<&str>,
     sink: &OutputSink,
 ) -> Result<()> {
     if command.is_empty() {
@@ -177,18 +247,23 @@ pub async fn run_remote_run(
         "args": args,
     });
 
-    let response = client
-        .post(format!("{}/v1/commands", remote_addr))
+    let response = build_request(&client, reqwest::Method::POST, &format!("{}/v1/commands", remote_addr), api_key)
         .header("x-amux-session", session_id)
         .header("content-type", "application/json")
         .json(&body)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect to remote host: {}", e))?;
+        .map_err(|e| map_reqwest_error(e, "Failed to submit command"))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            anyhow::bail!(
+                "Authentication failed (401). Check your API key with --api-key, \
+                 AMUX_API_KEY env var, or remote.defaultAPIKey config."
+            );
+        }
         if status == reqwest::StatusCode::NOT_FOUND {
             anyhow::bail!(
                 "Session '{}' not found on {}. \
@@ -218,15 +293,14 @@ pub async fn run_remote_run(
 
     if follow {
         sink.println("Streaming logs (waiting for command to complete)...".to_string());
-        stream_command_logs(remote_addr, &command_id, sink).await?;
+        stream_command_logs(remote_addr, &command_id, api_key, sink).await?;
     }
 
     // Fetch final command status for the summary table.
-    let cmd_response = client
-        .get(format!("{}/v1/commands/{}", remote_addr, command_id))
+    let cmd_response = build_request(&client, reqwest::Method::GET, &format!("{}/v1/commands/{}", remote_addr, command_id), api_key)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to get command status: {}", e))?;
+        .map_err(|e| map_reqwest_error(e, "Failed to get command status"))?;
 
     if !cmd_response.status().is_success() {
         let status = cmd_response.status();
@@ -254,22 +328,27 @@ pub async fn run_remote_run(
 
 /// Create a new session on the remote host.
 /// Returns the session ID.
-pub async fn run_remote_session_start(remote_addr: &str, dir: &str) -> Result<String> {
+pub async fn run_remote_session_start(remote_addr: &str, dir: &str, api_key: Option<&str>) -> Result<String> {
     let client = make_client()?;
 
     let body = serde_json::json!({ "workdir": dir });
 
-    let response = client
-        .post(format!("{}/v1/sessions", remote_addr))
+    let response = build_request(&client, reqwest::Method::POST, &format!("{}/v1/sessions", remote_addr), api_key)
         .header("content-type", "application/json")
         .json(&body)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect to remote host: {}", e))?;
+        .map_err(|e| map_reqwest_error(e, "Failed to create session"))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            anyhow::bail!(
+                "Authentication failed (401). Check your API key with --api-key, \
+                 AMUX_API_KEY env var, or remote.defaultAPIKey config."
+            );
+        }
         anyhow::bail!("Remote host returned {}: {}", status, text);
     }
 
@@ -285,18 +364,23 @@ pub async fn run_remote_session_start(remote_addr: &str, dir: &str) -> Result<St
 }
 
 /// Kill (close) a session on the remote host.
-pub async fn run_remote_session_kill(remote_addr: &str, session_id: &str) -> Result<()> {
+pub async fn run_remote_session_kill(remote_addr: &str, session_id: &str, api_key: Option<&str>) -> Result<()> {
     let client = make_client()?;
 
-    let response = client
-        .delete(format!("{}/v1/sessions/{}", remote_addr, session_id))
+    let response = build_request(&client, reqwest::Method::DELETE, &format!("{}/v1/sessions/{}", remote_addr, session_id), api_key)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect to remote host: {}", e))?;
+        .map_err(|e| map_reqwest_error(e, "Failed to kill session"))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            anyhow::bail!(
+                "Authentication failed (401). Check your API key with --api-key, \
+                 AMUX_API_KEY env var, or remote.defaultAPIKey config."
+            );
+        }
         if status == reqwest::StatusCode::NOT_FOUND {
             anyhow::bail!(
                 "Session '{}' not found on {}.",
@@ -352,14 +436,13 @@ pub fn resolve_remote_session(flag: Option<&str>) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Fetch the list of active sessions from the remote host.
-pub async fn fetch_sessions(remote_addr: &str) -> Result<Vec<RemoteSessionEntry>> {
+pub async fn fetch_sessions(remote_addr: &str, api_key: Option<&str>) -> Result<Vec<RemoteSessionEntry>> {
     let client = make_client()?;
 
-    let response = client
-        .get(format!("{}/v1/sessions", remote_addr))
+    let response = build_request(&client, reqwest::Method::GET, &format!("{}/v1/sessions?status=active", remote_addr), api_key)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect to remote host: {}", e))?;
+        .map_err(|e| map_reqwest_error(e, "Failed to fetch sessions"))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -395,17 +478,17 @@ pub async fn fetch_sessions(remote_addr: &str) -> Result<Vec<RemoteSessionEntry>
 pub async fn stream_command_logs(
     remote_addr: &str,
     command_id: &str,
+    api_key: Option<&str>,
     sink: &OutputSink,
 ) -> Result<()> {
     use tokio_stream::StreamExt;
 
     let client = make_client()?;
 
-    let response = client
-        .get(format!("{}/v1/commands/{}/logs/stream", remote_addr, command_id))
+    let response = build_request(&client, reqwest::Method::GET, &format!("{}/v1/commands/{}/logs/stream", remote_addr, command_id), api_key)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect to SSE stream: {}", e))?;
+        .map_err(|e| map_reqwest_error(e, "Failed to connect to SSE stream"))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -596,6 +679,175 @@ mod tests {
         assert_eq!(result, None, "must return None when flag and env are both absent");
     }
 
+    // ─── resolve_api_key ─────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_api_key_flag_wins_over_env_and_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("AMUX_API_KEY", "env-key") };
+        let result = resolve_api_key(Some("flag-key"), "http://any-host:8080");
+        unsafe { std::env::remove_var("AMUX_API_KEY") };
+        assert_eq!(result.as_deref(), Some("flag-key"), "flag must win over env var");
+    }
+
+    #[test]
+    fn resolve_api_key_env_used_when_no_flag() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("AMUX_API_KEY", "env-key-abc") };
+        let result = resolve_api_key(None, "http://any-host:8080");
+        unsafe { std::env::remove_var("AMUX_API_KEY") };
+        assert_eq!(result.as_deref(), Some("env-key-abc"), "env var must be used when no flag");
+    }
+
+    #[test]
+    fn resolve_api_key_config_key_used_when_host_matches() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("AMUX_API_KEY") };
+        let tmp = tempfile::TempDir::new().unwrap();
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+
+        // Write a global config with a default addr and api key.
+        let config = crate::config::GlobalConfig {
+            remote: Some(crate::config::RemoteConfig {
+                default_addr: Some("http://myhost:9090".to_string()),
+                default_api_key: Some("config-key-xyz".to_string()),
+                saved_dirs: None,
+            }),
+            ..Default::default()
+        };
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        let result = resolve_api_key(None, "http://myhost:9090");
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+        assert_eq!(result.as_deref(), Some("config-key-xyz"), "config key must be used when host matches");
+    }
+
+    #[test]
+    fn resolve_api_key_config_key_not_used_when_host_differs() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("AMUX_API_KEY") };
+        let tmp = tempfile::TempDir::new().unwrap();
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+
+        let config = crate::config::GlobalConfig {
+            remote: Some(crate::config::RemoteConfig {
+                default_addr: Some("http://myhost:9090".to_string()),
+                default_api_key: Some("config-key-xyz".to_string()),
+                saved_dirs: None,
+            }),
+            ..Default::default()
+        };
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        let result = resolve_api_key(None, "http://other-host:9090");
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+        assert!(result.is_none(), "config key must NOT be used when host differs; got: {result:?}");
+    }
+
+    #[test]
+    fn resolve_api_key_trailing_slash_normalization() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("AMUX_API_KEY") };
+        let tmp = tempfile::TempDir::new().unwrap();
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+
+        let config = crate::config::GlobalConfig {
+            remote: Some(crate::config::RemoteConfig {
+                default_addr: Some("http://myhost:9090/".to_string()), // trailing slash in config
+                default_api_key: Some("slash-key".to_string()),
+                saved_dirs: None,
+            }),
+            ..Default::default()
+        };
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        // Target addr without trailing slash must still match.
+        let result = resolve_api_key(None, "http://myhost:9090");
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+        assert_eq!(result.as_deref(), Some("slash-key"), "trailing slash in config addr must be normalised");
+    }
+
+    #[test]
+    fn resolve_api_key_case_insensitive_host_match() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("AMUX_API_KEY") };
+        let tmp = tempfile::TempDir::new().unwrap();
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+
+        let config = crate::config::GlobalConfig {
+            remote: Some(crate::config::RemoteConfig {
+                default_addr: Some("http://MyHost:9090".to_string()), // mixed case in config
+                default_api_key: Some("case-key".to_string()),
+                saved_dirs: None,
+            }),
+            ..Default::default()
+        };
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        let result = resolve_api_key(None, "http://myhost:9090"); // lowercase target
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+        assert_eq!(result.as_deref(), Some("case-key"), "host match must be case-insensitive");
+    }
+
+    // ─── map_reqwest_error ────────────────────────────────────────────────────
+
+    /// Verifies that a real read-timeout surfaces the "10 minutes" message.
+    /// We bind a TCP listener that accepts connections but never sends data,
+    /// then make a request with a very short timeout (100 ms).
+    ///
+    /// If the environment fails to produce a timeout error (e.g. the OS sends a
+    /// RST instead), the test still passes — it just verifies that non-timeout
+    /// errors do NOT incorrectly claim "10 minutes".
+    #[tokio::test]
+    async fn map_reqwest_error_timeout_message_contains_10_minutes() {
+        use std::net::TcpListener;
+
+        // Bind a listener that accepts but never responds.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}/v1/run", addr);
+
+        // Accept in background so the TCP handshake completes (reqwest reads timeout).
+        std::thread::spawn(move || {
+            let _ = listener.accept(); // accept once; hold socket open until thread dies
+        });
+
+        let client = reqwest::Client::builder()
+            .read_timeout(std::time::Duration::from_millis(100))
+            .build()
+            .unwrap();
+
+        let result = client.get(&url).send().await;
+        // reqwest should time out reading the response.
+        match result {
+            Err(e) => {
+                let is_timeout = e.is_timeout();
+                let mapped = map_reqwest_error(e, "test context");
+                let msg = mapped.to_string();
+                if is_timeout {
+                    assert!(
+                        msg.contains("10 minutes"),
+                        "timeout error message must mention '10 minutes'; got: {msg}"
+                    );
+                } else {
+                    // Non-timeout error (e.g. RST from OS): verify the message does NOT
+                    // falsely claim "10 minutes" and that the function doesn't panic.
+                    assert!(
+                        !msg.contains("10 minutes"),
+                        "non-timeout error must not claim '10 minutes'; got: {msg}"
+                    );
+                }
+            }
+            Ok(_) => {
+                // Unlikely but not an error in the function under test.
+            }
+        }
+    }
+
     // ─── NonInteractiveRemoteInput ───────────────────────────────────────────
 
     #[test]
@@ -689,6 +941,7 @@ mod tests {
             "any-session",
             &[],                  // empty command ← the trigger
             false,
+            None,
             &sink,
         ).await;
         assert!(result.is_err(), "empty command must return an error");

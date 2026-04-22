@@ -830,9 +830,11 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
         return;
     }
     if let Dialog::RemoteSessionPicker { sessions, selected, .. } = &tab.dialog {
-        draw_remote_picker(frame, area, " Select Remote Session ", sessions.iter().map(|s| {
-            format!("{}  ({})", s.id, s.workdir)
-        }).collect(), *selected);
+        let max_allowed = ((area.width as usize * 80) / 100).max(20);
+        let items: Vec<String> = sessions.iter().map(|s| {
+            format_session_picker_row(&s.id, &s.workdir, max_allowed)
+        }).collect();
+        draw_remote_picker(frame, area, " Select Remote Session ", items, *selected);
         return;
     }
     if let Dialog::RemoteSavedDirPicker { dirs, selected, .. } = &tab.dialog {
@@ -840,9 +842,11 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
         return;
     }
     if let Dialog::RemoteSessionKillPicker { sessions, selected, .. } = &tab.dialog {
-        draw_remote_picker(frame, area, " Select Session to Kill ", sessions.iter().map(|s| {
-            format!("{}  ({})", s.id, s.workdir)
-        }).collect(), *selected);
+        let max_allowed = ((area.width as usize * 80) / 100).max(20);
+        let items: Vec<String> = sessions.iter().map(|s| {
+            format_session_picker_row(&s.id, &s.workdir, max_allowed)
+        }).collect();
+        draw_remote_picker(frame, area, " Select Session to Kill ", items, *selected);
         return;
     }
 
@@ -1740,6 +1744,43 @@ fn draw_workflow_yolo_countdown(
     frame.render_widget(para, inner);
 }
 
+/// Compute the popup dialog width for a remote picker.
+///
+/// The width is capped at 80% of the terminal width (at least 20 columns) so that
+/// the dialog never dominates the entire screen even with very long session paths.
+///
+/// Formula:
+/// - `max_allowed` = max(80% of `area_width`, 20)
+/// - `content_width` = max(widest item in Unicode chars, title chars) + 4 (borders + padding)
+/// - returns `content_width.min(max_allowed)`
+pub(crate) fn popup_width_for(area_width: u16, items: &[String], title: &str) -> u16 {
+    let max_allowed = ((area_width as usize * 80) / 100).max(20);
+    let content_width = items
+        .iter()
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(20)
+        .max(title.chars().count())
+        + 4; // 2 border + 2 padding each side
+    content_width.min(max_allowed) as u16
+}
+
+/// Format a session picker row string, truncating the session ID if it would cause
+/// the row to exceed `max_row_width` characters.  The workdir is never truncated
+/// so the user can still identify which project the session belongs to.
+pub(crate) fn format_session_picker_row(id: &str, workdir: &str, max_row_width: usize) -> String {
+    let workdir_chars = workdir.chars().count();
+    // "  (" = 3 chars, ")" = 1 char, surrounding spaces = 2 → 6 chars overhead
+    let max_id_chars = max_row_width.saturating_sub(workdir_chars + 6);
+    let id_display = if id.chars().count() > max_id_chars && max_id_chars > 3 {
+        let truncated: String = id.chars().take(max_id_chars.saturating_sub(1)).collect();
+        format!("{}…", truncated)
+    } else {
+        id.to_string()
+    };
+    format!("{}  ({})", id_display, workdir)
+}
+
 /// Draw a simple list picker dialog (used for remote session/dir pickers).
 fn draw_remote_picker(
     frame: &mut Frame,
@@ -1751,7 +1792,8 @@ fn draw_remote_picker(
     let max_items = (area.height as usize).saturating_sub(6).max(1);
     let visible_items = items.len().min(max_items);
     let popup_height = (visible_items + 4).min(area.height as usize - 2) as u16;
-    let popup_width = 80u16.min(area.width.saturating_sub(4));
+    // Dynamic width: fit the widest item + padding, capped at 80% of terminal width.
+    let popup_width = popup_width_for(area.width, &items, title);
     let popup = centered_rect(popup_width, popup_height, area);
 
     frame.render_widget(Clear, popup);
@@ -3153,6 +3195,102 @@ mod tests {
         assert!(
             !text.contains("scrollback"),
             "scrollback indicator should be absent at live tail"
+        );
+    }
+
+    // ── popup_width_for ─────────────────────────────────────────────────────
+
+    #[test]
+    fn popup_width_for_respects_80_percent_cap() {
+        // area_width=100 → max_allowed = 80
+        // Items have width 90 (wider than cap) → result must be 80
+        let items: Vec<String> = vec!["a".repeat(90)];
+        let w = popup_width_for(100, &items, "title");
+        assert_eq!(w, 80, "popup width must be capped at 80% of area_width=100");
+    }
+
+    #[test]
+    fn popup_width_for_fits_content_within_cap() {
+        // area_width=200 → max_allowed = 160
+        // content is 20 chars + 4 padding = 24, which is < 160
+        let items: Vec<String> = vec!["a".repeat(20)];
+        let w = popup_width_for(200, &items, "title");
+        assert_eq!(w, 24, "popup width should fit content (20 + 4 padding) when under cap");
+    }
+
+    #[test]
+    fn popup_width_for_uses_title_width_when_wider_than_items() {
+        // title = 30 chars, items = 5 chars; content_width = 30 + 4 = 34
+        let items: Vec<String> = vec!["hello".to_string()];
+        let title = "a".repeat(30);
+        let w = popup_width_for(200, &items, &title);
+        assert_eq!(w, 34, "popup width should use title width when title is wider than items");
+    }
+
+    #[test]
+    fn popup_width_for_empty_items_uses_minimum() {
+        // No items → max item width = 0 → content_width = max(0, title.len()) + 4
+        let items: Vec<String> = vec![];
+        let w = popup_width_for(200, &items, "hi");
+        // title "hi" = 2, content_width = max(20_default? No — unwrap_or(20).max(title.len())) + 4
+        // From impl: items.iter().max() → None → unwrap_or(20).max(title.chars().count()) = 20.max(2) = 20 → 20+4 = 24
+        assert_eq!(w, 24, "empty items should fall back to minimum content width of 20 + 4");
+    }
+
+    #[test]
+    fn popup_width_for_minimum_when_area_very_small() {
+        // area_width = 10 → max_allowed = (10*80/100).max(20) = 8.max(20) = 20
+        let items: Vec<String> = vec!["hello".to_string()];
+        let w = popup_width_for(10, &items, "t");
+        // content_width = max(5, 1) + 4 = 9; max_allowed = 20; result = 9
+        assert_eq!(w, 9, "tiny area should still produce sensible content-driven width");
+    }
+
+    // ── format_session_picker_row ───────────────────────────────────────────
+
+    #[test]
+    fn format_session_picker_row_preserves_short_id() {
+        let row = format_session_picker_row("abc123", "/home/user/project", 60);
+        assert_eq!(row, "abc123  (/home/user/project)");
+    }
+
+    #[test]
+    fn format_session_picker_row_truncates_long_id() {
+        // workdir = "/wd" = 3 chars; max_row_width = 20
+        // max_id_chars = 20 - (3 + 6) = 11
+        // id = "a" * 20 (longer than 11, and 11 > 3) → truncated to 10 chars + "…"
+        let id = "a".repeat(20);
+        let row = format_session_picker_row(&id, "/wd", 20);
+        // truncated: take(10) = "aaaaaaaaaa" + "…"
+        assert!(
+            row.starts_with("aaaaaaaaaa…"),
+            "long id should be truncated with ellipsis; got: {row}"
+        );
+        assert!(
+            row.contains("(/wd)"),
+            "workdir should appear in the row; got: {row}"
+        );
+    }
+
+    #[test]
+    fn format_session_picker_row_no_truncation_when_id_fits() {
+        // workdir = 10 chars, max_row_width = 40 → max_id_chars = 40 - 16 = 24
+        // id = 10 chars → no truncation
+        let row = format_session_picker_row("short-id", "/work/dir1", 40);
+        assert_eq!(row, "short-id  (/work/dir1)");
+    }
+
+    #[test]
+    fn format_session_picker_row_no_truncation_when_max_id_chars_too_small() {
+        // max_id_chars <= 3 → no truncation even if id is long
+        // workdir = 30 chars, max_row_width = 35 → max_id_chars = 35 - 36 = saturating = 0
+        let workdir = "a".repeat(30);
+        let id = "long-id-123456789";
+        let row = format_session_picker_row(id, &workdir, 35);
+        // max_id_chars = 0, which is not > 3, so no truncation
+        assert!(
+            row.contains(id),
+            "id should not be truncated when max_id_chars <= 3; got: {row}"
         );
     }
 }

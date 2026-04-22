@@ -685,7 +685,7 @@ async fn handle_action(app: &mut App, action: Action) {
             // The picker was shown during `remote run` — now we have a session ID.
             // Extract the command and follow from the pending RemoteRun state if available,
             // otherwise look for what was stored in the dialog before it was closed.
-            if let PendingCommand::RemoteRun { remote_addr, command, follow, .. } =
+            if let PendingCommand::RemoteRun { remote_addr, command, follow, api_key, .. } =
                 app.active_tab().pending_command.clone()
             {
                 app.active_tab_mut().pending_command = PendingCommand::RemoteRun {
@@ -693,6 +693,7 @@ async fn handle_action(app: &mut App, action: Action) {
                     session_id,
                     command,
                     follow,
+                    api_key,
                 };
                 launch_pending_command(app).await;
             }
@@ -701,7 +702,7 @@ async fn handle_action(app: &mut App, action: Action) {
         Action::RemoteSavedDirChosen { dir } => {
             // Directory chosen from saved-dirs picker for `remote session start`.
             // The remote_addr is in the pending command (stored before showing the picker).
-            if let PendingCommand::RemoteSessionStart { remote_addr, .. } =
+            if let PendingCommand::RemoteSessionStart { remote_addr, api_key, .. } =
                 app.active_tab().pending_command.clone()
             {
                 // Check if dir is not yet saved; if so show save confirm.
@@ -710,6 +711,7 @@ async fn handle_action(app: &mut App, action: Action) {
                     app.active_tab_mut().pending_command = PendingCommand::RemoteSessionStart {
                         remote_addr: remote_addr.clone(),
                         dir: dir.clone(),
+                        api_key,
                     };
                     app.active_tab_mut().dialog = state::Dialog::RemoteSaveDirConfirm {
                         dir,
@@ -719,6 +721,7 @@ async fn handle_action(app: &mut App, action: Action) {
                     app.active_tab_mut().pending_command = PendingCommand::RemoteSessionStart {
                         remote_addr,
                         dir,
+                        api_key,
                     };
                     launch_pending_command(app).await;
                 }
@@ -745,12 +748,13 @@ async fn handle_action(app: &mut App, action: Action) {
 
         Action::RemoteSessionKillChosen { session_id } => {
             // Session chosen from the kill picker.
-            if let PendingCommand::RemoteSessionKill { remote_addr, .. } =
+            if let PendingCommand::RemoteSessionKill { remote_addr, api_key, .. } =
                 app.active_tab().pending_command.clone()
             {
                 app.active_tab_mut().pending_command = PendingCommand::RemoteSessionKill {
                     remote_addr,
                     session_id,
+                    api_key,
                 };
                 launch_pending_command(app).await;
             }
@@ -1451,12 +1455,16 @@ async fn execute_command(app: &mut App, cmd: &str) {
                     let session_id = crate::commands::remote::resolve_remote_session(session_flag.as_deref())
                         .or_else(|| app.active_tab().last_remote_session_id.clone());
 
+                    let api_key_flag = flag_parser::flag_string(&flags, "api-key").map(str::to_string);
+                    let resolved_key = crate::commands::remote::resolve_api_key(api_key_flag.as_deref(), &addr);
+
                     if let Some(sid) = session_id {
                         app.active_tab_mut().pending_command = PendingCommand::RemoteRun {
                             remote_addr: addr,
                             session_id: sid,
                             command,
                             follow,
+                            api_key: resolved_key,
                         };
                         launch_pending_command(app).await;
                     } else {
@@ -1467,8 +1475,9 @@ async fn execute_command(app: &mut App, cmd: &str) {
                             session_id: String::new(), // filled in by RemoteSessionChosen
                             command: command.clone(),
                             follow,
+                            api_key: resolved_key.clone(),
                         };
-                        fetch_and_show_session_picker(app, addr, command, follow).await;
+                        fetch_and_show_session_picker(app, addr, resolved_key, command, follow).await;
                     }
                 }
                 Some(&"session") => {
@@ -1485,6 +1494,9 @@ async fn execute_command(app: &mut App, cmd: &str) {
                                     return;
                                 }
                             };
+
+                            let api_key_flag = flag_parser::flag_string(&flags, "api-key").map(str::to_string);
+                            let resolved_key = crate::commands::remote::resolve_api_key(api_key_flag.as_deref(), &addr);
 
                             // Extract positional dir arg (not a flag).
                             let dir_arg: Option<String> = parts.iter()
@@ -1503,11 +1515,13 @@ async fn execute_command(app: &mut App, cmd: &str) {
                                     app.active_tab_mut().pending_command = PendingCommand::RemoteSessionStart {
                                         remote_addr: addr,
                                         dir,
+                                        api_key: resolved_key,
                                     };
                                 } else {
                                     app.active_tab_mut().pending_command = PendingCommand::RemoteSessionStart {
                                         remote_addr: addr,
                                         dir,
+                                        api_key: resolved_key,
                                     };
                                     launch_pending_command(app).await;
                                 }
@@ -1523,6 +1537,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
                                     app.active_tab_mut().pending_command = PendingCommand::RemoteSessionStart {
                                         remote_addr: addr.clone(),
                                         dir: String::new(), // filled in by RemoteSavedDirChosen
+                                        api_key: resolved_key,
                                     };
                                     app.active_tab_mut().dialog = state::Dialog::RemoteSavedDirPicker {
                                         dirs: saved,
@@ -1545,6 +1560,9 @@ async fn execute_command(app: &mut App, cmd: &str) {
                                 }
                             };
 
+                            let api_key_flag = flag_parser::flag_string(&flags, "api-key").map(str::to_string);
+                            let resolved_key = crate::commands::remote::resolve_api_key(api_key_flag.as_deref(), &addr);
+
                             // Extract positional session ID.
                             let session_arg: Option<String> = parts.iter()
                                 .skip(3)
@@ -1555,6 +1573,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
                                 app.active_tab_mut().pending_command = PendingCommand::RemoteSessionKill {
                                     remote_addr: addr,
                                     session_id: sid,
+                                    api_key: resolved_key,
                                 };
                                 launch_pending_command(app).await;
                             } else {
@@ -1562,8 +1581,9 @@ async fn execute_command(app: &mut App, cmd: &str) {
                                 app.active_tab_mut().pending_command = PendingCommand::RemoteSessionKill {
                                     remote_addr: addr.clone(),
                                     session_id: String::new(), // filled in by RemoteSessionKillChosen
+                                    api_key: resolved_key.clone(),
                                 };
-                                fetch_and_show_session_kill_picker(app, addr).await;
+                                fetch_and_show_session_kill_picker(app, addr, resolved_key).await;
                             }
                         }
                         _ => {
@@ -1647,14 +1667,14 @@ async fn launch_pending_command(app: &mut App) {
         PendingCommand::ExecWorkflow { workflow, work_item, agent, model, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto } => {
             launch_exec_workflow(app, workflow, work_item, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto, agent, model).await;
         }
-        PendingCommand::RemoteRun { remote_addr, session_id, command, follow } => {
-            launch_remote_run(app, remote_addr, session_id, command, follow).await;
+        PendingCommand::RemoteRun { remote_addr, session_id, command, follow, api_key } => {
+            launch_remote_run(app, remote_addr, session_id, command, follow, api_key).await;
         }
-        PendingCommand::RemoteSessionStart { remote_addr, dir } => {
-            launch_remote_session_start(app, remote_addr, dir).await;
+        PendingCommand::RemoteSessionStart { remote_addr, dir, api_key } => {
+            launch_remote_session_start(app, remote_addr, dir, api_key).await;
         }
-        PendingCommand::RemoteSessionKill { remote_addr, session_id } => {
-            launch_remote_session_kill(app, remote_addr, session_id).await;
+        PendingCommand::RemoteSessionKill { remote_addr, session_id, api_key } => {
+            launch_remote_session_kill(app, remote_addr, session_id, api_key).await;
         }
         PendingCommand::None => {}
     }
@@ -1672,7 +1692,7 @@ async fn launch_pending_command(app: &mut App) {
 /// preserved intact so the forwarded command is identical to what the user typed.
 fn extract_passthrough_command(parts: &[&str], offset: usize) -> Vec<String> {
     // Flags that take a following value token (space-separated form).
-    const VALUE_FLAGS: &[&str] = &["--remote-addr", "--session"];
+    const VALUE_FLAGS: &[&str] = &["--remote-addr", "--session", "--api-key"];
     // Boolean flags that consume only themselves.
     const BOOL_FLAGS: &[&str] = &["--follow", "-f"];
 
@@ -1710,10 +1730,10 @@ fn extract_passthrough_command(parts: &[&str], offset: usize) -> Vec<String> {
 
 /// Fetch sessions from the remote host and show a session picker dialog.
 /// Pre-selects the row matching `last_remote_session_id` if present.
-async fn fetch_and_show_session_picker(app: &mut App, addr: String, command: Vec<String>, follow: bool) {
+async fn fetch_and_show_session_picker(app: &mut App, addr: String, api_key: Option<String>, command: Vec<String>, follow: bool) {
     // Read the last-used session ID before any mutable borrow.
     let last_session_id = app.active_tab().last_remote_session_id.clone();
-    match crate::commands::remote::fetch_sessions(&addr).await {
+    match crate::commands::remote::fetch_sessions(&addr, api_key.as_deref()).await {
         Ok(sessions) if sessions.is_empty() => {
             app.active_tab_mut().input_error =
                 Some(format!("No active sessions on {}. Use 'remote session start' to create one.", addr));
@@ -1740,8 +1760,8 @@ async fn fetch_and_show_session_picker(app: &mut App, addr: String, command: Vec
 }
 
 /// Fetch sessions from the remote host and show a session kill picker dialog.
-async fn fetch_and_show_session_kill_picker(app: &mut App, addr: String) {
-    match crate::commands::remote::fetch_sessions(&addr).await {
+async fn fetch_and_show_session_kill_picker(app: &mut App, addr: String, api_key: Option<String>) {
+    match crate::commands::remote::fetch_sessions(&addr, api_key.as_deref()).await {
         Ok(sessions) if sessions.is_empty() => {
             app.active_tab_mut().input_error =
                 Some(format!("No active sessions on {}.", addr));
@@ -1760,7 +1780,7 @@ async fn fetch_and_show_session_kill_picker(app: &mut App, addr: String) {
 }
 
 /// Launch a remote run command as a background text task.
-async fn launch_remote_run(app: &mut App, remote_addr: String, session_id: String, command: Vec<String>, follow: bool) {
+async fn launch_remote_run(app: &mut App, remote_addr: String, session_id: String, command: Vec<String>, follow: bool, api_key: Option<String>) {
     // Guard: session_id should always be resolved before this point.
     // An empty string means the picker flow was bypassed incorrectly.
     if session_id.is_empty() {
@@ -1777,12 +1797,12 @@ async fn launch_remote_run(app: &mut App, remote_addr: String, session_id: Strin
     // Track the session so subsequent `remote run` commands default to it.
     app.active_tab_mut().last_remote_session_id = Some(session_id.clone());
     spawn_text_command(tx, exit_tx, move |sink| async move {
-        crate::commands::remote::run_remote_run(&remote_addr, &session_id, &command, follow, &sink).await
+        crate::commands::remote::run_remote_run(&remote_addr, &session_id, &command, follow, api_key.as_deref(), &sink).await
     });
 }
 
 /// Launch a remote session start command as a background text task.
-async fn launch_remote_session_start(app: &mut App, remote_addr: String, dir: String) {
+async fn launch_remote_session_start(app: &mut App, remote_addr: String, dir: String, api_key: Option<String>) {
     // Guard: dir should always be resolved before this point.
     if dir.is_empty() {
         app.active_tab_mut().input_error =
@@ -1796,21 +1816,21 @@ async fn launch_remote_session_start(app: &mut App, remote_addr: String, dir: St
     app.active_tab_mut().exit_rx = Some(exit_rx);
     let tx = app.active_tab().output_tx.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
-        let session_id = crate::commands::remote::run_remote_session_start(&remote_addr, &dir).await?;
+        let session_id = crate::commands::remote::run_remote_session_start(&remote_addr, &dir, api_key.as_deref()).await?;
         sink.println(format!("Session created: {}", session_id));
         Ok(())
     });
 }
 
 /// Launch a remote session kill command as a background text task.
-async fn launch_remote_session_kill(app: &mut App, remote_addr: String, session_id: String) {
+async fn launch_remote_session_kill(app: &mut App, remote_addr: String, session_id: String, api_key: Option<String>) {
     let label = format!("remote session kill {}", &session_id[..8.min(session_id.len())]);
     app.active_tab_mut().start_command(label);
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     app.active_tab_mut().exit_rx = Some(exit_rx);
     let tx = app.active_tab().output_tx.clone();
     spawn_text_command(tx, exit_tx, move |sink| async move {
-        crate::commands::remote::run_remote_session_kill(&remote_addr, &session_id).await?;
+        crate::commands::remote::run_remote_session_kill(&remote_addr, &session_id, api_key.as_deref()).await?;
         sink.println(format!("Session {} killed.", session_id));
         Ok(())
     });

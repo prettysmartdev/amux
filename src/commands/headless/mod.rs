@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod db;
 pub mod logging;
 pub mod process;
@@ -18,7 +19,9 @@ pub async fn run(
             port,
             workdirs,
             background,
-        } => run_start(port, workdirs, background, runtime).await,
+            refresh_key,
+            dangerously_skip_auth,
+        } => run_start(port, workdirs, background, refresh_key, dangerously_skip_auth, runtime).await,
         HeadlessAction::Kill => run_kill().await,
         HeadlessAction::Logs => run_logs().await,
         HeadlessAction::Status => run_status().await,
@@ -29,17 +32,41 @@ async fn run_start(
     port: u16,
     cli_workdirs: Vec<String>,
     background: bool,
+    refresh_key: bool,
+    dangerously_skip_auth: bool,
     runtime: Arc<dyn crate::runtime::AgentRuntime>,
 ) -> Result<()> {
     let root = db::headless_root()?;
 
-    // Check if server is already running.
+    // Check if server is already running FIRST — before the key lifecycle so
+    // that `--refresh-key` does not overwrite the on-disk hash when the server
+    // is already running (the running instance would then reject its own key).
     if let Some(pid) = process::check_already_running(&root)? {
         bail!(
             "Headless server is already running (PID {}). Use `amux headless kill` to stop it first.",
             pid
         );
     }
+
+    // ── API key lifecycle (before logging init so the banner prints cleanly) ──
+    let auth_mode = if dangerously_skip_auth {
+        eprintln!("WARNING: authentication is disabled (--dangerously-skip-auth).");
+        server::AuthMode::Disabled
+    } else {
+        // Decide whether we need to generate a new key.
+        let existing_hash = auth::read_key_hash(&root)?;
+        if refresh_key || existing_hash.is_none() {
+            let key = auth::generate_api_key()?;
+            let hash = auth::hash_api_key(&key);
+            auth::write_key_hash(&root, &hash)?;
+            auth::print_key_banner(&key);
+            server::AuthMode::Enabled { key_hash: hash }
+        } else {
+            server::AuthMode::Enabled {
+                key_hash: existing_hash.unwrap(),
+            }
+        }
+    };
 
     // Merge CLI workdirs with config workdirs.
     let global_config = crate::config::load_global_config().unwrap_or_default();
@@ -79,7 +106,7 @@ async fn run_start(
     // Write PID file so `amux headless kill` and `amux headless status` can find us.
     process::write_pid_file(&root)?;
 
-    let result = server::start_server(port, canonical_dirs, root.clone(), runtime).await;
+    let result = server::start_server(port, canonical_dirs, root.clone(), auth_mode, runtime).await;
 
     // Clean up PID file on exit.
     let _ = process::remove_pid_file(&root);

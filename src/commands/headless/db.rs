@@ -124,6 +124,73 @@ pub fn close_session(conn: &Connection, id: &str, closed_at: &str) -> Result<boo
     Ok(affected > 0)
 }
 
+/// List sessions filtered by status. If `status` is `None`, returns all sessions.
+pub fn list_sessions_by_status(conn: &Connection, status: Option<&str>) -> Result<Vec<SessionRow>> {
+    match status {
+        Some(st) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, workdir, created_at, status, closed_at FROM sessions WHERE status = ?1 ORDER BY created_at",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![st], |row| {
+                Ok(SessionRow {
+                    id: row.get(0)?,
+                    workdir: row.get(1)?,
+                    created_at: row.get(2)?,
+                    status: row.get(3)?,
+                    closed_at: row.get(4)?,
+                })
+            })?;
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row?);
+            }
+            Ok(result)
+        }
+        None => list_sessions(conn),
+    }
+}
+
+/// Delete closed sessions whose `closed_at` timestamp is older than `hours` hours ago.
+/// Also deletes associated commands (since there is no ON DELETE CASCADE).
+///
+/// Returns one `(session_id, commands_deleted)` pair per deleted session so
+/// the caller can emit a per-session audit log entry.
+pub fn delete_closed_sessions_older_than(
+    conn: &Connection,
+    hours: u64,
+) -> Result<Vec<(String, usize)>> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
+    let cutoff_str = cutoff.to_rfc3339();
+
+    // Collect IDs to delete first so we can log per-session detail.
+    // `closed_at IS NOT NULL` guards against sessions closed without a
+    // timestamp (shouldn't happen in practice, but makes the boundary
+    // semantics explicit and prevents NULL < cutoff from matching).
+    let mut stmt = conn.prepare(
+        "SELECT id FROM sessions \
+         WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at < ?1",
+    )?;
+    let session_ids: Vec<String> = stmt
+        .query_map(rusqlite::params![cutoff_str], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut deleted = Vec::new();
+    for sid in &session_ids {
+        // Count linked commands before deleting so we can include the count in
+        // the audit log returned to the caller.
+        let cmd_count: usize = conn.query_row(
+            "SELECT COUNT(*) FROM commands WHERE session_id = ?1",
+            rusqlite::params![sid],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+
+        conn.execute("DELETE FROM commands WHERE session_id = ?1", rusqlite::params![sid])?;
+        conn.execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![sid])?;
+        deleted.push((sid.clone(), cmd_count));
+    }
+    Ok(deleted)
+}
+
 pub fn count_active_sessions(conn: &Connection) -> Result<i64> {
     let count: i64 =
         conn.query_row("SELECT COUNT(*) FROM sessions WHERE status = 'active'", [], |r| r.get(0))?;
@@ -558,5 +625,181 @@ mod tests {
         std::env::remove_var("AMUX_HEADLESS_ROOT");
 
         assert_eq!(root, std::path::PathBuf::from("/custom/headless/root"));
+    }
+
+    // ── delete_closed_sessions_older_than ────────────────────────────────────
+    //
+    // Tests 0060: verify that the cleanup function correctly deletes sessions
+    // that are closed AND whose closed_at is older than the specified hour
+    // threshold, while leaving recent and active sessions untouched.
+
+    #[test]
+    fn delete_closed_sessions_older_than_deletes_old_sessions_and_returns_count() {
+        let (_tmp, conn) = make_tmp_db();
+
+        // Insert a session closed more than 24h ago (clearly old).
+        let old_ts = "2020-01-01T00:00:00Z"; // far in the past
+        insert_session(&conn, "old-session", "/tmp/w1", old_ts).unwrap();
+        conn.execute(
+            "UPDATE sessions SET status = 'closed', closed_at = ?1 WHERE id = ?2",
+            rusqlite::params![old_ts, "old-session"],
+        )
+        .unwrap();
+
+        let deleted = delete_closed_sessions_older_than(&conn, 24).unwrap();
+        assert_eq!(deleted.len(), 1, "must delete exactly 1 old session");
+
+        // Session must be gone from DB.
+        let row = get_session(&conn, "old-session").unwrap();
+        assert!(row.is_none(), "old session must be removed from the DB");
+    }
+
+    #[test]
+    fn delete_closed_sessions_older_than_does_not_delete_recent_sessions() {
+        let (_tmp, conn) = make_tmp_db();
+
+        // Insert a session closed very recently (1 second ago — well within 24h).
+        let recent_ts = chrono::Utc::now().to_rfc3339();
+        insert_session(&conn, "recent-session", "/tmp/w2", &recent_ts).unwrap();
+        conn.execute(
+            "UPDATE sessions SET status = 'closed', closed_at = ?1 WHERE id = ?2",
+            rusqlite::params![recent_ts, "recent-session"],
+        )
+        .unwrap();
+
+        let deleted = delete_closed_sessions_older_than(&conn, 24).unwrap();
+        assert!(deleted.is_empty(), "must not delete a recently closed session");
+
+        let row = get_session(&conn, "recent-session").unwrap();
+        assert!(row.is_some(), "recently closed session must still be in the DB");
+    }
+
+    #[test]
+    fn delete_closed_sessions_older_than_active_sessions_are_never_deleted() {
+        let (_tmp, conn) = make_tmp_db();
+
+        // Insert an active session (no closed_at, status = 'active').
+        insert_session(&conn, "active-session", "/tmp/w3", "2020-01-01T00:00:00Z").unwrap();
+        // Verify it's active.
+        let row = get_session(&conn, "active-session").unwrap().unwrap();
+        assert_eq!(row.status, "active");
+
+        let deleted = delete_closed_sessions_older_than(&conn, 24).unwrap();
+        assert!(deleted.is_empty(), "active sessions must never be deleted");
+
+        // Still present.
+        let row = get_session(&conn, "active-session").unwrap();
+        assert!(row.is_some(), "active session must still be in the DB");
+    }
+
+    #[test]
+    fn delete_closed_sessions_older_than_also_removes_linked_commands() {
+        let (_tmp, conn) = make_tmp_db();
+
+        let old_ts = "2020-01-01T00:00:00Z";
+        insert_session(&conn, "old-s", "/tmp/w4", old_ts).unwrap();
+        // Insert a command linked to this session.
+        insert_command(&conn, "old-cmd", "old-s", "status", "[]", "/tmp/out").unwrap();
+        update_command_started(&conn, "old-cmd", old_ts).unwrap();
+        update_command_finished(&conn, "old-cmd", "done", Some(0), old_ts).unwrap();
+        // Close the session.
+        conn.execute(
+            "UPDATE sessions SET status = 'closed', closed_at = ?1 WHERE id = ?2",
+            rusqlite::params![old_ts, "old-s"],
+        )
+        .unwrap();
+
+        let deleted = delete_closed_sessions_older_than(&conn, 24).unwrap();
+        assert_eq!(deleted.len(), 1);
+        // The returned entry must report the command that was deleted.
+        assert_eq!(deleted[0].1, 1, "must report 1 linked command deleted");
+
+        // The command row must also be gone.
+        let cmd = get_command(&conn, "old-cmd").unwrap();
+        assert!(cmd.is_none(), "commands for deleted sessions must also be removed");
+    }
+
+    #[test]
+    fn delete_closed_sessions_older_than_multiple_old_sessions_all_deleted() {
+        let (_tmp, conn) = make_tmp_db();
+
+        let old_ts = "2019-06-15T12:00:00Z";
+        for i in 0..5 {
+            let id = format!("old-multi-{i}");
+            insert_session(&conn, &id, "/tmp/w", old_ts).unwrap();
+            conn.execute(
+                "UPDATE sessions SET status = 'closed', closed_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_ts, id],
+            )
+            .unwrap();
+        }
+
+        let deleted = delete_closed_sessions_older_than(&conn, 24).unwrap();
+        assert_eq!(deleted.len(), 5, "all 5 old sessions must be deleted");
+    }
+
+    #[test]
+    fn delete_closed_sessions_older_than_boundary_is_exclusive() {
+        let (_tmp, conn) = make_tmp_db();
+
+        // A session closed EXACTLY at the cutoff boundary should NOT be deleted
+        // because the SQL condition is `closed_at < cutoff` (strictly less than).
+        // We approximate "exactly at cutoff" by using a timestamp that the function
+        // would compute as the boundary itself. Since we can't freeze time,
+        // we insert with closed_at = Utc::now() which is always < cutoff
+        // (cutoff = now - 24h, so now > cutoff → not deleted).
+        let just_now = chrono::Utc::now().to_rfc3339();
+        insert_session(&conn, "boundary-session", "/tmp/wb", &just_now).unwrap();
+        conn.execute(
+            "UPDATE sessions SET status = 'closed', closed_at = ?1 WHERE id = ?2",
+            rusqlite::params![just_now, "boundary-session"],
+        )
+        .unwrap();
+
+        let deleted = delete_closed_sessions_older_than(&conn, 24).unwrap();
+        // A session closed just now (< 24h ago) must NOT be deleted.
+        assert!(deleted.is_empty(), "session closed just now must not be deleted (boundary is exclusive)");
+    }
+
+    #[test]
+    fn list_sessions_by_status_returns_only_active_when_filtered() {
+        let (_tmp, conn) = make_tmp_db();
+
+        insert_session(&conn, "a1", "/tmp/w1", "2024-01-01T00:00:00Z").unwrap();
+        insert_session(&conn, "a2", "/tmp/w2", "2024-01-01T00:01:00Z").unwrap();
+        insert_session(&conn, "c1", "/tmp/w3", "2024-01-01T00:02:00Z").unwrap();
+        close_session(&conn, "c1", "2024-01-01T01:00:00Z").unwrap();
+
+        let active = list_sessions_by_status(&conn, Some("active")).unwrap();
+        assert_eq!(active.len(), 2, "must return only 2 active sessions");
+        let ids: Vec<&str> = active.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"a1"));
+        assert!(ids.contains(&"a2"));
+        assert!(!ids.contains(&"c1"), "closed session must not appear in active filter");
+    }
+
+    #[test]
+    fn list_sessions_by_status_none_returns_all_sessions() {
+        let (_tmp, conn) = make_tmp_db();
+
+        insert_session(&conn, "s1", "/tmp/w1", "2024-01-01T00:00:00Z").unwrap();
+        insert_session(&conn, "s2", "/tmp/w2", "2024-01-01T00:01:00Z").unwrap();
+        close_session(&conn, "s2", "2024-01-01T01:00:00Z").unwrap();
+
+        let all = list_sessions_by_status(&conn, None).unwrap();
+        assert_eq!(all.len(), 2, "no filter must return all sessions");
+    }
+
+    #[test]
+    fn list_sessions_by_status_returns_only_closed_when_filtered() {
+        let (_tmp, conn) = make_tmp_db();
+
+        insert_session(&conn, "active-x", "/tmp/w1", "2024-01-01T00:00:00Z").unwrap();
+        insert_session(&conn, "closed-x", "/tmp/w2", "2024-01-01T00:01:00Z").unwrap();
+        close_session(&conn, "closed-x", "2024-01-01T01:00:00Z").unwrap();
+
+        let closed = list_sessions_by_status(&conn, Some("closed")).unwrap();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].id, "closed-x");
     }
 }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use amux::commands::headless::db;
-use amux::commands::headless::server::{AppState, build_router};
+use amux::commands::headless::server::{AppState, AuthMode, build_router};
 use amux::commands::output::OutputSink;
 use amux::commands::remote::{
     fetch_sessions, run_remote_run, run_remote_session_kill, run_remote_session_start,
@@ -231,6 +231,7 @@ async fn start_test_server(workdirs: Vec<PathBuf>) -> (TempDir, String) {
         runtime: Arc::new(MockRuntime),
         busy_sessions: Mutex::new(HashSet::new()),
         task_handles: Mutex::new(Vec::new()),
+        auth_mode: AuthMode::Disabled,
     });
 
     let app = build_router(state);
@@ -306,7 +307,7 @@ async fn run_remote_session_start_creates_session_and_returns_id() {
     let canonical = std::fs::canonicalize(workdir.path()).unwrap();
     let (_root, base) = start_test_server(vec![canonical.clone()]).await;
 
-    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap())
+    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap(), None)
         .await
         .unwrap();
 
@@ -318,7 +319,7 @@ async fn run_remote_session_start_returns_error_for_unlisted_workdir() {
     // No workdirs in the allowlist.
     let (_root, base) = start_test_server(vec![]).await;
 
-    let result = run_remote_session_start(&base, "/not/an/allowed/dir").await;
+    let result = run_remote_session_start(&base, "/not/an/allowed/dir", None).await;
 
     assert!(result.is_err(), "unlisted workdir must be rejected");
     let msg = result.unwrap_err().to_string();
@@ -339,11 +340,11 @@ async fn run_remote_session_kill_closes_an_existing_session() {
     let canonical = std::fs::canonicalize(workdir.path()).unwrap();
     let (root_dir, base) = start_test_server(vec![canonical.clone()]).await;
 
-    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap())
+    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap(), None)
         .await
         .unwrap();
 
-    run_remote_session_kill(&base, &session_id).await.unwrap();
+    run_remote_session_kill(&base, &session_id, None).await.unwrap();
 
     // Verify the session is marked closed in the DB.
     let conn = db::open_db(root_dir.path()).unwrap();
@@ -359,7 +360,7 @@ async fn run_remote_session_kill_closes_an_existing_session() {
 async fn run_remote_session_kill_returns_descriptive_error_for_unknown_session() {
     let (_root, base) = start_test_server(vec![]).await;
 
-    let result = run_remote_session_kill(&base, "no-such-session-xyz").await;
+    let result = run_remote_session_kill(&base, "no-such-session-xyz", None).await;
 
     assert!(result.is_err(), "killing a non-existent session must return an error");
     let msg = result.unwrap_err().to_string();
@@ -379,13 +380,13 @@ async fn run_remote_run_without_follow_submits_command_and_returns_ok() {
     let canonical = std::fs::canonicalize(workdir.path()).unwrap();
     let (_root, base) = start_test_server(vec![canonical.clone()]).await;
 
-    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap())
+    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap(), None)
         .await
         .unwrap();
 
     let command = vec!["status".to_string()];
     let sink = OutputSink::Null;
-    let result = run_remote_run(&base, &session_id, &command, false, &sink).await;
+    let result = run_remote_run(&base, &session_id, &command, false, None, &sink).await;
 
     assert!(
         result.is_ok(),
@@ -400,7 +401,7 @@ async fn run_remote_run_returns_error_for_unknown_session() {
 
     let command = vec!["status".to_string()];
     let sink = OutputSink::Null;
-    let result = run_remote_run(&base, "no-such-session-xyz", &command, false, &sink).await;
+    let result = run_remote_run(&base, "no-such-session-xyz", &command, false, None, &sink).await;
 
     assert!(result.is_err(), "unknown session must cause an error");
     let msg = result.unwrap_err().to_string();
@@ -416,7 +417,7 @@ async fn run_remote_run_returns_error_for_busy_session() {
     let canonical = std::fs::canonicalize(workdir.path()).unwrap();
     let (root_dir, base) = start_test_server(vec![canonical.clone()]).await;
 
-    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap())
+    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap(), None)
         .await
         .unwrap();
 
@@ -446,7 +447,7 @@ async fn run_remote_run_returns_error_for_busy_session() {
 
     let command = vec!["status".to_string()];
     let sink = OutputSink::Null;
-    let result = run_remote_run(&base, &session_id, &command, false, &sink).await;
+    let result = run_remote_run(&base, &session_id, &command, false, None, &sink).await;
 
     assert!(result.is_err(), "command on a busy session must be rejected");
     let msg = result.unwrap_err().to_string();
@@ -480,7 +481,7 @@ async fn stream_command_logs_delivers_log_lines_and_returns_before_sentinel() {
     // Capture streamed lines via OutputSink::Channel.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let sink = OutputSink::Channel(tx);
-    stream_command_logs(&base, command_id, &sink).await.unwrap();
+    stream_command_logs(&base, command_id, None, &sink).await.unwrap();
     drop(sink); // close the sender
 
     // Drain all buffered messages.
@@ -511,7 +512,7 @@ async fn stream_command_logs_returns_error_for_unknown_command_id() {
     let (_root, base) = start_test_server(vec![]).await;
 
     let sink = OutputSink::Null;
-    let result = stream_command_logs(&base, "no-such-command-xyz", &sink).await;
+    let result = stream_command_logs(&base, "no-such-command-xyz", None, &sink).await;
 
     assert!(result.is_err(), "unknown command ID must return an error");
     let msg = result.unwrap_err().to_string();
@@ -529,7 +530,7 @@ async fn stream_command_logs_returns_error_for_unknown_command_id() {
 async fn fetch_sessions_returns_empty_list_when_no_sessions_exist() {
     let (_root, base) = start_test_server(vec![]).await;
 
-    let sessions = fetch_sessions(&base).await.unwrap();
+    let sessions = fetch_sessions(&base, None).await.unwrap();
     assert!(
         sessions.is_empty(),
         "fresh server must have no active sessions; got: {sessions:?}"
@@ -542,11 +543,11 @@ async fn fetch_sessions_lists_active_sessions() {
     let canonical = std::fs::canonicalize(workdir.path()).unwrap();
     let (_root, base) = start_test_server(vec![canonical.clone()]).await;
 
-    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap())
+    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap(), None)
         .await
         .unwrap();
 
-    let sessions = fetch_sessions(&base).await.unwrap();
+    let sessions = fetch_sessions(&base, None).await.unwrap();
     assert_eq!(sessions.len(), 1, "exactly one session must be listed");
     assert_eq!(
         sessions[0].id, session_id,
@@ -560,22 +561,20 @@ async fn fetch_sessions_lists_active_sessions() {
 }
 
 #[tokio::test]
-async fn fetch_sessions_includes_killed_sessions_with_their_id() {
-    // The /v1/sessions endpoint returns all sessions (active and closed).
-    // Closed sessions remain in the list; callers that want only active
-    // sessions must filter by status themselves.
+async fn fetch_sessions_excludes_killed_sessions_when_filtering_active() {
+    // fetch_sessions now sends ?status=active, so killed sessions are excluded.
     let workdir = TempDir::new().unwrap();
     let canonical = std::fs::canonicalize(workdir.path()).unwrap();
     let (_root, base) = start_test_server(vec![canonical.clone()]).await;
 
-    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap())
+    let session_id = run_remote_session_start(&base, canonical.to_str().unwrap(), None)
         .await
         .unwrap();
-    run_remote_session_kill(&base, &session_id).await.unwrap();
+    run_remote_session_kill(&base, &session_id, None).await.unwrap();
 
-    let sessions = fetch_sessions(&base).await.unwrap();
+    let sessions = fetch_sessions(&base, None).await.unwrap();
     assert!(
-        sessions.iter().any(|s| s.id == session_id),
-        "killed session must still appear in the sessions list; got: {sessions:?}"
+        !sessions.iter().any(|s| s.id == session_id),
+        "killed session must NOT appear when fetching active sessions; got: {sessions:?}"
     );
 }

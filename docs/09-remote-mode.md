@@ -55,6 +55,43 @@ After that, every `amux remote` command targets that host by default, with no fl
 
 ---
 
+## API key authentication
+
+When the remote headless server has authentication enabled (the default), every request must include the API key. The key is resolved automatically from one of these sources, in priority order:
+
+| Priority | Source |
+|----------|--------|
+| 1 | `--api-key <KEY>` flag on the command |
+| 2 | `AMUX_API_KEY` environment variable |
+| 3 | `remote.defaultAPIKey` in `~/.amux/config.json` — **only when the target address exactly matches `remote.defaultAddr`** |
+
+The host-match guard on `remote.defaultAPIKey` prevents a stored key from being silently forwarded to a different server. If you change `--remote-addr` or `AMUX_REMOTE_ADDR` to point at a different host, the config key is ignored and the request proceeds without auth — resulting in an HTTP 401 if that server requires a key.
+
+### Storing the key
+
+The recommended approach for day-to-day use is to store the key in global config:
+
+```sh
+amux config set --global remote.defaultAPIKey <your-api-key>
+```
+
+With both `remote.defaultAddr` and `remote.defaultAPIKey` configured, every `amux remote` command to the default host is fully authenticated with no extra flags.
+
+For CI pipelines, use the environment variable:
+
+```sh
+export AMUX_REMOTE_ADDR=http://build-server.internal:9876
+export AMUX_API_KEY=<your-api-key>
+
+amux remote run implement 0059 --follow
+```
+
+### Security note
+
+`AMUX_API_KEY` is visible in `/proc/<pid>/environ` on Linux. In security-sensitive contexts, prefer passing the key via `--api-key` piped from a secrets manager, or store it in `~/.amux/config.json` with restricted file permissions (`chmod 600 ~/.amux/config.json`).
+
+---
+
 ## `amux remote run`
 
 Dispatches an amux subcommand to a session on the remote host.
@@ -88,6 +125,7 @@ amux remote run exec prompt "Fix the tests" --yolo --non-interactive --session a
 | `--session <ID>` | | Session ID on the remote host. Required in CLI mode; interactive in TUI mode. Overrides `AMUX_REMOTE_SESSION` |
 | `--follow` | `-f` | Stream log output until the command completes, then print a summary table |
 | `--remote-addr <URL>` | | Remote host address. Overrides `AMUX_REMOTE_ADDR` and `remote.defaultAddr` |
+| `--api-key <KEY>` | | API key for the remote server. Overrides `AMUX_API_KEY` and `remote.defaultAPIKey` |
 
 ### Session resolution
 
@@ -157,7 +195,7 @@ When output is piped rather than printed to a terminal, log lines are written wi
 Creates a new session on the remote host.
 
 ```sh
-amux remote session start [dir] [--remote-addr <URL>]
+amux remote session start [dir] [--remote-addr <URL>] [--api-key <KEY>]
 ```
 
 `dir` is the absolute path (on the remote host) of the working directory for the session. It must be in the remote host's `--workdirs` allowlist.
@@ -166,8 +204,10 @@ amux remote session start [dir] [--remote-addr <URL>]
 # Start a session bound to /home/user/my-project
 amux remote session start /home/user/my-project
 
-# Specify a non-default remote host
-amux remote session start /home/user/my-project --remote-addr http://alt-host:9876
+# Specify a non-default remote host and key
+amux remote session start /home/user/my-project \
+  --remote-addr http://alt-host:9876 \
+  --api-key <key>
 ```
 
 On success, amux prints the new session ID:
@@ -186,15 +226,17 @@ In CLI mode, `dir` is required. In TUI mode, `dir` is optional — if omitted an
 Closes a session on the remote host.
 
 ```sh
-amux remote session kill [session-id] [--remote-addr <URL>]
+amux remote session kill [session-id] [--remote-addr <URL>] [--api-key <KEY>]
 ```
 
 ```sh
 # Kill a specific session
 amux remote session kill a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
-# Specify a non-default remote host
-amux remote session kill abc123 --remote-addr http://alt-host:9876
+# Specify a non-default remote host and key
+amux remote session kill abc123 \
+  --remote-addr http://alt-host:9876 \
+  --api-key <key>
 ```
 
 On success:
@@ -203,7 +245,7 @@ On success:
 Session closed: a1b2c3d4-e5f6-7890-abcd-ef1234567890
 ```
 
-In CLI mode, `session-id` is required. In TUI mode, if omitted, amux fetches the current session list from the remote host and shows an interactive picker.
+In CLI mode, `session-id` is required. In TUI mode, if omitted, amux fetches the active session list from the remote host and shows an interactive picker.
 
 ---
 
@@ -213,16 +255,18 @@ When used inside the amux TUI, `remote` subcommands gain interactive capabilitie
 
 ### Session picker (`remote run` without `--session`)
 
-If you run `remote run` in the TUI without specifying a session, and no session is stored from previous activity in the current tab, amux fetches the active session list from the remote host and displays an interactive picker:
+If you run `remote run` in the TUI without specifying a session, and no session is stored from previous activity in the current tab, amux fetches the **active** session list from the remote host (using `GET /v1/sessions?status=active`) and displays an interactive picker. Closed sessions are never shown in the picker.
+
+The picker dialog has a dynamic width that adjusts to fit long session IDs and working directory paths. Session IDs are truncated with `…` if necessary to preserve the full workdir path — the part most useful for identification.
 
 ```
-╭─── Select Session ─────────────────────────────────────────────────────────╮
-│                                                                              │
-│   ▶  a1b2c3d4  /home/user/my-project                                        │
-│      b2c3d4e5  /home/user/other-project                                      │
-│                                                                              │
-│  ↑↓ navigate  Enter confirm  Esc cancel                                      │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─── Select Session ───────────────────────────────────────────────╮
+│                                                                    │
+│   ▶  a1b2c3d4  /home/user/my-project                              │
+│      b2c3d4e5  /home/user/other-project                           │
+│                                                                    │
+│  ↑↓ navigate  Enter confirm  Esc cancel                            │
+╰────────────────────────────────────────────────────────────────────╯
 ```
 
 Use `↑` / `↓` to highlight a session and `Enter` to confirm. The TUI remembers your choice for the rest of the tab's lifetime — subsequent `remote run` commands in the same tab skip the picker and use the remembered session automatically.
@@ -271,7 +315,7 @@ When you start a session with a directory that is not in `remote.savedDirs`, the
 
 ### Session kill picker (`remote session kill` without a session ID)
 
-If you run `remote session kill` in the TUI without a session ID, amux fetches the active session list and shows a picker titled "Kill Session". Navigation is identical to the session picker above.
+If you run `remote session kill` in the TUI without a session ID, amux fetches the active session list (`?status=active`) and shows a picker titled "Kill Session". Closed sessions are not listed. Navigation is identical to the session picker above.
 
 ---
 
@@ -283,6 +327,7 @@ Remote mode settings live under a `remote` key in the global config (`~/.amux/co
 {
   "remote": {
     "defaultAddr": "http://build-server.example.com:9876",
+    "defaultAPIKey": "a3f8b2c1...64-char-hex...",
     "savedDirs": [
       "/home/user/my-project",
       "/home/user/other-project"
@@ -300,6 +345,18 @@ amux config set --global remote.defaultAddr http://build-server.example.com:9876
 ```
 
 Overridden per-invocation by `--remote-addr` or `AMUX_REMOTE_ADDR`.
+
+### `remote.defaultAPIKey`
+
+The default API key to send when authenticating to the remote headless server. When set alongside `remote.defaultAddr`, every `amux remote` command to that host is authenticated automatically with no extra flags.
+
+```sh
+amux config set --global remote.defaultAPIKey <your-api-key>
+```
+
+**Security constraint:** this key is **only sent when the target address exactly matches `remote.defaultAddr`** (scheme, host, and port, after stripping trailing slashes). If you use `--remote-addr` or `AMUX_REMOTE_ADDR` to point at a different server, the stored key is ignored — it is never silently forwarded to an unintended host.
+
+Overridden per-invocation by `--api-key` or `AMUX_API_KEY`.
 
 ### `remote.savedDirs`
 
@@ -323,8 +380,9 @@ Directories can also be added interactively from the TUI: when you start a sessi
 ## Full example: end-to-end CLI workflow
 
 ```sh
-# Configure the remote host once
+# Configure the remote host and API key once
 amux config set --global remote.defaultAddr http://build-server.example.com:9876
+amux config set --global remote.defaultAPIKey <your-api-key>
 
 # Create a session on the remote host
 SESSION=$(amux remote session start /home/user/my-project | grep 'Session started:' | awk '{print $NF}')
@@ -346,13 +404,14 @@ amux remote session kill "$SESSION"
 
 ```sh
 export AMUX_REMOTE_ADDR=http://build-server.internal:9876
+export AMUX_API_KEY=<your-api-key>
 export AMUX_REMOTE_SESSION=<pre-provisioned-session-id>
 
 # Dispatch the work item; exit code reflects the command's exit code
 amux remote run implement 0059 --follow
 ```
 
-For CI contexts where a session is long-lived and pre-provisioned, setting `AMUX_REMOTE_SESSION` in the pipeline environment avoids session management boilerplate.
+For CI contexts where a session is long-lived and pre-provisioned, setting `AMUX_REMOTE_SESSION` and `AMUX_API_KEY` in the pipeline environment avoids per-command flags entirely.
 
 ---
 
@@ -362,16 +421,20 @@ Because `remote run` is built on the headless HTTP API, you can use cURL (or any
 
 ```sh
 SERVER=http://build-server.example.com:9876
+KEY=<your-api-key>
 SESSION=a1b2c3d4-...
 
 # Submit a command
 CMD=$(curl -s -X POST "$SERVER/v1/commands" \
+  -H "Authorization: Bearer $KEY" \
   -H "x-amux-session: $SESSION" \
   -H 'Content-Type: application/json' \
   -d '{"subcommand":"implement","args":["0059"]}' | jq -r .command_id)
 
 # Stream live output via SSE (prints each log line as it arrives)
-curl -s "$SERVER/v1/commands/$CMD/logs/stream" | while IFS= read -r line; do
+curl -s "$SERVER/v1/commands/$CMD/logs/stream" \
+  -H "Authorization: Bearer $KEY" \
+| while IFS= read -r line; do
   case "$line" in
     "data: [amux:done]") echo "--- done ---"; break ;;
     data:\ *)             echo "${line#data: }" ;;
@@ -380,11 +443,13 @@ done
 
 # Or poll until done, then fetch the full log
 while true; do
-  STATUS=$(curl -s "$SERVER/v1/commands/$CMD" | jq -r .status)
+  STATUS=$(curl -s "$SERVER/v1/commands/$CMD" \
+    -H "Authorization: Bearer $KEY" | jq -r .status)
   [ "$STATUS" = "done" ] || [ "$STATUS" = "error" ] && break
   sleep 5
 done
-curl -s "$SERVER/v1/commands/$CMD/logs" | jq -r .output
+curl -s "$SERVER/v1/commands/$CMD/logs" \
+  -H "Authorization: Bearer $KEY" | jq -r .output
 ```
 
 See [Headless Mode](08-headless-mode.md) for the full HTTP API reference, including session management endpoints.
@@ -403,12 +468,18 @@ See [Headless Mode](08-headless-mode.md) for the full HTTP API reference, includ
 | Remote host unreachable | Connection timeout after 10 s; error message includes the target address |
 | Session is busy (command already running) | HTTP 403 from the server; error message includes the running command ID |
 | `--follow` on a command that already completed | Full historical log is replayed, then summary is printed — no output is missed |
+| `--follow` command runs longer than 10 minutes with no output | Client times out and prints: `"Request to <addr> timed out after 10 minutes. The remote command may still be running on the server."` The command continues running on the server; reconnect with `remote run` (without `--follow`) to check status |
+| `--follow` receives any output from server within 10 minutes | Timeout is reset on each received event; commands that produce incremental output can run for hours |
 | `remote session start` with a new dir (TUI) | Offers to save the path to `remote.savedDirs`; session starts regardless of whether you save |
 | TUI session picker: remote host has no active sessions | Picker modal shows "No active sessions" message; `Enter` and `Esc` both cancel |
 | TUI session picker: fetch fails | Error shown in command input bar; no modal opens |
 | TUI `remote session start` with no saved dirs and no dir argument | Error in command input bar: "No directory specified and no savedDirs configured" |
 | `remote session start` with a dir already in `savedDirs` | Dir is not duplicated in the list when the save-dir prompt is accepted |
 | Inner command flags (e.g. `--yolo`) | Forwarded to the remote host verbatim; not consumed by the `remote run` parser |
+| No API key provided and server requires auth | HTTP 401; error body explains which header to use |
+| `remote.defaultAPIKey` set but target address differs from `remote.defaultAddr` | Config key is ignored; request proceeds without auth (server returns 401 if auth is required) |
+| `remote.defaultAPIKey` matches `remote.defaultAddr` with trailing slash difference | Trailing slashes are stripped from both sides before comparison; key is used |
+| Session closed between picker fetch and command dispatch | Server returns HTTP 404; client surfaces a clear error; session is not re-opened |
 
 ---
 

@@ -109,6 +109,13 @@ pub static ALL_FIELDS: &[ConfigFieldDef] = &[
         settable: true,
     },
     ConfigFieldDef {
+        key: "remote.defaultAPIKey",
+        scope: FieldScope::GlobalOnly,
+        hint: "API key for the remote headless amux host; empty string clears",
+        builtin_default: "(not set)",
+        settable: true,
+    },
+    ConfigFieldDef {
         key: "work_items.dir",
         scope: FieldScope::RepoOnly,
         hint: "Path to the work items directory (relative to repo root)",
@@ -223,6 +230,19 @@ pub fn global_display(field: &ConfigFieldDef, global: &GlobalConfig) -> String {
                 .as_ref()
                 .and_then(|r| r.saved_dirs.as_ref())
                 .map(|v| format_vec(v))
+                .unwrap_or_else(|| format!("{} (built-in)", field.builtin_default)),
+            "remote.defaultAPIKey" => global
+                .remote
+                .as_ref()
+                .and_then(|r| r.default_api_key.as_deref())
+                .map(|v| {
+                    // Mask the key: show first 4 and last 4 chars only.
+                    if v.len() > 12 {
+                        format!("{}…{}", &v[..4], &v[v.len()-4..])
+                    } else {
+                        "(set)".to_string()
+                    }
+                })
                 .unwrap_or_else(|| format!("{} (built-in)", field.builtin_default)),
             _ => "N/A".to_string(),
         },
@@ -394,6 +414,18 @@ pub fn effective_display(
             .and_then(|r| r.saved_dirs.as_ref())
             .map(|v| format_vec(v))
             .unwrap_or_else(|| "(empty)".to_string()),
+        "remote.defaultAPIKey" => global
+            .remote
+            .as_ref()
+            .and_then(|r| r.default_api_key.as_deref())
+            .map(|v| {
+                if v.len() > 12 {
+                    format!("{}…{}", &v[..4], &v[v.len()-4..])
+                } else {
+                    "(set)".to_string()
+                }
+            })
+            .unwrap_or_else(|| "(not set)".to_string()),
         _ => "?".to_string(),
     }
 }
@@ -513,6 +545,9 @@ pub fn validate_value(field: &ConfigFieldDef, value: &str) -> Result<()> {
         "remote.savedDirs" => {
             // Comma-separated absolute paths; empty string clears.
         }
+        "remote.defaultAPIKey" => {
+            // Any string is valid; empty string clears.
+        }
         _ => {}
     }
     Ok(())
@@ -574,6 +609,10 @@ pub fn apply_to_global(field: &ConfigFieldDef, value: &str, global: &mut GlobalC
         "remote.savedDirs" => {
             let remote = global.remote.get_or_insert_with(crate::config::RemoteConfig::default);
             remote.saved_dirs = Some(parse_vec_value(value));
+        }
+        "remote.defaultAPIKey" => {
+            let remote = global.remote.get_or_insert_with(crate::config::RemoteConfig::default);
+            remote.default_api_key = if value.trim().is_empty() { None } else { Some(value.to_string()) };
         }
         _ => {}
     }
@@ -1614,6 +1653,7 @@ mod tests {
             remote: Some(crate::config::RemoteConfig {
                 default_addr: Some("http://1.2.3.4:9876".to_string()),
                 saved_dirs: None,
+                default_api_key: None,
             }),
             ..Default::default()
         };
@@ -1639,6 +1679,7 @@ mod tests {
             remote: Some(crate::config::RemoteConfig {
                 default_addr: None,
                 saved_dirs: Some(vec!["/workspace/a".to_string(), "/workspace/b".to_string()]),
+                default_api_key: None,
             }),
             ..Default::default()
         };
@@ -1668,6 +1709,7 @@ mod tests {
             remote: Some(crate::config::RemoteConfig {
                 default_addr: Some("http://1.2.3.4:9876".to_string()),
                 saved_dirs: None,
+                default_api_key: None,
             }),
             ..Default::default()
         };
@@ -1745,6 +1787,109 @@ mod tests {
         assert!(
             keys.contains(&"remote.savedDirs"),
             "ALL_FIELDS must include remote.savedDirs for config show; got: {keys:?}"
+        );
+    }
+
+    // ─── remote.defaultAPIKey (work item 0060) ────────────────────────────────
+
+    #[test]
+    fn find_field_returns_some_for_remote_default_api_key() {
+        assert!(
+            find_field("remote.defaultAPIKey").is_some(),
+            "find_field must recognise remote.defaultAPIKey"
+        );
+    }
+
+    #[test]
+    fn global_display_remote_default_api_key_shows_builtin_when_absent() {
+        let field = find_field("remote.defaultAPIKey").unwrap();
+        let global = GlobalConfig::default();
+        let result = global_display(field, &global);
+        assert!(
+            result.contains("not set") || result.contains("built-in"),
+            "absent defaultAPIKey must show builtin placeholder; got: {result}"
+        );
+    }
+
+    #[test]
+    fn global_display_remote_default_api_key_masks_long_key() {
+        let field = find_field("remote.defaultAPIKey").unwrap();
+        let long_key = "abcd1234efgh5678"; // 16 chars > 12 → masked
+        let global = GlobalConfig {
+            remote: Some(crate::config::RemoteConfig {
+                default_addr: None,
+                saved_dirs: None,
+                default_api_key: Some(long_key.to_string()),
+            }),
+            ..Default::default()
+        };
+        let result = global_display(field, &global);
+        // Expect format "XXXX…XXXX" — first 4 and last 4 chars.
+        assert!(
+            result.starts_with("abcd"),
+            "masked key must start with first 4 chars; got: {result}"
+        );
+        assert!(
+            result.ends_with("5678"),
+            "masked key must end with last 4 chars; got: {result}"
+        );
+        assert!(
+            result.contains('…'),
+            "masked key must contain ellipsis; got: {result}"
+        );
+    }
+
+    #[test]
+    fn global_display_remote_default_api_key_shows_set_for_short_key() {
+        let field = find_field("remote.defaultAPIKey").unwrap();
+        let short_key = "tooshort"; // 8 chars ≤ 12 → shows "(set)"
+        let global = GlobalConfig {
+            remote: Some(crate::config::RemoteConfig {
+                default_addr: None,
+                saved_dirs: None,
+                default_api_key: Some(short_key.to_string()),
+            }),
+            ..Default::default()
+        };
+        let result = global_display(field, &global);
+        assert_eq!(result, "(set)", "short key must display as '(set)'; got: {result}");
+    }
+
+    #[test]
+    fn set_remote_default_api_key_round_trips_through_global_config() {
+        use tempfile::TempDir;
+        let _guard = GLOBAL_ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+
+        set("remote.defaultAPIKey", "my-secret-api-key", true, None).unwrap();
+        let loaded = crate::config::load_global_config().unwrap();
+
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+
+        assert_eq!(
+            loaded.remote.as_ref().and_then(|r| r.default_api_key.as_deref()),
+            Some("my-secret-api-key"),
+            "remote.defaultAPIKey must persist to disk"
+        );
+    }
+
+    #[test]
+    fn set_remote_default_api_key_without_global_flag_fails() {
+        let err = set("remote.defaultAPIKey", "some-key", false, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("global-only") || msg.contains("--global"),
+            "expected global-only scope error; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn all_fields_includes_remote_default_api_key() {
+        let keys: Vec<&str> = ALL_FIELDS.iter().map(|f| f.key).collect();
+        assert!(
+            keys.contains(&"remote.defaultAPIKey"),
+            "ALL_FIELDS must include remote.defaultAPIKey; got: {keys:?}"
         );
     }
 }

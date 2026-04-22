@@ -361,6 +361,16 @@ pub enum HeadlessAction {
         /// Daemonize via the OS process manager (systemd on Linux, launchd on macOS).
         #[arg(long)]
         background: bool,
+
+        /// Regenerate the API key: creates a new key, stores the new hash,
+        /// prints the new key to stdout, and discards the old one.
+        #[arg(long)]
+        refresh_key: bool,
+
+        /// Disable authentication for this execution even if a key hash exists on disk.
+        /// WARNING: any client can reach the server without credentials.
+        #[arg(long)]
+        dangerously_skip_auth: bool,
     },
 
     /// Stop the background headless server.
@@ -398,6 +408,11 @@ pub enum RemoteAction {
         /// then print a summary table.
         #[arg(long, short = 'f')]
         follow: bool,
+
+        /// API key for the remote headless amux host.
+        /// Overrides AMUX_API_KEY env var and remote.defaultAPIKey config.
+        #[arg(long)]
+        api_key: Option<String>,
     },
 
     /// Manage sessions on the remote headless amux host.
@@ -421,6 +436,11 @@ pub enum RemoteSessionAction {
         /// Overrides AMUX_REMOTE_ADDR env var and remote.defaultAddr config.
         #[arg(long)]
         remote_addr: Option<String>,
+
+        /// API key for the remote headless amux host.
+        /// Overrides AMUX_API_KEY env var and remote.defaultAPIKey config.
+        #[arg(long)]
+        api_key: Option<String>,
     },
 
     /// Kill a session on the remote host.
@@ -433,6 +453,11 @@ pub enum RemoteSessionAction {
         /// Overrides AMUX_REMOTE_ADDR env var and remote.defaultAddr config.
         #[arg(long)]
         remote_addr: Option<String>,
+
+        /// API key for the remote headless amux host.
+        /// Overrides AMUX_API_KEY env var and remote.defaultAPIKey config.
+        #[arg(long)]
+        api_key: Option<String>,
     },
 }
 
@@ -1567,11 +1592,13 @@ mod tests {
         let cli = parse(&["amux", "headless", "start"]);
         match cli.command.unwrap() {
             Command::Headless {
-                action: HeadlessAction::Start { port, workdirs, background },
+                action: HeadlessAction::Start { port, workdirs, background, refresh_key, dangerously_skip_auth },
             } => {
                 assert_eq!(port, 9876, "default port must be 9876");
                 assert!(workdirs.is_empty(), "default workdirs must be empty");
                 assert!(!background, "background must default to false");
+                assert!(!refresh_key, "refresh_key must default to false");
+                assert!(!dangerously_skip_auth, "dangerously_skip_auth must default to false");
             }
             _ => panic!("expected headless start"),
         }
@@ -1657,14 +1684,46 @@ mod tests {
             "--port", "9999",
             "--workdirs", "/tmp/work",
             "--background",
+            "--refresh-key",
+            "--dangerously-skip-auth",
         ]);
         match cli.command.unwrap() {
             Command::Headless {
-                action: HeadlessAction::Start { port, workdirs, background },
+                action: HeadlessAction::Start { port, workdirs, background, refresh_key, dangerously_skip_auth },
             } => {
                 assert_eq!(port, 9999);
                 assert_eq!(workdirs, vec!["/tmp/work".to_string()]);
                 assert!(background);
+                assert!(refresh_key);
+                assert!(dangerously_skip_auth);
+            }
+            _ => panic!("expected headless start"),
+        }
+    }
+
+    #[test]
+    fn headless_start_refresh_key_flag_alone() {
+        let cli = parse(&["amux", "headless", "start", "--refresh-key"]);
+        match cli.command.unwrap() {
+            Command::Headless {
+                action: HeadlessAction::Start { refresh_key, dangerously_skip_auth, .. },
+            } => {
+                assert!(refresh_key, "--refresh-key must set refresh_key=true");
+                assert!(!dangerously_skip_auth, "dangerously_skip_auth must default to false");
+            }
+            _ => panic!("expected headless start"),
+        }
+    }
+
+    #[test]
+    fn headless_start_dangerously_skip_auth_flag_alone() {
+        let cli = parse(&["amux", "headless", "start", "--dangerously-skip-auth"]);
+        match cli.command.unwrap() {
+            Command::Headless {
+                action: HeadlessAction::Start { refresh_key, dangerously_skip_auth, .. },
+            } => {
+                assert!(!refresh_key, "refresh_key must default to false");
+                assert!(dangerously_skip_auth, "--dangerously-skip-auth must set flag=true");
             }
             _ => panic!("expected headless start"),
         }
@@ -2006,7 +2065,7 @@ mod tests {
         let cli = parse(&["amux", "remote", "run", "--follow", "execute", "prompt", "hello"]);
         match cli.command.unwrap() {
             Command::Remote {
-                action: RemoteAction::Run { command, follow, session, remote_addr },
+                action: RemoteAction::Run { command, follow, session, remote_addr, .. },
             } => {
                 assert_eq!(command, vec!["execute", "prompt", "hello"]);
                 assert!(follow, "--follow must be true");
@@ -2040,7 +2099,7 @@ mod tests {
         ]);
         match cli.command.unwrap() {
             Command::Remote {
-                action: RemoteAction::Run { command, remote_addr, session, follow },
+                action: RemoteAction::Run { command, remote_addr, session, follow, .. },
             } => {
                 assert_eq!(command, vec!["implement", "0042"]);
                 assert_eq!(remote_addr.as_deref(), Some("http://1.2.3.4:9876"));
@@ -2057,7 +2116,7 @@ mod tests {
         match cli.command.unwrap() {
             Command::Remote {
                 action: RemoteAction::Session {
-                    action: RemoteSessionAction::Start { dir, remote_addr },
+                    action: RemoteSessionAction::Start { dir, remote_addr, .. },
                 },
             } => {
                 assert_eq!(dir.as_deref(), Some("/workspace/proj"));
@@ -2095,6 +2154,49 @@ mod tests {
                     session_id.is_none(),
                     "session_id must be None; got: {session_id:?}"
                 );
+            }
+            _ => panic!("expected remote session kill"),
+        }
+    }
+
+    #[test]
+    fn remote_run_api_key_flag() {
+        let cli = parse(&["amux", "remote", "run", "--api-key", "abc123", "echo", "hi"]);
+        match cli.command.unwrap() {
+            Command::Remote {
+                action: RemoteAction::Run { api_key, .. },
+            } => {
+                assert_eq!(api_key.as_deref(), Some("abc123"), "api_key must be Some(\"abc123\")");
+            }
+            _ => panic!("expected remote run"),
+        }
+    }
+
+    #[test]
+    fn remote_session_start_api_key_flag() {
+        let cli = parse(&["amux", "remote", "session", "start", "--api-key", "mykey"]);
+        match cli.command.unwrap() {
+            Command::Remote {
+                action: RemoteAction::Session {
+                    action: RemoteSessionAction::Start { api_key, .. },
+                },
+            } => {
+                assert_eq!(api_key.as_deref(), Some("mykey"), "api_key must be Some(\"mykey\")");
+            }
+            _ => panic!("expected remote session start"),
+        }
+    }
+
+    #[test]
+    fn remote_session_kill_api_key_flag() {
+        let cli = parse(&["amux", "remote", "session", "kill", "--api-key", "killkey"]);
+        match cli.command.unwrap() {
+            Command::Remote {
+                action: RemoteAction::Session {
+                    action: RemoteSessionAction::Kill { api_key, .. },
+                },
+            } => {
+                assert_eq!(api_key.as_deref(), Some("killkey"), "api_key must be Some(\"killkey\")");
             }
             _ => panic!("expected remote session kill"),
         }

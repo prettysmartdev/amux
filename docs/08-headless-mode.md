@@ -142,9 +142,22 @@ amux headless start --workdirs /repo-a --workdirs /repo-b
 
 # Custom port
 amux headless start --port 8080 --workdirs /repo
+
+# Rotate the API key and print the new one to stdout
+amux headless start --refresh-key --port 9876 --workdirs /repo
+
+# Disable authentication for this run (WARNING: anyone can reach the server)
+amux headless start --dangerously-skip-auth --port 9876 --workdirs /repo
 ```
 
 `--workdirs` accepts one or more absolute paths (repeat the flag for multiple values). Only working directories on the allowlist can be used to create sessions — requests with any other path are rejected with HTTP 403. See [Working directory allowlist](#working-directory-allowlist).
+
+**Start flags related to authentication:**
+
+| Flag | Description |
+|------|-------------|
+| `--refresh-key` | Generate a new API key, write its hash to disk, and print the plaintext key to stdout. The old key is invalidated immediately. |
+| `--dangerously-skip-auth` | Disable authentication for this process lifetime only. The `api_key.hash` file is left untouched; the next normal start re-enables auth using the stored hash. |
 
 ### Background
 
@@ -227,6 +240,76 @@ info: server is not running (no PID file found)
 
 ---
 
+## Authentication
+
+The headless server uses cryptographic API key authentication. Every HTTP request must include the API key; unauthenticated requests are rejected with HTTP 401 before reaching any handler.
+
+### First start — key generation
+
+On the first start (when no `api_key.hash` file exists in `~/.amux/headless/`), amux automatically generates a cryptographically random 32-byte key, stores only its SHA-256 hash on disk (never the plaintext), and prints the key to stdout once:
+
+```
+╔═══════════════════════════════════════════════════════════════════╗
+║  amux headless API key (store this — it will not be shown again)  ║
+║  a3f8b2c1...64-character-hex-key...d7e9f0a1                       ║
+╚═══════════════════════════════════════════════════════════════════╝
+```
+
+**This is the only time the plaintext key appears.** Store it immediately. Key generation happens before the log file is opened, so the key cannot appear in `amux.log` under any circumstances.
+
+### Subsequent starts
+
+On subsequent starts (when `~/.amux/headless/api_key.hash` already exists), the server loads the stored hash silently and starts normally — no banner is printed. The same key continues to work without any client-side changes.
+
+### Rotating the key — `--refresh-key`
+
+To invalidate the current key and generate a new one:
+
+```sh
+amux headless start --refresh-key --port 9876 --workdirs /repo
+```
+
+A new key is generated and its hash replaces the file on disk. The new plaintext key is printed to stdout using the same banner format. All clients using the old key will immediately receive HTTP 401 and must be updated.
+
+### Disabling authentication — `--dangerously-skip-auth`
+
+```sh
+amux headless start --dangerously-skip-auth --port 9876 --workdirs /repo
+```
+
+Skips all authentication checks for this process lifetime. The `api_key.hash` file is not modified; the next normal start re-enables authentication. Use only in isolated, trusted environments (e.g. a local loopback-only setup with strict firewall rules).
+
+### Authenticating requests
+
+Include the API key in every HTTP request using the `Authorization` header:
+
+```sh
+# Bearer token format (recommended)
+curl -s http://localhost:9876/v1/status \
+  -H "Authorization: Bearer <your-api-key>"
+
+# Bare key format (also accepted)
+curl -s http://localhost:9876/v1/status \
+  -H "Authorization: <your-api-key>"
+```
+
+When using `amux remote` subcommands, the key is resolved and injected automatically — see [Remote Mode: API key](09-remote-mode.md#api-key-authentication).
+
+**Error responses from the middleware:**
+
+| Situation | HTTP status | Response body |
+|-----------|-------------|---------------|
+| No `Authorization` header | 401 | `{"error": "API key required. Pass the key via the Authorization header (e.g. Authorization: Bearer <key>)."}` |
+| Wrong key | 401 | `{"error": "Invalid API key."}` |
+
+Hash comparisons use constant-time comparison (`ring::constant_time::verify_slices_are_equal`) to prevent timing attacks.
+
+### Key storage
+
+The key hash is stored at `~/.amux/headless/api_key.hash` with mode `0o600` (owner read/write only on Unix). Only the SHA-256 hex digest is written — the plaintext key is never persisted anywhere.
+
+---
+
 ## Working directory allowlist
 
 The server maintains a strict allowlist of working directories. Any session creation request that specifies a path not on the allowlist is rejected with HTTP 403.
@@ -259,6 +342,8 @@ curl http://localhost:9876/v1/workdirs
 
 All endpoints speak JSON. All requests and responses are logged at `INFO` level or above.
 
+When authentication is enabled (the default), every request must include the API key in the `Authorization` header. See [Authentication](#authentication) for details.
+
 ### Base URL
 
 ```
@@ -271,7 +356,7 @@ http://localhost:<port>/v1
 |--------|------|-------------|
 | `GET` | `/v1/workdirs` | List the server's allowlisted working directories |
 | `POST` | `/v1/sessions` | Create a new session |
-| `GET` | `/v1/sessions` | List all sessions (active and closed) |
+| `GET` | `/v1/sessions` | List sessions; accepts optional `?status=active` filter |
 | `GET` | `/v1/sessions/:id` | Get session detail |
 | `DELETE` | `/v1/sessions/:id` | Close a session |
 | `POST` | `/v1/commands` | Submit a subcommand to a session |
@@ -288,6 +373,7 @@ http://localhost:<port>/v1
 
 ```sh
 curl -s -X POST http://localhost:9876/v1/sessions \
+  -H 'Authorization: Bearer <api-key>' \
   -H 'Content-Type: application/json' \
   -d '{"workdir":"/home/user/my-project"}'
 ```
@@ -308,8 +394,16 @@ Error responses:
 #### List sessions
 
 ```sh
-curl -s http://localhost:9876/v1/sessions
+# All sessions (active and closed)
+curl -s http://localhost:9876/v1/sessions \
+  -H 'Authorization: Bearer <api-key>'
+
+# Active sessions only
+curl -s "http://localhost:9876/v1/sessions?status=active" \
+  -H 'Authorization: Bearer <api-key>'
 ```
+
+The optional `status` query parameter filters by session status. Accepted values: `active`, `closed`. Without the parameter, all sessions are returned.
 
 ```json
 {
@@ -335,7 +429,8 @@ curl -s http://localhost:9876/v1/sessions
 #### Get session detail
 
 ```sh
-curl -s http://localhost:9876/v1/sessions/<session-id>
+curl -s http://localhost:9876/v1/sessions/<session-id> \
+  -H 'Authorization: Bearer <api-key>'
 ```
 
 Returns the session record. Returns HTTP 404 if the ID does not exist.
@@ -343,7 +438,8 @@ Returns the session record. Returns HTTP 404 if the ID does not exist.
 #### Close a session
 
 ```sh
-curl -s -X DELETE http://localhost:9876/v1/sessions/<session-id>
+curl -s -X DELETE http://localhost:9876/v1/sessions/<session-id> \
+  -H 'Authorization: Bearer <api-key>'
 ```
 
 Marks the session `closed`. Closed sessions cannot receive new commands. All existing command records and output files are preserved — no data is deleted. Returns HTTP 204 on success, HTTP 404 if the session does not exist.
@@ -358,6 +454,7 @@ Commands are submitted to a session and execute asynchronously. Submit a command
 
 ```sh
 curl -s -X POST http://localhost:9876/v1/commands \
+  -H 'Authorization: Bearer <api-key>' \
   -H 'x-amux-session: <session-id>' \
   -H 'Content-Type: application/json' \
   -d '{"subcommand":"implement","args":["0057"]}'
@@ -370,12 +467,14 @@ For `exec`, the `args` array starts with the exec action (`prompt` or `workflow`
 ```sh
 # exec prompt via headless API
 curl -s -X POST http://localhost:9876/v1/commands \
+  -H 'Authorization: Bearer <api-key>' \
   -H 'x-amux-session: <session-id>' \
   -H 'Content-Type: application/json' \
   -d '{"subcommand":"exec","args":["prompt","Fix the failing tests","--non-interactive"]}'
 
 # exec workflow via headless API
 curl -s -X POST http://localhost:9876/v1/commands \
+  -H 'Authorization: Bearer <api-key>' \
   -H 'x-amux-session: <session-id>' \
   -H 'Content-Type: application/json' \
   -d '{"subcommand":"exec","args":["workflow","./aspec/workflows/implement-feature.md","--work-item","0053"]}'
@@ -410,7 +509,8 @@ Error responses:
 #### Get command status
 
 ```sh
-curl -s http://localhost:9876/v1/commands/<command-id>
+curl -s http://localhost:9876/v1/commands/<command-id> \
+  -H 'Authorization: Bearer <api-key>'
 ```
 
 Returns the current status and metadata for a command:
@@ -439,7 +539,8 @@ Returns the current status and metadata for a command:
 #### Get command logs
 
 ```sh
-curl -s http://localhost:9876/v1/commands/<command-id>/logs
+curl -s http://localhost:9876/v1/commands/<command-id>/logs \
+  -H 'Authorization: Bearer <api-key>'
 ```
 
 Returns the captured output for a command. Stdout and stderr are combined into a single stream in the order they were written. For a running command, returns whatever has been written so far. For a completed command, returns the full output.
@@ -455,7 +556,8 @@ Output is written incrementally as the subprocess produces it — not buffered i
 #### Stream command logs (live)
 
 ```sh
-curl -s http://localhost:9876/v1/commands/<command-id>/logs/stream
+curl -s http://localhost:9876/v1/commands/<command-id>/logs/stream \
+  -H 'Authorization: Bearer <api-key>'
 ```
 
 Opens a persistent HTTP response using [Server-Sent Events (SSE)](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events). The server replays any output already written, then tails the log file and sends new lines as they arrive. When the command completes, the server sends a `[amux:done]` sentinel event and closes the response.
@@ -477,6 +579,7 @@ Each event is terminated by a blank line (standard SSE format). The sentinel `[a
 
 ```sh
 curl -s http://localhost:9876/v1/commands/<command-id>/logs/stream \
+  -H 'Authorization: Bearer <api-key>' \
 | while IFS= read -r line; do
     case "$line" in
       "data: [amux:done]") echo "--- done ---"; break ;;
@@ -491,6 +594,7 @@ curl -s http://localhost:9876/v1/commands/<command-id>/logs/stream \
 - If the client disconnects mid-stream, the command continues executing unaffected.
 - If the log file does not yet exist (the command is `pending`), the server waits up to 10 s for it to appear before returning HTTP 404.
 - The `Content-Type` response header is `text/event-stream`.
+- **Read timeout:** `amux remote run --follow` uses a 10-minute read timeout per SSE event. Any output from the server resets the timer, so long-running commands that produce incremental output can stream for hours. If the server is completely silent for 10 minutes, the client disconnects with a timeout message; the command continues running on the server. When using cURL directly with `--no-buffer`, consider adding `--max-time 0` to disable cURL's own timeout for very long-running commands.
 
 `amux remote run --follow` uses this endpoint internally. The cURL form above is equivalent and is useful in scripts where the amux binary is unavailable on the client.
 
@@ -499,7 +603,8 @@ curl -s http://localhost:9876/v1/commands/<command-id>/logs/stream \
 ### Server health
 
 ```sh
-curl -s http://localhost:9876/v1/status
+curl -s http://localhost:9876/v1/status \
+  -H 'Authorization: Bearer <api-key>'
 ```
 
 ```json
@@ -516,15 +621,18 @@ curl -s http://localhost:9876/v1/status
 
 ```sh
 SERVER=http://localhost:9876
+KEY=<your-api-key>   # obtained from the startup banner or --refresh-key
 
 # 1. Create a session
 SESSION=$(curl -s -X POST "$SERVER/v1/sessions" \
+  -H "Authorization: Bearer $KEY" \
   -H 'Content-Type: application/json' \
   -d '{"workdir":"/home/user/my-project"}' | jq -r .session_id)
 echo "Session: $SESSION"
 
 # 2. Submit a command
 CMD=$(curl -s -X POST "$SERVER/v1/commands" \
+  -H "Authorization: Bearer $KEY" \
   -H "x-amux-session: $SESSION" \
   -H 'Content-Type: application/json' \
   -d '{"subcommand":"implement","args":["0057"]}' | jq -r .command_id)
@@ -532,17 +640,20 @@ echo "Command: $CMD"
 
 # 3. Poll until done
 while true; do
-  STATUS=$(curl -s "$SERVER/v1/commands/$CMD" | jq -r .status)
+  STATUS=$(curl -s "$SERVER/v1/commands/$CMD" \
+    -H "Authorization: Bearer $KEY" | jq -r .status)
   echo "Status: $STATUS"
   [ "$STATUS" = "done" ] || [ "$STATUS" = "error" ] && break
   sleep 10
 done
 
 # 4. Retrieve output
-curl -s "$SERVER/v1/commands/$CMD/logs" | jq -r .output
+curl -s "$SERVER/v1/commands/$CMD/logs" \
+  -H "Authorization: Bearer $KEY" | jq -r .output
 
 # 5. Close the session
-curl -s -X DELETE "$SERVER/v1/sessions/$SESSION"
+curl -s -X DELETE "$SERVER/v1/sessions/$SESSION" \
+  -H "Authorization: Bearer $KEY"
 ```
 
 ### Example: one-shot exec prompt
@@ -561,11 +672,15 @@ To drive the same task via the headless HTTP server (so the result is logged and
 
 ```sh
 SERVER=http://localhost:9876
+KEY=<your-api-key>
+
 SESSION=$(curl -s -X POST "$SERVER/v1/sessions" \
+  -H "Authorization: Bearer $KEY" \
   -H 'Content-Type: application/json' \
   -d '{"workdir":"/home/user/my-project"}' | jq -r .session_id)
 
 CMD=$(curl -s -X POST "$SERVER/v1/commands" \
+  -H "Authorization: Bearer $KEY" \
   -H "x-amux-session: $SESSION" \
   -H 'Content-Type: application/json' \
   -d '{"subcommand":"exec","args":["prompt","Fix the failing tests","--non-interactive"]}' | jq -r .command_id)
@@ -584,6 +699,7 @@ Everything headless mode writes lives under `~/.amux/headless/`:
   amux.log                         # server log (background mode only)
   amux.pid                         # PID file for the background process
   amux.db                          # SQLite database: sessions + commands
+  api_key.hash                     # SHA-256 hex digest of the API key (mode 0600)
   sessions/
     <session-uuid>/
       commands/
@@ -660,9 +776,29 @@ The setting defaults to `false` so that amux's interactive defaults remain uncha
 
 ## Security
 
-Headless mode preserves all of amux's container isolation guarantees: every subcommand runs inside a Docker container, never directly on the host. The HTTP server has no built-in authentication layer — bind it to `localhost` (the default) and control access via firewall rules or SSH tunnels when running on a shared or remote machine.
+Headless mode preserves all of amux's container isolation guarantees: every subcommand runs inside a Docker container, never directly on the host.
 
-The working directory allowlist is the primary access control on the server: even a client that can reach the HTTP server can only create sessions in pre-approved directories.
+The HTTP server enforces cryptographic API key authentication on every request by default. The plaintext key is shown once at server start and never logged or persisted; only its SHA-256 hash is stored on disk. See [Authentication](#authentication) for the full key lifecycle.
+
+The working directory allowlist is the secondary access control on the server: even a client that presents a valid API key can only create sessions in pre-approved directories.
+
+For additional defense in depth, bind the server to `localhost` (the default) and restrict external access via firewall rules or SSH tunnels. Even with authentication enabled, reducing the attack surface is always worthwhile.
+
+---
+
+## Session cleanup
+
+At server startup, amux automatically purges sessions that were closed more than 24 hours ago. Their rows are removed from `amux.db` along with all associated command records. The on-disk output logs in `~/.amux/headless/sessions/<uuid>/` are **not** deleted — they remain for audit purposes.
+
+The cleanup runs once, before the server begins accepting connections. Each purged session is logged at `INFO` level:
+
+```
+INFO running stale closed session cleanup
+INFO deleted stale session a1b2c3d4-... and 3 linked command records
+INFO deleted stale session b2c3d4e5-... and 1 linked command records
+```
+
+Sessions closed within the last 24 hours are not touched. The 24-hour boundary (`< datetime('now', '-24 hours')`) is exclusive, so a session closed exactly 24 hours ago is not deleted until the next second boundary passes.
 
 ---
 
@@ -692,6 +828,15 @@ On `SIGTERM` or `SIGINT`, the server finishes all in-flight HTTP responses and a
 | `headless.alwaysNonInteractive` true + duplicate `--non-interactive` flag in args | Flag is deduplicated; no error |
 | `exec` dispatched via HTTP API with unknown action (not `prompt`/`workflow`/`wf`) | HTTP 400; response lists valid exec actions |
 | `remote` subcommand dispatched via HTTP API without required args (e.g. no `--session`) | Subprocess exits with a clear error; output appears in the command log |
+| No `Authorization` header on any request | HTTP 401 with JSON body explaining which header to use |
+| Wrong API key on any request | HTTP 401 with JSON `{"error": "Invalid API key."}` |
+| `--refresh-key` used: existing clients present the old key | HTTP 401; clients must be updated with the new key |
+| `--dangerously-skip-auth` with a hash file on disk | Auth disabled for this run only; the hash file is not modified; next normal start re-enables auth |
+| `api_key.hash` file is missing or unreadable at startup | Server treats it as a first start and generates a new key |
+| `GET /v1/sessions?status=active` with no active sessions | Returns `{"sessions":[]}` (empty list); HTTP 200 |
+| Session transitions to closed between list fetch and command dispatch | Server enforces rejection at `POST /v1/commands` regardless of filter; client receives HTTP 404 |
+| Startup cleanup: sessions closed exactly 24h ago | Not deleted until the next second boundary passes (exclusive `<` comparison) |
+| Startup cleanup: on-disk log files for cleaned sessions | Not deleted; they remain in `~/.amux/headless/sessions/<uuid>/` for audit purposes |
 
 ---
 

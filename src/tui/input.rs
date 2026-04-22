@@ -1615,11 +1615,9 @@ fn handle_remote_saved_dir_picker(
 fn handle_remote_save_dir_confirm(
     tab: &mut TabState,
     key: KeyEvent,
-    dir: String,
-    remote_addr: String,
+    _dir: String,
+    _remote_addr: String,
 ) -> Action {
-    let _ = dir;
-    let _ = remote_addr;
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             tab.dialog = Dialog::None;
@@ -3282,6 +3280,7 @@ mod tests {
         tab.pending_command = PendingCommand::RemoteSessionStart {
             dir: "/workspace/project".to_string(),
             remote_addr: "http://localhost:9876".to_string(),
+            api_key: None,
         };
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
         let action = handle_remote_save_dir_confirm(

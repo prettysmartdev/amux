@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use amux::commands::headless::auth;
 use amux::commands::headless::db;
-use amux::commands::headless::server::{AppState, build_router};
+use amux::commands::headless::server::{AppState, AuthMode, build_router};
 use amux::runtime::{
     AgentRuntime, ContainerStats, HostSettings, StoppedContainerInfo,
 };
@@ -208,11 +209,10 @@ impl AgentRuntime for MockRuntime {
 // Test server helpers
 // ---------------------------------------------------------------------------
 
-/// Starts an in-process headless HTTP server bound to a random port.
+/// Starts an in-process headless HTTP server with a caller-supplied `AuthMode`.
 ///
-/// Returns the temp-dir holding the server storage root (keeps it alive for
-/// the duration of the test) and the base URL (e.g. `"http://127.0.0.1:PORT"`).
-async fn start_test_server(workdirs: Vec<PathBuf>) -> (TempDir, String) {
+/// Returns the temp-dir (caller must keep alive) and the base URL.
+async fn start_test_server_with_auth(workdirs: Vec<PathBuf>, auth_mode: AuthMode) -> (TempDir, String) {
     let root_dir = TempDir::new().unwrap();
 
     let conn = db::open_db(root_dir.path()).unwrap();
@@ -225,6 +225,7 @@ async fn start_test_server(workdirs: Vec<PathBuf>) -> (TempDir, String) {
         runtime: Arc::new(MockRuntime),
         busy_sessions: Mutex::new(HashSet::new()),
         task_handles: Mutex::new(Vec::new()),
+        auth_mode,
     });
 
     let app = build_router(state);
@@ -240,6 +241,14 @@ async fn start_test_server(workdirs: Vec<PathBuf>) -> (TempDir, String) {
     });
 
     (root_dir, base_url)
+}
+
+/// Starts an in-process headless HTTP server bound to a random port with auth disabled.
+///
+/// Returns the temp-dir holding the server storage root (keeps it alive for
+/// the duration of the test) and the base URL (e.g. `"http://127.0.0.1:PORT"`).
+async fn start_test_server(workdirs: Vec<PathBuf>) -> (TempDir, String) {
+    start_test_server_with_auth(workdirs, AuthMode::Disabled).await
 }
 
 /// Polls a command endpoint until its status is no longer `"pending"`,
@@ -590,8 +599,9 @@ async fn full_session_command_lifecycle() {
     assert_eq!(logs_resp.status(), 200);
     let logs_body: serde_json::Value = logs_resp.json().await.unwrap();
     assert_eq!(logs_body["command_id"], command_id.as_str());
-    assert!(logs_body["stdout"].is_string());
-    assert!(logs_body["stderr"].is_string());
+    // The logs endpoint returns a single combined "output" field (stdout+stderr
+    // are merged into one log file by the headless executor).
+    assert!(logs_body["output"].is_string(), "logs response must contain an 'output' field");
 
     // Step 5 — assert DB state matches HTTP response.
     {
@@ -1073,5 +1083,316 @@ async fn sse_done_command_includes_log_content_before_sentinel() {
     assert!(
         log_pos < done_pos,
         "log content must appear before [amux:done] sentinel"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Auth middleware (work item 0060)
+// ---------------------------------------------------------------------------
+
+/// Generate a test API key and its hash, then spin up a server with AuthMode::Enabled.
+/// Returns (root_dir, base_url, plaintext_key).
+async fn start_authed_server() -> (TempDir, String, String) {
+    let plaintext_key = auth::generate_api_key().unwrap();
+    let key_hash = auth::hash_api_key(&plaintext_key);
+    let (root_dir, base_url) = start_test_server_with_auth(
+        vec![],
+        AuthMode::Enabled { key_hash },
+    )
+    .await;
+    (root_dir, base_url, plaintext_key)
+}
+
+#[tokio::test]
+async fn auth_middleware_correct_key_returns_200() {
+    let (_root, base, key) = start_authed_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/v1/status"))
+        .header("Authorization", format!("Bearer {key}"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "correct Bearer key must yield 200");
+}
+
+#[tokio::test]
+async fn auth_middleware_no_header_returns_401_with_expected_message() {
+    let (_root, base, _key) = start_authed_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/v1/status"))
+        // No Authorization header.
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 401, "missing header must yield 401");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let msg = body["error"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("API key required") || msg.contains("Authorization"),
+        "error message must guide the caller; got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn auth_middleware_wrong_key_returns_401() {
+    let (_root, base, _key) = start_authed_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/v1/status"))
+        .header("Authorization", "Bearer wrong-key-value")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 401, "wrong key must yield 401");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let msg = body["error"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("Invalid API key") || msg.contains("invalid"),
+        "error message must say the key is wrong; got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn auth_middleware_bearer_prefix_accepted() {
+    let (_root, base, key) = start_authed_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/v1/status"))
+        .header("Authorization", format!("Bearer {key}"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "Bearer <key> must be accepted");
+}
+
+#[tokio::test]
+async fn auth_middleware_bare_key_accepted() {
+    let (_root, base, key) = start_authed_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/v1/status"))
+        .header("Authorization", key.clone())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "bare key (no 'Bearer' prefix) must be accepted");
+}
+
+#[tokio::test]
+async fn auth_middleware_mixed_case_bearer_prefix_accepted() {
+    let (_root, base, key) = start_authed_server().await;
+    let client = reqwest::Client::new();
+
+    // "BEARER" (all-caps) must be treated the same as "Bearer" — the prefix
+    // stripping is case-insensitive per spec.
+    let resp = client
+        .get(format!("{base}/v1/status"))
+        .header("Authorization", format!("BEARER {key}"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "BEARER (uppercase) prefix must be accepted (case-insensitive)");
+}
+
+#[tokio::test]
+async fn auth_mode_disabled_accepts_without_auth() {
+    // start_test_server uses AuthMode::Disabled.
+    let (_root, base) = start_test_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    // Send with no Authorization header — must succeed when auth is disabled.
+    let resp = client
+        .get(format!("{base}/v1/status"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "AuthMode::Disabled must accept requests without any auth");
+}
+
+// ---------------------------------------------------------------------------
+// Session status filter (work item 0060)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_sessions_status_active_filter_returns_only_active() {
+    let workdir = TempDir::new().unwrap();
+    let canonical = std::fs::canonicalize(workdir.path()).unwrap();
+    let (root_dir, base) = start_test_server(vec![canonical.clone()]).await;
+    let client = reqwest::Client::new();
+
+    let workdir_str = canonical.to_str().unwrap().to_string();
+
+    // Create session 1 (will stay active).
+    let id_active: String = {
+        let r: serde_json::Value = client
+            .post(format!("{base}/v1/sessions"))
+            .json(&serde_json::json!({ "workdir": workdir_str }))
+            .send().await.unwrap().json().await.unwrap();
+        r["session_id"].as_str().unwrap().to_string()
+    };
+
+    // Create session 2 (will be closed).
+    let id_to_close: String = {
+        let r: serde_json::Value = client
+            .post(format!("{base}/v1/sessions"))
+            .json(&serde_json::json!({ "workdir": workdir_str }))
+            .send().await.unwrap().json().await.unwrap();
+        r["session_id"].as_str().unwrap().to_string()
+    };
+
+    // Close the second session.
+    client
+        .delete(format!("{base}/v1/sessions/{id_to_close}"))
+        .send()
+        .await
+        .unwrap();
+
+    // Verify in DB.
+    {
+        let conn = db::open_db(root_dir.path()).unwrap();
+        let active = db::list_sessions_by_status(&conn, Some("active")).unwrap();
+        let active_ids: Vec<&str> = active.iter().map(|s| s.id.as_str()).collect();
+        assert!(active_ids.contains(&id_active.as_str()), "active session must appear in DB active list");
+        assert!(!active_ids.contains(&id_to_close.as_str()), "closed session must NOT appear in DB active list");
+    }
+
+    // Verify via HTTP with ?status=active.
+    let resp = client
+        .get(format!("{base}/v1/sessions?status=active"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let sessions = body["sessions"].as_array().unwrap();
+    let ids: Vec<&str> = sessions.iter().map(|s| s["id"].as_str().unwrap()).collect();
+
+    assert!(
+        ids.contains(&id_active.as_str()),
+        "active session must appear in ?status=active response; got: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&id_to_close.as_str()),
+        "closed session must NOT appear in ?status=active response; got: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_sessions_status_closed_filter_returns_only_closed() {
+    let workdir = TempDir::new().unwrap();
+    let canonical = std::fs::canonicalize(workdir.path()).unwrap();
+    let (_root, base) = start_test_server(vec![canonical.clone()]).await;
+    let client = reqwest::Client::new();
+
+    let workdir_str = canonical.to_str().unwrap().to_string();
+
+    // Create two sessions.
+    let id_open: String = {
+        let r: serde_json::Value = client
+            .post(format!("{base}/v1/sessions"))
+            .json(&serde_json::json!({ "workdir": workdir_str }))
+            .send().await.unwrap().json().await.unwrap();
+        r["session_id"].as_str().unwrap().to_string()
+    };
+
+    let id_closed: String = {
+        let r: serde_json::Value = client
+            .post(format!("{base}/v1/sessions"))
+            .json(&serde_json::json!({ "workdir": workdir_str }))
+            .send().await.unwrap().json().await.unwrap();
+        r["session_id"].as_str().unwrap().to_string()
+    };
+
+    // Close the second session.
+    client
+        .delete(format!("{base}/v1/sessions/{id_closed}"))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(format!("{base}/v1/sessions?status=closed"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let sessions = body["sessions"].as_array().unwrap();
+    let ids: Vec<&str> = sessions.iter().map(|s| s["id"].as_str().unwrap()).collect();
+
+    assert!(
+        ids.contains(&id_closed.as_str()),
+        "closed session must appear in ?status=closed response; got: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&id_open.as_str()),
+        "open session must NOT appear in ?status=closed response; got: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_sessions_no_filter_returns_all() {
+    let workdir = TempDir::new().unwrap();
+    let canonical = std::fs::canonicalize(workdir.path()).unwrap();
+    let (_root, base) = start_test_server(vec![canonical.clone()]).await;
+    let client = reqwest::Client::new();
+
+    let workdir_str = canonical.to_str().unwrap().to_string();
+
+    let id_open: String = {
+        let r: serde_json::Value = client
+            .post(format!("{base}/v1/sessions"))
+            .json(&serde_json::json!({ "workdir": workdir_str }))
+            .send().await.unwrap().json().await.unwrap();
+        r["session_id"].as_str().unwrap().to_string()
+    };
+
+    let id_closed: String = {
+        let r: serde_json::Value = client
+            .post(format!("{base}/v1/sessions"))
+            .json(&serde_json::json!({ "workdir": workdir_str }))
+            .send().await.unwrap().json().await.unwrap();
+        r["session_id"].as_str().unwrap().to_string()
+    };
+
+    // Close second session.
+    client
+        .delete(format!("{base}/v1/sessions/{id_closed}"))
+        .send()
+        .await
+        .unwrap();
+
+    // No ?status filter → all sessions.
+    let resp = client
+        .get(format!("{base}/v1/sessions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let sessions = body["sessions"].as_array().unwrap();
+    let ids: Vec<&str> = sessions.iter().map(|s| s["id"].as_str().unwrap()).collect();
+
+    assert!(
+        ids.contains(&id_open.as_str()),
+        "open session must appear when no filter; got: {ids:?}"
+    );
+    assert!(
+        ids.contains(&id_closed.as_str()),
+        "closed session must appear when no filter; got: {ids:?}"
     );
 }

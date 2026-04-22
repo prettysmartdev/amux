@@ -96,23 +96,28 @@ pub static CONFIG_SET_FLAGS: &[FlagSpec] = &[
 ];
 
 pub static HEADLESS_START_FLAGS: &[FlagSpec] = &[
-    FlagSpec { name: "port",       takes_value: true,  value_name: "PORT", hint: "port to listen on (default 9876)" },
-    FlagSpec { name: "workdirs",   takes_value: true,  value_name: "DIR",  hint: "allowlisted working directory (repeatable)" },
-    FlagSpec { name: "background", takes_value: false, value_name: "",     hint: "daemonize via OS process manager" },
+    FlagSpec { name: "port",                  takes_value: true,  value_name: "PORT", hint: "port to listen on (default 9876)" },
+    FlagSpec { name: "workdirs",              takes_value: true,  value_name: "DIR",  hint: "allowlisted working directory (repeatable)" },
+    FlagSpec { name: "background",            takes_value: false, value_name: "",     hint: "daemonize via OS process manager" },
+    FlagSpec { name: "refresh-key",           takes_value: false, value_name: "",     hint: "regenerate the API key" },
+    FlagSpec { name: "dangerously-skip-auth", takes_value: false, value_name: "",     hint: "disable authentication for this execution" },
 ];
 
 pub static REMOTE_RUN_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "remote-addr", takes_value: true,  value_name: "URL", hint: "remote headless amux host address" },
     FlagSpec { name: "session",     takes_value: true,  value_name: "ID",  hint: "session ID on the remote host" },
     FlagSpec { name: "follow",      takes_value: false, value_name: "",    hint: "stream logs until command completes" },
+    FlagSpec { name: "api-key",     takes_value: true,  value_name: "KEY", hint: "API key for the remote host" },
 ];
 
 pub static REMOTE_SESSION_START_FLAGS: &[FlagSpec] = &[
-    FlagSpec { name: "remote-addr", takes_value: true, value_name: "URL", hint: "remote headless amux host address" },
+    FlagSpec { name: "remote-addr", takes_value: true,  value_name: "URL", hint: "remote headless amux host address" },
+    FlagSpec { name: "api-key",     takes_value: true,  value_name: "KEY", hint: "API key for the remote host" },
 ];
 
 pub static REMOTE_SESSION_KILL_FLAGS: &[FlagSpec] = &[
-    FlagSpec { name: "remote-addr", takes_value: true, value_name: "URL", hint: "remote headless amux host address" },
+    FlagSpec { name: "remote-addr", takes_value: true,  value_name: "URL", hint: "remote headless amux host address" },
+    FlagSpec { name: "api-key",     takes_value: true,  value_name: "KEY", hint: "API key for the remote host" },
 ];
 
 /// All top-level amux subcommands, each with their full flag set.

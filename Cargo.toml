@@ -40,6 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 tower-http = { version = "0.5", features = ["trace"] }
 nix = { version = "0.29", features = ["signal", "process"] }
 chrono = { version = "0.4", features = ["serde"] }
+ring = "0.17"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -395,16 +395,19 @@ pub enum PendingCommand {
         session_id: String,
         command: Vec<String>,
         follow: bool,
+        api_key: Option<String>,
     },
     /// remote session start: create a new session on the remote host.
     RemoteSessionStart {
         remote_addr: String,
         dir: String,
+        api_key: Option<String>,
     },
     /// remote session kill: close a session on the remote host.
     RemoteSessionKill {
         remote_addr: String,
         session_id: String,
+        api_key: Option<String>,
     },
 }
 

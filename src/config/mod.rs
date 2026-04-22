@@ -82,6 +82,10 @@ pub struct RemoteConfig {
     /// List of working directory paths pre-saved for `remote session start`.
     #[serde(rename = "savedDirs", skip_serializing_if = "Option::is_none")]
     pub saved_dirs: Option<Vec<String>>,
+
+    /// Default API key for authenticating with the remote headless amux host.
+    #[serde(rename = "defaultAPIKey", skip_serializing_if = "Option::is_none")]
+    pub default_api_key: Option<String>,
 }
 
 /// Headless server configuration nested within `GlobalConfig`.
@@ -189,6 +193,12 @@ pub fn effective_remote_default_addr() -> Option<String> {
     load_global_config().ok()?.remote?.default_addr
 }
 
+/// Returns the effective remote default API key from global config.
+/// Falls back to `None` when not configured.
+pub fn effective_remote_default_api_key() -> Option<String> {
+    load_global_config().ok()?.remote?.default_api_key
+}
+
 /// Returns the effective remote saved directories from global config.
 /// Falls back to an empty list when not configured.
 pub fn effective_remote_saved_dirs() -> Vec<String> {
@@ -285,7 +295,12 @@ pub fn save_global_config(config: &GlobalConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    /// Serialise tests that mutate AMUX_CONFIG_HOME (process-global env var).
+    /// Every test that reads or writes global config must hold this lock.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn repo_config_path_is_correct() {
@@ -1024,8 +1039,6 @@ mod tests {
     /// preventing parallel tests from observing each other's temporary override.
     #[test]
     fn headless_round_trips_through_save_load_global_config() {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
 
         let tmp = TempDir::new().unwrap();
@@ -1066,6 +1079,7 @@ mod tests {
         let original = RemoteConfig {
             default_addr: Some("http://1.2.3.4:9876".to_string()),
             saved_dirs: Some(vec!["/workspace/a".to_string(), "/workspace/b".to_string()]),
+            default_api_key: None,
         };
         let json = serde_json::to_string_pretty(&original).unwrap();
         assert!(json.contains("defaultAddr"), "expected camelCase 'defaultAddr'; got: {json}");
@@ -1084,6 +1098,7 @@ mod tests {
         let original = RemoteConfig {
             default_addr: Some("http://host:9876".to_string()),
             saved_dirs: None,
+            default_api_key: None,
         };
         let json = serde_json::to_string_pretty(&original).unwrap();
         assert!(
@@ -1100,6 +1115,7 @@ mod tests {
         let original = RemoteConfig {
             default_addr: None,
             saved_dirs: Some(vec!["/srv/proj".to_string()]),
+            default_api_key: None,
         };
         let json = serde_json::to_string_pretty(&original).unwrap();
         assert!(
@@ -1133,6 +1149,7 @@ mod tests {
             remote: Some(RemoteConfig {
                 default_addr: Some("http://1.2.3.4:9876".to_string()),
                 saved_dirs: Some(vec!["/workspace/proj".to_string()]),
+                default_api_key: None,
             }),
             ..Default::default()
         };
@@ -1154,7 +1171,6 @@ mod tests {
 
     #[test]
     fn effective_remote_default_addr_returns_none_when_not_configured() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         // SAFETY: test-only env mutation; serialised by ENV_LOCK.
@@ -1166,7 +1182,6 @@ mod tests {
 
     #[test]
     fn effective_remote_saved_dirs_returns_empty_when_not_configured() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
@@ -1192,5 +1207,113 @@ mod tests {
              got: {:?}",
             config.remote
         );
+    }
+
+    // ─── RemoteConfig defaultAPIKey (work item 0060) ────────────────────────────
+
+    #[test]
+    fn remote_config_with_default_api_key_round_trips_through_json() {
+        let original = RemoteConfig {
+            default_addr: Some("http://1.2.3.4:9876".to_string()),
+            saved_dirs: None,
+            default_api_key: Some("my-secret-key-abc123".to_string()),
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        assert!(
+            json.contains("defaultAPIKey"),
+            "expected camelCase 'defaultAPIKey' key in JSON; got: {json}"
+        );
+        let restored: RemoteConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(
+            restored.default_api_key.as_deref(),
+            Some("my-secret-key-abc123")
+        );
+    }
+
+    #[test]
+    fn remote_config_default_api_key_omitted_when_none() {
+        let original = RemoteConfig {
+            default_addr: Some("http://host:9876".to_string()),
+            saved_dirs: None,
+            default_api_key: None,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            !json.contains("defaultAPIKey"),
+            "absent defaultAPIKey must be omitted (skip_serializing_if); got: {json}"
+        );
+    }
+
+    #[test]
+    fn global_config_serializes_remote_default_api_key_as_camel_case() {
+        let config = GlobalConfig {
+            remote: Some(RemoteConfig {
+                default_addr: Some("http://host:9876".to_string()),
+                saved_dirs: None,
+                default_api_key: Some("the-key".to_string()),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains("\"defaultAPIKey\""),
+            "expected camelCase 'defaultAPIKey' in GlobalConfig JSON; got: {json}"
+        );
+        assert!(
+            json.contains("the-key"),
+            "API key value must be present in JSON; got: {json}"
+        );
+    }
+
+    #[test]
+    fn effective_remote_default_api_key_returns_none_when_not_configured() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+        let result = effective_remote_default_api_key();
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+        assert_eq!(result, None, "must return None when global config has no remote.defaultAPIKey");
+    }
+
+    #[test]
+    fn effective_remote_default_api_key_returns_configured_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+
+        let config = GlobalConfig {
+            remote: Some(RemoteConfig {
+                default_addr: None,
+                saved_dirs: None,
+                default_api_key: Some("stored-api-key-xyz".to_string()),
+            }),
+            ..Default::default()
+        };
+        save_global_config(&config).unwrap();
+
+        let result = effective_remote_default_api_key();
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+
+        assert_eq!(
+            result,
+            Some("stored-api-key-xyz".to_string()),
+            "must return the configured API key"
+        );
+    }
+
+    #[test]
+    fn remote_config_all_three_fields_round_trip_through_json() {
+        let original = RemoteConfig {
+            default_addr: Some("http://remote:9876".to_string()),
+            saved_dirs: Some(vec!["/workspace/proj".to_string()]),
+            default_api_key: Some("abc123def456".to_string()),
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        assert!(json.contains("defaultAddr"), "must contain defaultAddr");
+        assert!(json.contains("savedDirs"), "must contain savedDirs");
+        assert!(json.contains("defaultAPIKey"), "must contain defaultAPIKey");
+        let restored: RemoteConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
     }
 }
