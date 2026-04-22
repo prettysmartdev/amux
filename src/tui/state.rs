@@ -325,6 +325,32 @@ pub enum PendingCommand {
         summary: String,
         allow_docker: bool,
     },
+    /// exec prompt: send a one-shot prompt to the agent.
+    ExecPrompt {
+        prompt: String,
+        agent: Option<String>,
+        model: Option<String>,
+        non_interactive: bool,
+        plan: bool,
+        allow_docker: bool,
+        mount_ssh: bool,
+        yolo: bool,
+        auto: bool,
+    },
+    /// exec workflow: run a workflow file (optionally with a work item).
+    ExecWorkflow {
+        workflow: PathBuf,
+        work_item: Option<u32>,
+        agent: Option<String>,
+        model: Option<String>,
+        non_interactive: bool,
+        plan: bool,
+        allow_docker: bool,
+        worktree: bool,
+        mount_ssh: bool,
+        yolo: bool,
+        auto: bool,
+    },
 }
 
 /// Which phase of the multi-step claws workflow is active in the TUI.

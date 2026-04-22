@@ -1510,7 +1510,7 @@ fn handle_worktree_pre_commit_message(
 
 // --- Autocomplete ---
 
-const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "specs", "claws", "status", "config"];
+const SUBCOMMANDS: &[&str] = &["init", "ready", "implement", "chat", "exec", "specs", "claws", "status", "config"];
 
 /// Return suggestions for the current input string.
 pub fn autocomplete_suggestions(input: &str) -> Vec<String> {
@@ -1552,6 +1552,10 @@ fn flag_suggestions_for(cmd: &str) -> Vec<String> {
             "claws init   (first-time setup: clone, build image, launch container)".into(),
             "claws ready  (check status; start container if stopped)".into(),
             "claws chat   (attach to running nanoclaw container)".into(),
+        ],
+        "exec" => vec![
+            "exec prompt <text>     (send a one-shot prompt to the agent)".into(),
+            "exec workflow <path>   (run a workflow file without a work item)".into(),
         ],
         "config" => vec![
             "config show    (view all config fields in a table dialog)".into(),

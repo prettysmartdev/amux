@@ -11,6 +11,7 @@ pub mod init;
 pub mod init_flow;
 pub mod new;
 pub mod output;
+pub mod parity;
 pub mod ready;
 pub mod ready_flow;
 pub mod spec;

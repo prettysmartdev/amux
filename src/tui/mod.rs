@@ -1206,6 +1206,103 @@ async fn execute_command(app: &mut App, cmd: &str) {
             }
         }
 
+        "exec" => {
+            match parts.get(1) {
+                Some(&"prompt") => {
+                    let exec_prompt_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "exec prompt").unwrap();
+                    let flags = flag_parser::parse_flags(&parts, exec_prompt_spec);
+                    let non_interactive = flag_parser::flag_bool(&flags, "non-interactive");
+                    let plan = flag_parser::flag_bool(&flags, "plan");
+                    let allow_docker = flag_parser::flag_bool(&flags, "allow-docker");
+                    let mount_ssh = flag_parser::flag_bool(&flags, "mount-ssh");
+                    let yolo = flag_parser::flag_bool(&flags, "yolo");
+                    let auto = flag_parser::flag_bool(&flags, "auto");
+                    let agent = flag_parser::flag_string(&flags, "agent").map(str::to_string);
+                    let model = flag_parser::flag_string(&flags, "model").map(str::to_string);
+
+                    // Extract the prompt text: everything after "exec prompt" that isn't a flag.
+                    let prompt: String = parts.iter()
+                        .skip(2)
+                        .filter(|s| !s.starts_with("--") && !s.starts_with('-'))
+                        // Also filter out flag values that follow --flag=value pairs (already consumed by parse_flags).
+                        .copied()
+                        .collect::<Vec<&str>>()
+                        .join(" ");
+                    if prompt.trim().is_empty() {
+                        app.active_tab_mut().input_error =
+                            Some("Usage: exec prompt <text> [--plan] [--allow-docker] [--mount-ssh] [--yolo] [--auto] [--agent=<NAME>] [--model=<NAME>]".into());
+                        return;
+                    }
+
+                    app.active_tab_mut().pending_command = PendingCommand::ExecPrompt {
+                        prompt, agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto,
+                    };
+                    show_pre_command_dialogs(app).await;
+                }
+                Some(&"workflow") | Some(&"wf") => {
+                    let exec_wf_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "exec workflow").unwrap();
+                    let flags = flag_parser::parse_flags(&parts, exec_wf_spec);
+                    let non_interactive = flag_parser::flag_bool(&flags, "non-interactive");
+                    let plan = flag_parser::flag_bool(&flags, "plan");
+                    let allow_docker = flag_parser::flag_bool(&flags, "allow-docker");
+                    let mut worktree = flag_parser::flag_bool(&flags, "worktree");
+                    let mount_ssh = flag_parser::flag_bool(&flags, "mount-ssh");
+                    let yolo = flag_parser::flag_bool(&flags, "yolo");
+                    let auto = flag_parser::flag_bool(&flags, "auto");
+                    let agent = flag_parser::flag_string(&flags, "agent").map(str::to_string);
+                    let model = flag_parser::flag_string(&flags, "model").map(str::to_string);
+                    let work_item_str = flag_parser::flag_string(&flags, "work-item");
+                    let work_item: Option<u32> = match work_item_str {
+                        Some(s) => match parse_work_item(s) {
+                            Ok(n) => Some(n),
+                            Err(e) => {
+                                app.active_tab_mut().input_error = Some(format!("Invalid --work-item: {}", e));
+                                return;
+                            }
+                        },
+                        None => None,
+                    };
+
+                    // Extract workflow path: first positional arg after "exec workflow".
+                    let workflow_path: Option<std::path::PathBuf> = parts.iter()
+                        .skip(2)
+                        .find(|s| !s.starts_with("--") && !s.starts_with('-'))
+                        .map(|s| std::path::PathBuf::from(s));
+                    let workflow = match workflow_path {
+                        Some(p) => p,
+                        None => {
+                            app.active_tab_mut().input_error =
+                                Some("Usage: exec workflow <path> [--work-item=<NUM>] [--plan] [--allow-docker] [--worktree] [--mount-ssh] [--yolo] [--auto] [--agent=<NAME>] [--model=<NAME>]".into());
+                            return;
+                        }
+                    };
+
+                    // --yolo/--auto implies --worktree.
+                    if yolo && !worktree {
+                        app.active_tab_mut().push_output(
+                            "--yolo implies --worktree. Running in isolated worktree.".to_string(),
+                        );
+                        worktree = true;
+                    }
+                    if auto && !worktree {
+                        app.active_tab_mut().push_output(
+                            "--auto implies --worktree. Running in isolated worktree.".to_string(),
+                        );
+                        worktree = true;
+                    }
+
+                    app.active_tab_mut().pending_command = PendingCommand::ExecWorkflow {
+                        workflow, work_item, agent, model, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto,
+                    };
+                    show_pre_command_dialogs(app).await;
+                }
+                _ => {
+                    app.active_tab_mut().input_error =
+                        Some("Usage: exec <prompt|workflow>  e.g. exec prompt \"hello\", exec workflow ./wf.md".into());
+                }
+            }
+        }
+
         "config" => {
             // Only "config show" (or bare "config") opens the TUI config dialog.
             match parts.get(1) {
@@ -1308,6 +1405,12 @@ async fn launch_pending_command(app: &mut App) {
         }
         PendingCommand::SpecsNewInterview { work_item_number, kind, title, summary, allow_docker } => {
             launch_specs_interview_agent(app, work_item_number, kind, title, summary, allow_docker).await;
+        }
+        PendingCommand::ExecPrompt { prompt, agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto } => {
+            launch_exec_prompt(app, &prompt, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model).await;
+        }
+        PendingCommand::ExecWorkflow { workflow, work_item, agent, model, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto } => {
+            launch_exec_workflow(app, workflow, work_item, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto, agent, model).await;
         }
         PendingCommand::None => {}
     }
@@ -1827,7 +1930,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
             tab_cwd.join(wf_path)
         };
         // Load or resume workflow state.
-        let wf_state = match init_workflow_tui(app, &resolved_wf_path, work_item, &git_root, non_interactive, plan) {
+        let wf_state = match init_workflow_tui(app, &resolved_wf_path, Some(work_item), &git_root, non_interactive, plan) {
             Some(s) => s,
             None => return, // Error already pushed to output.
         };
@@ -2321,6 +2424,700 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
                 app.active_tab_mut().pty = Some(session);
                 app.active_tab_mut().pty_rx = Some(pty_rx);
                 // Start stats polling.
+                app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
+            }
+            Err(e) => {
+                app.active_tab_mut().push_output(format!("Failed to launch container: {}", e));
+                app.active_tab_mut().finish_command(1);
+            }
+        }
+    }
+}
+
+/// Launch `exec prompt`: run a prompt against the agent.
+///
+/// When `non_interactive` is false (the default), the prompt is passed to the
+/// agent in interactive mode and the container opens as a PTY container window,
+/// allowing the user to continue the conversation.  When `non_interactive` is
+/// true (i.e. `--non-interactive` was explicitly passed), the container is run
+/// with the agent's print/headless flag and the captured output is streamed to
+/// the outer text window.
+#[allow(clippy::too_many_arguments)]
+async fn launch_exec_prompt(
+    app: &mut App,
+    prompt: &str,
+    non_interactive: bool,
+    plan: bool,
+    allow_docker: bool,
+    mount_ssh: bool,
+    yolo: bool,
+    auto: bool,
+    agent_override: Option<String>,
+    model: Option<String>,
+) {
+    let tab_cwd = app.active_tab().cwd.clone();
+    let git_root = match find_git_root_from(&tab_cwd) {
+        Some(r) => r,
+        None => {
+            app.active_tab_mut().input_error = Some("Not inside a Git repository.".into());
+            return;
+        }
+    };
+
+    let config = load_repo_config(&git_root).unwrap_or_default();
+    let agent_name = agent_override.clone()
+        .or_else(|| config.agent.clone())
+        .unwrap_or_else(|| "claude".to_string());
+    let mount_path = app.active_tab_mut().pending_mount_path.take().unwrap_or_else(|| git_root.clone());
+
+    // Resolve SSH dir if requested.
+    let ssh_dir: Option<std::path::PathBuf> = if mount_ssh {
+        match dirs::home_dir() {
+            Some(home) => {
+                let ssh = home.join(".ssh");
+                if ssh.exists() {
+                    app.active_tab_mut().push_output(
+                        "WARNING: --mount-ssh: mounting host ~/.ssh into container (read-only). Ensure you trust the agent image.".to_string(),
+                    );
+                    Some(ssh)
+                } else {
+                    app.active_tab_mut().push_output("Error: host ~/.ssh directory not found; cannot use --mount-ssh.".to_string());
+                    app.active_tab_mut().finish_command(1);
+                    return;
+                }
+            }
+            None => {
+                app.active_tab_mut().push_output("Error: cannot resolve home directory.".to_string());
+                app.active_tab_mut().finish_command(1);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    // Auto-passthrough: always pass credentials from keychain if available.
+    let credentials = agent_keychain_credentials(&agent_name);
+    let mut env_vars = credentials.env_vars;
+    for name in &effective_env_passthrough(&git_root) {
+        if env_vars.iter().any(|(k, _)| k == name) {
+            continue;
+        }
+        if let Ok(val) = std::env::var(name) {
+            env_vars.push((name.clone(), val));
+        }
+    }
+
+    // Resolve which image and dockerfile to use.
+    let (image_tag, agent_dockerfile_path) =
+        crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
+    if !agent_dockerfile_path.exists() {
+        app.active_tab_mut().pending_command = PendingCommand::ExecPrompt {
+            prompt: prompt.to_string(),
+            agent: agent_override.clone(),
+            model: model.clone(),
+            non_interactive,
+            plan,
+            allow_docker,
+            mount_ssh,
+            yolo,
+            auto,
+        };
+        app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
+            agent: agent_name.clone(),
+            default_agent: agent_name.clone(),
+            from_workflow: false,
+        };
+        return;
+    } else if !app.runtime.image_exists(&image_tag) {
+        app.active_tab_mut().push_output(format!(
+            "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
+        ));
+        app.active_tab_mut().finish_command(1);
+        return;
+    }
+
+    // Prepare host settings.
+    app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
+    {
+        let msg = app.active_tab_mut().host_settings.as_mut()
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
+        if let Some(msg) = msg {
+            app.active_tab_mut().push_output(msg);
+        }
+    }
+    if yolo {
+        if let Some(ref s) = app.active_tab().host_settings {
+            let _ = s.apply_yolo_settings();
+        }
+    }
+
+    // Build entrypoint: interactive or non-interactive based on the flag.
+    let mut entrypoint = workflow_step_entrypoint(&agent_name, prompt, non_interactive, plan);
+
+    // Apply yolo/auto flags.
+    let disallowed_tools = if yolo || auto {
+        crate::config::effective_yolo_disallowed_tools(&git_root)
+    } else {
+        vec![]
+    };
+    use crate::commands::agent::append_autonomous_flags;
+    append_autonomous_flags(&mut entrypoint, &agent_name, yolo, auto, &disallowed_tools);
+
+    if let Some(ref m) = model {
+        use crate::commands::agent::append_model_flag;
+        append_model_flag(&mut entrypoint, &agent_name, m);
+    }
+
+    let container_name = generate_container_name();
+    let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+
+    // Show the full CLI command.
+    let display_args = if non_interactive {
+        app.runtime.build_run_args_display(
+            &image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars,
+            app.active_tab().host_settings.as_ref(), allow_docker, None, ssh_dir.as_deref(),
+        )
+    } else {
+        app.runtime.build_run_args_pty_display(
+            &image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars,
+            app.active_tab().host_settings.as_ref(), allow_docker, Some(&container_name), ssh_dir.as_deref(),
+        )
+    };
+    let cli_binary = app.runtime.cli_binary();
+    let cmd_display = format!("$ {} {}", cli_binary, display_args.join(" "));
+
+    let prompt_display = if prompt.len() > 60 {
+        format!("exec prompt: {}…", &prompt[..57])
+    } else {
+        format!("exec prompt: {}", prompt)
+    };
+    app.active_tab_mut().start_command(prompt_display);
+
+    if allow_docker {
+        let runtime_name = app.runtime.name();
+        match app.runtime.check_socket() {
+            Ok(socket_path) => {
+                app.active_tab_mut().push_output(format!("{} socket: {} (found)", runtime_name, socket_path.display()));
+                app.active_tab_mut().push_output(format!(
+                    "WARNING: --allow-docker: mounting host {} socket into container ({}:{}). \
+                     This grants the agent elevated host access.",
+                    runtime_name, socket_path.display(), socket_path.display()
+                ));
+            }
+            Err(e) => {
+                app.active_tab_mut().push_output(format!("Error: {}", e));
+                app.active_tab_mut().finish_command(1);
+                return;
+            }
+        }
+    }
+
+    app.active_tab_mut().push_output(cmd_display);
+
+    if non_interactive {
+        app.active_tab_mut().push_output("Tip: remove --non-interactive to interact with the agent directly.");
+        let host_settings = app.active_tab_mut().host_settings.take();
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        app.active_tab_mut().exit_rx = Some(exit_rx);
+        let tx = app.active_tab().output_tx.clone();
+        let mount_str = mount_path.to_str().unwrap().to_string();
+        let exec_runtime = app.runtime.clone();
+        let exec_entrypoint = entrypoint;
+        spawn_text_command(tx, exit_tx, move |sink| async move {
+            let entrypoint_refs: Vec<&str> = exec_entrypoint.iter().map(String::as_str).collect();
+            let (_cmd, output) = exec_runtime.run_container_captured(
+                &image_tag,
+                &mount_str,
+                &entrypoint_refs,
+                &env_vars,
+                host_settings.as_ref(),
+                allow_docker,
+                None,
+                ssh_dir.as_deref(),
+            )?;
+            for line in output.lines() {
+                sink.println(line);
+            }
+            Ok(())
+        });
+    } else {
+        // Print interactive notice to the outer window.
+        let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+        print_interactive_notice(&sink, &agent_name);
+
+        let pty_args = app.runtime.build_run_args_pty(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, Some(&container_name), ssh_dir.as_deref());
+        let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
+
+        // Use actual terminal dimensions for the PTY.
+        let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let wf_strip_h = app.active_tab().workflow.as_ref().map(|wf| workflow_strip_height(wf)).unwrap_or(0);
+        let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, wf_strip_h);
+        let size = PtySize {
+            rows: inner_rows,
+            cols: inner_cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+
+        // Activate the container window.
+        let display_name = state::agent_display_name(&agent_name).to_string();
+        app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(&git_root);
+        app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
+
+        let cli_bin = app.runtime.cli_binary();
+        let stats_runtime = app.runtime.clone();
+        match PtySession::spawn(cli_bin, &pty_str_refs, size) {
+            Ok((session, pty_rx)) => {
+                app.active_tab_mut().pty = Some(session);
+                app.active_tab_mut().pty_rx = Some(pty_rx);
+                app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
+            }
+            Err(e) => {
+                app.active_tab_mut().push_output(format!("Failed to launch container: {}", e));
+                app.active_tab_mut().finish_command(1);
+            }
+        }
+    }
+}
+
+/// Launch `exec workflow`: run a workflow file, optionally with a work item context.
+///
+/// This follows the same pattern as `launch_implement` with `--workflow` but
+/// supports running without a work item number.
+#[allow(clippy::too_many_arguments)]
+async fn launch_exec_workflow(
+    app: &mut App,
+    workflow_path: std::path::PathBuf,
+    work_item: Option<u32>,
+    non_interactive: bool,
+    plan: bool,
+    allow_docker: bool,
+    worktree: bool,
+    mount_ssh: bool,
+    yolo: bool,
+    auto: bool,
+    agent_override: Option<String>,
+    model: Option<String>,
+) {
+    let tab_cwd = app.active_tab().cwd.clone();
+    let git_root = match find_git_root_from(&tab_cwd) {
+        Some(r) => r,
+        None => {
+            app.active_tab_mut().input_error = Some("Not inside a Git repository.".into());
+            return;
+        }
+    };
+
+    let config = load_repo_config(&git_root).unwrap_or_default();
+    let agent_name = agent_override.clone()
+        .or_else(|| config.agent.clone())
+        .unwrap_or_else(|| "claude".to_string());
+
+    // Resolve SSH dir if requested.
+    let ssh_dir: Option<std::path::PathBuf> = if mount_ssh {
+        match dirs::home_dir() {
+            Some(home) => {
+                let ssh = home.join(".ssh");
+                if ssh.exists() {
+                    app.active_tab_mut().push_output(
+                        "WARNING: --mount-ssh: mounting host ~/.ssh into container (read-only). Ensure you trust the agent image.".to_string(),
+                    );
+                    Some(ssh)
+                } else {
+                    app.active_tab_mut().push_output("Error: host ~/.ssh directory not found; cannot use --mount-ssh.".to_string());
+                    app.active_tab_mut().finish_command(1);
+                    return;
+                }
+            }
+            None => {
+                app.active_tab_mut().push_output("Error: cannot resolve home directory.".to_string());
+                app.active_tab_mut().finish_command(1);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    // Set up worktree if requested.
+    let mount_path = if worktree {
+        if let Err(e) = crate::git::git_version_check() {
+            app.active_tab_mut().push_output(format!("Error: {}", e));
+            app.active_tab_mut().finish_command(1);
+            return;
+        }
+        if crate::git::is_detached_head(&git_root) {
+            app.active_tab_mut().push_output(
+                "WARNING: You are in detached HEAD state. The worktree branch will be created \
+                 from the current commit."
+                    .to_string(),
+            );
+        }
+        // Derive worktree path from work item or workflow file name.
+        let (wt_path, branch) = match work_item {
+            Some(wi) => {
+                let path = match crate::git::worktree_path(&git_root, wi) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        app.active_tab_mut().push_output(format!("Error creating worktree path: {}", e));
+                        app.active_tab_mut().finish_command(1);
+                        return;
+                    }
+                };
+                let br = crate::git::worktree_branch_name(wi);
+                (path, br)
+            }
+            None => {
+                let wf_name = workflow_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("workflow");
+                let path = match crate::git::worktree_path_named(&git_root, wf_name) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        app.active_tab_mut().push_output(format!("Error creating worktree path: {}", e));
+                        app.active_tab_mut().finish_command(1);
+                        return;
+                    }
+                };
+                let br = crate::git::worktree_branch_name_for_workflow(wf_name);
+                (path, br)
+            }
+        };
+
+        if wt_path.exists() {
+            app.active_tab_mut().push_output(format!("Resuming existing worktree at {}", wt_path.display()));
+        } else {
+            // Check for uncommitted files before creating worktree.
+            if !app.active_tab().worktree_skip_precommit_check {
+                let files = crate::git::uncommitted_files(&git_root).unwrap_or_default();
+                if !files.is_empty() {
+                    app.active_tab_mut().pending_command = PendingCommand::ExecWorkflow {
+                        workflow: workflow_path,
+                        work_item,
+                        agent: agent_override.clone(),
+                        model: model.clone(),
+                        non_interactive,
+                        plan,
+                        allow_docker,
+                        worktree,
+                        mount_ssh,
+                        yolo,
+                        auto,
+                    };
+                    app.active_tab_mut().dialog = Dialog::WorktreePreCommitWarning {
+                        uncommitted_files: files,
+                    };
+                    return;
+                }
+            }
+            app.active_tab_mut().worktree_skip_precommit_check = false;
+
+            if let Err(e) = crate::git::create_worktree(&git_root, &wt_path, &branch) {
+                app.active_tab_mut().push_output(format!("Error creating worktree: {}", e));
+                app.active_tab_mut().finish_command(1);
+                return;
+            }
+            app.active_tab_mut().push_output(format!("Created worktree at {} (branch: {})", wt_path.display(), branch));
+        }
+        app.active_tab_mut().worktree_branch = Some(branch);
+        app.active_tab_mut().worktree_active_path = Some(wt_path.clone());
+        app.active_tab_mut().worktree_git_root = Some(git_root.clone());
+        wt_path
+    } else {
+        app.active_tab_mut().worktree_branch = None;
+        app.active_tab_mut().worktree_active_path = None;
+        app.active_tab_mut().worktree_git_root = None;
+        app.active_tab_mut().pending_mount_path.take().unwrap_or_else(|| git_root.clone())
+    };
+
+    // Auto-passthrough credentials.
+    let credentials = agent_keychain_credentials(&agent_name);
+    let mut env_vars = credentials.env_vars;
+    for name in &effective_env_passthrough(&git_root) {
+        if env_vars.iter().any(|(k, _)| k == name) {
+            continue;
+        }
+        if let Ok(val) = std::env::var(name) {
+            env_vars.push((name.clone(), val));
+        }
+    }
+
+    // Resolve the workflow path relative to the tab's working directory.
+    let resolved_wf_path: std::path::PathBuf = if workflow_path.is_absolute() {
+        workflow_path.clone()
+    } else {
+        tab_cwd.join(&workflow_path)
+    };
+
+    // Resolve which image and dockerfile to use.
+    let (mut image_tag, mut agent_dockerfile_path) =
+        crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
+
+    // Prepare host settings.
+    app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
+    {
+        let msg = app.active_tab_mut().host_settings.as_mut()
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
+        if let Some(msg) = msg {
+            app.active_tab_mut().push_output(msg);
+        }
+    }
+    if yolo {
+        if let Some(ref s) = app.active_tab().host_settings {
+            let _ = s.apply_yolo_settings();
+        }
+    }
+
+    // Persist launch context for workflow step-advancement.
+    app.active_tab_mut().workflow_ssh_dir = ssh_dir.clone();
+    app.active_tab_mut().workflow_mount_path = Some(mount_path.clone());
+    app.active_tab_mut().workflow_allow_docker = allow_docker;
+
+    let disallowed_tools = if yolo || auto {
+        crate::config::effective_yolo_disallowed_tools(&git_root)
+    } else {
+        vec![]
+    };
+    app.active_tab_mut().yolo_mode = yolo;
+    app.active_tab_mut().auto_mode = auto;
+    app.active_tab_mut().yolo_disallowed_tools = disallowed_tools.clone();
+
+    // Load or resume workflow state.
+    let wf_state = match init_workflow_tui(app, &resolved_wf_path, work_item, &git_root, non_interactive, plan) {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Build per-step agent map and pre-flight check all required agent Dockerfiles.
+    let step_agent_map: std::collections::HashMap<String, String> = {
+        let agent_fallbacks = app.active_tab().workflow_agent_fallbacks.clone();
+        let mut map = std::collections::HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut first_missing: Option<String> = None;
+        for s in &wf_state.steps {
+            let desired = s.agent.as_deref().unwrap_or(&agent_name).to_string();
+            let step_ag = agent_fallbacks.get(&desired).cloned().unwrap_or(desired);
+            map.insert(s.name.clone(), step_ag.clone());
+            if seen.insert(step_ag.clone()) {
+                let df = git_root.join(".amux").join(format!("Dockerfile.{}", &step_ag));
+                if !df.exists() && first_missing.is_none() {
+                    first_missing = Some(step_ag);
+                }
+            }
+        }
+        if let Some(missing) = first_missing {
+            app.active_tab_mut().pending_command = PendingCommand::ExecWorkflow {
+                workflow: workflow_path,
+                work_item,
+                agent: agent_override.clone(),
+                model: model.clone(),
+                non_interactive,
+                plan,
+                allow_docker,
+                worktree,
+                mount_ssh,
+                yolo,
+                auto,
+            };
+            app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
+                agent: missing,
+                default_agent: agent_name.clone(),
+                from_workflow: true,
+            };
+            return;
+        }
+        map
+    };
+    app.active_tab_mut().workflow_step_agents = step_agent_map.clone();
+
+    // Get the first ready step.
+    let ready = wf_state.next_ready();
+    if ready.is_empty() {
+        if wf_state.all_done() {
+            app.active_tab_mut().push_output("All workflow steps are already done.");
+        } else {
+            app.active_tab_mut().push_output("No workflow steps are ready to run.");
+        }
+        app.active_tab_mut().finish_command(0);
+        return;
+    }
+    let step_name = ready[0].clone();
+    let step_state = wf_state.get_step(&step_name).unwrap().clone();
+
+    let step_agent = step_agent_map
+        .get(&step_name)
+        .cloned()
+        .unwrap_or_else(|| agent_name.clone());
+
+    // Re-resolve image/dockerfile if the step uses a different agent.
+    if step_agent != agent_name {
+        let r = crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &step_agent);
+        image_tag = r.0;
+        agent_dockerfile_path = r.1;
+        app.active_tab_mut().host_settings =
+            crate::passthrough::passthrough_for_agent(&step_agent).prepare_host_settings();
+        let msg = app.active_tab_mut().host_settings.as_mut()
+            .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
+        if let Some(msg) = msg {
+            app.active_tab_mut().push_output(msg);
+        }
+        if yolo {
+            if let Some(ref s) = app.active_tab().host_settings {
+                let _ = s.apply_yolo_settings();
+            }
+        }
+    }
+
+    if !agent_dockerfile_path.exists() {
+        app.active_tab_mut().push_output(format!(
+            "Error: agent '{}' Dockerfile not found. Run `amux ready` to build it.", step_agent
+        ));
+        app.active_tab_mut().finish_command(1);
+        return;
+    } else if !app.runtime.image_exists(&image_tag) {
+        app.active_tab_mut().push_output(format!(
+            "Error: agent image {} not found. Run `amux ready` to build it.", image_tag
+        ));
+        app.active_tab_mut().finish_command(1);
+        return;
+    }
+    let effective_agent = step_agent.clone();
+
+    // Load work item content for prompt substitution (empty string if no work item).
+    let work_item_content = match work_item {
+        Some(wi) => match find_work_item(&git_root, wi).and_then(|p| {
+            std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("{}", e))
+        }) {
+            Ok(c) => c,
+            Err(e) => {
+                app.active_tab_mut().push_output(format!("Cannot read work item: {}", e));
+                app.active_tab_mut().finish_command(1);
+                return;
+            }
+        },
+        None => String::new(),
+    };
+
+    let prompt = workflow::substitute_prompt(&step_state.prompt_template, work_item, &work_item_content);
+    let mut effective_entrypoint = workflow_step_entrypoint(&step_agent, &prompt, non_interactive, plan);
+
+    let command_display = match work_item {
+        Some(wi) => format!("exec workflow [WI {:04}, step: {}]", wi, step_name),
+        None => format!("exec workflow [step: {}]", step_name),
+    };
+
+    // Mark step as Running and persist.
+    let mut wf_state_mut = wf_state;
+    wf_state_mut.set_status(&step_name, StepStatus::Running);
+    if let Some(ref git_root_path) = app.active_tab().workflow_git_root.clone() {
+        let _ = workflow::save_workflow_state(git_root_path, &wf_state_mut);
+    }
+    app.active_tab_mut().workflow = Some(wf_state_mut);
+    app.active_tab_mut().auto_workflow_disabled_for_step = false;
+    app.active_tab_mut().workflow_current_step = Some(step_name);
+    app.active_tab_mut().workflow_git_root = Some(git_root.clone());
+
+    let effective_model = step_state.model.clone().or_else(|| model.clone());
+
+    // Apply autonomous flags.
+    use crate::commands::agent::append_autonomous_flags;
+    append_autonomous_flags(&mut effective_entrypoint, &effective_agent, yolo, auto, &disallowed_tools);
+
+    if let Some(ref m) = effective_model {
+        use crate::commands::agent::append_model_flag;
+        append_model_flag(&mut effective_entrypoint, &effective_agent, m);
+    }
+
+    let entrypoint = effective_entrypoint;
+    let entrypoint_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+    let container_name = generate_container_name();
+
+    let display_args = if non_interactive {
+        app.runtime.build_run_args_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, None, ssh_dir.as_deref())
+    } else {
+        app.runtime.build_run_args_pty_display(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, Some(&container_name), ssh_dir.as_deref())
+    };
+    let cli_binary = app.runtime.cli_binary();
+    let cmd_display = format!("$ {} {}", cli_binary, display_args.join(" "));
+
+    app.active_tab_mut().start_command(command_display);
+
+    if allow_docker {
+        let runtime_name = app.runtime.name();
+        match app.runtime.check_socket() {
+            Ok(socket_path) => {
+                app.active_tab_mut().push_output(format!("{} socket: {} (found)", runtime_name, socket_path.display()));
+                app.active_tab_mut().push_output(format!(
+                    "WARNING: --allow-docker: mounting host {} socket into container ({}:{}). \
+                     This grants the agent elevated host access.",
+                    runtime_name, socket_path.display(), socket_path.display()
+                ));
+            }
+            Err(e) => {
+                app.active_tab_mut().push_output(format!("Error: {}", e));
+                app.active_tab_mut().finish_command(1);
+                return;
+            }
+        }
+    }
+
+    app.active_tab_mut().push_output(cmd_display);
+
+    if non_interactive {
+        app.active_tab_mut().push_output("Tip: remove --non-interactive to interact with the agent directly.");
+        let host_settings = app.active_tab_mut().host_settings.take();
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        app.active_tab_mut().exit_rx = Some(exit_rx);
+        let tx = app.active_tab().output_tx.clone();
+        let mount_str = mount_path.to_str().unwrap().to_string();
+        let wf_runtime = app.runtime.clone();
+        let ni_entrypoint = entrypoint.clone();
+        spawn_text_command(tx, exit_tx, move |sink| async move {
+            let entrypoint_refs: Vec<&str> = ni_entrypoint.iter().map(String::as_str).collect();
+            let (_cmd, output) = wf_runtime.run_container_captured(
+                &image_tag,
+                &mount_str,
+                &entrypoint_refs,
+                &env_vars,
+                host_settings.as_ref(),
+                allow_docker,
+                None,
+                ssh_dir.as_deref(),
+            )?;
+            for line in output.lines() {
+                sink.println(line);
+            }
+            Ok(())
+        });
+    } else {
+        let sink = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+        print_interactive_notice(&sink, &effective_agent);
+
+        let pty_args = app.runtime.build_run_args_pty(&image_tag, mount_path.to_str().unwrap(), &entrypoint_refs, &env_vars, app.active_tab().host_settings.as_ref(), allow_docker, Some(&container_name), ssh_dir.as_deref());
+        let pty_str_refs: Vec<&str> = pty_args.iter().map(String::as_str).collect();
+
+        let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let wf_strip_h = app.active_tab().workflow.as_ref().map(|wf| workflow_strip_height(wf)).unwrap_or(0);
+        let (inner_cols, inner_rows) = calculate_container_inner_size(term_cols, term_rows, wf_strip_h);
+        let size = PtySize {
+            rows: inner_rows,
+            cols: inner_cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+
+        let display_name = state::agent_display_name(&effective_agent).to_string();
+        app.active_tab_mut().terminal_scrollback_lines = effective_scrollback_lines(&git_root);
+        app.active_tab_mut().start_container(container_name.clone(), display_name, inner_cols, inner_rows);
+
+        let cli_bin = app.runtime.cli_binary();
+        let stats_runtime = app.runtime.clone();
+        match PtySession::spawn(cli_bin, &pty_str_refs, size) {
+            Ok((session, pty_rx)) => {
+                app.active_tab_mut().pty = Some(session);
+                app.active_tab_mut().pty_rx = Some(pty_rx);
                 app.active_tab_mut().stats_rx = Some(spawn_stats_poller(container_name, stats_runtime));
             }
             Err(e) => {
@@ -3738,7 +4535,7 @@ async fn launch_specs_interview_agent(
 fn init_workflow_tui(
     app: &mut App,
     wf_path: &std::path::Path,
-    work_item: u32,
+    work_item: Option<u32>,
     git_root: &std::path::Path,
     _non_interactive: bool,
     _plan: bool,
@@ -3758,7 +4555,7 @@ fn init_workflow_tui(
         .unwrap_or("workflow")
         .to_string();
 
-    let state_path = workflow::workflow_state_path(git_root, Some(work_item), &workflow_name);
+    let state_path = workflow::workflow_state_path(git_root, work_item, &workflow_name);
 
     let state = if state_path.exists() {
         match workflow::load_workflow_state(&state_path) {
@@ -3769,18 +4566,18 @@ fn init_workflow_tui(
                         "Warning: workflow file changed since last run. Restarting from beginning.".to_string(),
                     );
                     let _ = std::fs::remove_file(&state_path);
-                    crate::workflow::WorkflowState::new(title, steps, hash, Some(work_item), workflow_name)
+                    crate::workflow::WorkflowState::new(title, steps, hash, work_item, workflow_name)
                 } else {
                     app.active_tab_mut().push_output("Resuming previous workflow run.".to_string());
                     existing
                 }
             }
             Err(_) => {
-                crate::workflow::WorkflowState::new(title, steps, hash, Some(work_item), workflow_name)
+                crate::workflow::WorkflowState::new(title, steps, hash, work_item, workflow_name)
             }
         }
     } else {
-        crate::workflow::WorkflowState::new(title, steps, hash, Some(work_item), workflow_name)
+        crate::workflow::WorkflowState::new(title, steps, hash, work_item, workflow_name)
     };
 
     // Persist state.
