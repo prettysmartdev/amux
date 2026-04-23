@@ -178,15 +178,7 @@ curl -s -X POST http://localhost:9090/v1/commands \
 curl -s http://localhost:9090/v1/commands/<command-id>
 curl -s http://localhost:9090/v1/commands/<command-id>/logs
 ```
-
-From another machine, use `amux remote` — it handles the HTTP calls and formats the output:
-
-```sh
-amux remote session start /workspace/myproject --remote-addr http://build-host:9090
-amux remote run implement 0027 --session <id> --follow
-```
-
-Commands run inside containers with the same isolation as interactive sessions. All inputs and outputs are stored in `~/.amux/headless/` on the server.
+Headless commands run inside containers with the same isolation as running amux locally. All inputs and outputs and logs are stored in `~/.amux/headless/` on the server for later review or auditing. The Headless server is authenticated using an API key generated the first time it is run, and can be refreshed (invalidating the old key) using `amux headless start --refresh-key`.
 
 See [Headless Mode](docs/08-headless-mode.md) and [Remote Mode](docs/09-remote-mode.md) for details.
 
