@@ -53,6 +53,8 @@ async fn auth_middleware(
     next: axum::middleware::Next,
 ) -> Response {
     if let AuthMode::Enabled { ref key_hash } = state.auth_mode {
+        let path = req.uri().path().to_owned();
+        let method = req.method().as_str().to_owned();
         let auth_header = req
             .headers()
             .get("authorization")
@@ -60,6 +62,12 @@ async fn auth_middleware(
 
         match auth_header {
             None | Some("") => {
+                tracing::warn!(
+                    method = %method,
+                    path = %path,
+                    "Request rejected: Authorization header missing. \
+                     Fix: pass the API key via 'Authorization: Bearer <key>'."
+                );
                 return (
                     StatusCode::UNAUTHORIZED,
                     error_json(
@@ -86,13 +94,17 @@ async fn auth_middleware(
                 let provided_hash = super::auth::hash_api_key(provided_key);
 
                 // Constant-time comparison of hex-encoded SHA-256 digests to
-                // prevent timing attacks (per spec: ring::constant_time).
-                if ring::constant_time::verify_slices_are_equal(
-                    provided_hash.as_bytes(),
-                    key_hash.as_bytes(),
-                )
-                .is_err()
-                {
+                // prevent timing attacks.
+                use subtle::ConstantTimeEq;
+                let keys_equal: bool =
+                    provided_hash.as_bytes().ct_eq(key_hash.as_bytes()).into();
+                if !keys_equal {
+                    tracing::warn!(
+                        method = %method,
+                        path = %path,
+                        "Request rejected: incorrect API key. \
+                         Fix: verify the key matches the one printed at server startup."
+                    );
                     return (StatusCode::UNAUTHORIZED, error_json("Invalid API key."))
                         .into_response();
                 }
@@ -243,7 +255,8 @@ async fn handle_create_session(
     // Canonicalize the requested workdir.
     let requested = match std::fs::canonicalize(&body.workdir) {
         Ok(p) => p,
-        Err(_) => {
+        Err(e) => {
+            tracing::warn!(workdir = %body.workdir, error = %e, "Session creation rejected: cannot resolve workdir path");
             return (
                 StatusCode::BAD_REQUEST,
                 error_json(format!("Cannot resolve path: {}", body.workdir)),
@@ -255,6 +268,12 @@ async fn handle_create_session(
     // Check allowlist.
     if !state.workdirs.iter().any(|allowed| *allowed == requested) {
         let allowed: Vec<String> = state.workdirs.iter().map(|p| p.display().to_string()).collect();
+        tracing::warn!(
+            workdir = %requested.display(),
+            allowed = ?allowed,
+            "Session creation rejected: workdir not in allowlist. \
+             Fix: start the server with the desired workdir in --work-dirs, or pass a dir that is already allowed."
+        );
         return (
             StatusCode::FORBIDDEN,
             error_json(format!(
@@ -445,6 +464,7 @@ async fn handle_create_command(
         Some(val) => match val.to_str() {
             Ok(s) => s.to_string(),
             Err(_) => {
+                tracing::warn!("Command creation rejected: x-amux-session header contains non-UTF-8 bytes");
                 return (
                     StatusCode::BAD_REQUEST,
                     error_json("Invalid x-amux-session header value"),
@@ -453,6 +473,10 @@ async fn handle_create_command(
             }
         },
         None => {
+            tracing::warn!(
+                "Command creation rejected: x-amux-session header missing. \
+                 Fix: include the session ID via 'x-amux-session: <session_id>'."
+            );
             return (
                 StatusCode::BAD_REQUEST,
                 error_json("Missing required header: x-amux-session"),
@@ -463,6 +487,10 @@ async fn handle_create_command(
 
     // Validate subcommand name.
     if !is_valid_subcommand(&body.subcommand) {
+        tracing::warn!(
+            subcommand = %body.subcommand,
+            "Command creation rejected: unknown subcommand. Valid: {:?}", KNOWN_SUBCOMMANDS
+        );
         return (
             StatusCode::BAD_REQUEST,
             error_json(format!(
@@ -483,6 +511,7 @@ async fn handle_create_command(
                 workdir = s.workdir.clone();
             }
             Ok(Some(_)) => {
+                tracing::warn!(session_id = %session_id, "Command creation rejected: session is closed");
                 return (
                     StatusCode::NOT_FOUND,
                     error_json(format!("Session '{}' is closed", session_id)),
@@ -490,6 +519,7 @@ async fn handle_create_command(
                     .into_response();
             }
             Ok(None) => {
+                tracing::warn!(session_id = %session_id, "Command creation rejected: session not found");
                 return (
                     StatusCode::NOT_FOUND,
                     error_json(format!("Session '{}' not found", session_id)),
@@ -509,6 +539,7 @@ async fn handle_create_command(
         // DB-level guard: catches commands stuck in pending/running after a server restart.
         match db::has_running_command_for_session(&db, &session_id) {
             Ok(true) => {
+                tracing::warn!(session_id = %session_id, "Command creation rejected: session already has a running command");
                 return (
                     StatusCode::FORBIDDEN,
                     error_json(format!(
@@ -538,6 +569,7 @@ async fn handle_create_command(
     {
         let mut busy = state.busy_sessions.lock().await;
         if busy.contains(&session_id) {
+            tracing::warn!(session_id = %session_id, "Command creation rejected: concurrent request — session is already busy");
             return (
                 StatusCode::FORBIDDEN,
                 error_json(format!(

@@ -2001,8 +2001,8 @@ pub fn handle_config_show(
                     let raw = global_display(field, &state.global_config);
                     // Strip " (built-in)" suffix so the user edits a clean value.
                     let stripped = raw.trim_end_matches(" (built-in)");
-                    // Empty placeholder: start blank so user types directly.
-                    if stripped == "(empty)" || stripped.is_empty() {
+                    // Placeholder values: start blank so user types directly.
+                    if stripped == "(empty)" || stripped == "(not set)" || stripped.is_empty() {
                         String::new()
                     } else {
                         stripped.to_string()

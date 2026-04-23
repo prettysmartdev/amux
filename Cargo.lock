@@ -60,6 +60,7 @@ dependencies = [
  "sha2",
  "strip-ansi-escapes",
  "strsim",
+ "subtle",
  "tar",
  "tempfile",
  "tokio",

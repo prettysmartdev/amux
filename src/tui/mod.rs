@@ -1438,15 +1438,18 @@ async fn execute_command(app: &mut App, cmd: &str) {
                     // Extract pass-through command: everything after "remote run" that isn't a parsed flag.
                     let command = extract_passthrough_command(&parts, 2);
                     if command.is_empty() {
-                        app.active_tab_mut().input_error =
-                            Some("Usage: remote run <subcommand> [args] [--session=ID] [--follow] [--remote-addr=URL]".into());
+                        app.active_tab_mut().start_command("remote run".into());
+                        app.active_tab_mut().push_output("Usage: remote run <subcommand> [args] [--session=ID] [--follow] [--remote-addr=URL]");
+                        app.active_tab_mut().finish_command(1);
                         return;
                     }
 
                     let addr = match crate::commands::remote::resolve_remote_addr(remote_addr_flag.as_deref()) {
                         Ok(a) => a,
                         Err(e) => {
-                            app.active_tab_mut().input_error = Some(e.to_string());
+                            app.active_tab_mut().start_command("remote run".into());
+                            app.active_tab_mut().push_output(format!("Error: {}", e));
+                            app.active_tab_mut().finish_command(1);
                             return;
                         }
                     };
@@ -1490,7 +1493,9 @@ async fn execute_command(app: &mut App, cmd: &str) {
                             let addr = match crate::commands::remote::resolve_remote_addr(remote_addr_flag.as_deref()) {
                                 Ok(a) => a,
                                 Err(e) => {
-                                    app.active_tab_mut().input_error = Some(e.to_string());
+                                    app.active_tab_mut().start_command("remote session start".into());
+                                    app.active_tab_mut().push_output(format!("Error: {}", e));
+                                    app.active_tab_mut().finish_command(1);
                                     return;
                                 }
                             };
@@ -1529,8 +1534,9 @@ async fn execute_command(app: &mut App, cmd: &str) {
                                 // No dir provided — show saved dirs picker.
                                 let saved = crate::config::effective_remote_saved_dirs();
                                 if saved.is_empty() {
-                                    app.active_tab_mut().input_error =
-                                        Some("No saved directories. Pass a directory argument or configure remote.savedDirs.".into());
+                                    app.active_tab_mut().start_command("remote session start".into());
+                                    app.active_tab_mut().push_output("Error: No saved directories. Pass a directory argument or configure remote.savedDirs.");
+                                    app.active_tab_mut().finish_command(1);
                                 } else {
                                     // Store a pending command with a placeholder dir so the addr is
                                     // available when RemoteSavedDirChosen fires.
@@ -1555,7 +1561,9 @@ async fn execute_command(app: &mut App, cmd: &str) {
                             let addr = match crate::commands::remote::resolve_remote_addr(remote_addr_flag.as_deref()) {
                                 Ok(a) => a,
                                 Err(e) => {
-                                    app.active_tab_mut().input_error = Some(e.to_string());
+                                    app.active_tab_mut().start_command("remote session kill".into());
+                                    app.active_tab_mut().push_output(format!("Error: {}", e));
+                                    app.active_tab_mut().finish_command(1);
                                     return;
                                 }
                             };
@@ -1587,14 +1595,16 @@ async fn execute_command(app: &mut App, cmd: &str) {
                             }
                         }
                         _ => {
-                            app.active_tab_mut().input_error =
-                                Some("Usage: remote session <start|kill>".into());
+                            app.active_tab_mut().start_command("remote session".into());
+                            app.active_tab_mut().push_output("Usage: remote session <start|kill>");
+                            app.active_tab_mut().finish_command(1);
                         }
                     }
                 }
                 _ => {
-                    app.active_tab_mut().input_error =
-                        Some("Usage: remote <run|session>  e.g. remote run implement 0001, remote session start /path".into());
+                    app.active_tab_mut().start_command("remote".into());
+                    app.active_tab_mut().push_output("Usage: remote <run|session>  e.g. remote run implement 0001, remote session start /path");
+                    app.active_tab_mut().finish_command(1);
                 }
             }
         }
@@ -1735,8 +1745,13 @@ async fn fetch_and_show_session_picker(app: &mut App, addr: String, api_key: Opt
     let last_session_id = app.active_tab().last_remote_session_id.clone();
     match crate::commands::remote::fetch_sessions(&addr, api_key.as_deref()).await {
         Ok(sessions) if sessions.is_empty() => {
-            app.active_tab_mut().input_error =
-                Some(format!("No active sessions on {}. Use 'remote session start' to create one.", addr));
+            let label = format!("remote run {}", command.join(" "));
+            app.active_tab_mut().start_command(label);
+            app.active_tab_mut().push_output(format!(
+                "Error: No active sessions on {}. Use 'remote session start' to create one.", addr
+            ));
+            app.active_tab_mut().finish_command(1);
+            app.active_tab_mut().pending_command = PendingCommand::None;
         }
         Ok(sessions) => {
             // Pre-select the last-used session so the user just presses Enter for the
@@ -1754,7 +1769,11 @@ async fn fetch_and_show_session_picker(app: &mut App, addr: String, api_key: Opt
             };
         }
         Err(e) => {
-            app.active_tab_mut().input_error = Some(format!("Failed to fetch sessions: {}", e));
+            let label = format!("remote run {}", command.join(" "));
+            app.active_tab_mut().start_command(label);
+            app.active_tab_mut().push_output(format!("Error: Failed to fetch sessions: {}", e));
+            app.active_tab_mut().finish_command(1);
+            app.active_tab_mut().pending_command = PendingCommand::None;
         }
     }
 }
@@ -1763,8 +1782,10 @@ async fn fetch_and_show_session_picker(app: &mut App, addr: String, api_key: Opt
 async fn fetch_and_show_session_kill_picker(app: &mut App, addr: String, api_key: Option<String>) {
     match crate::commands::remote::fetch_sessions(&addr, api_key.as_deref()).await {
         Ok(sessions) if sessions.is_empty() => {
-            app.active_tab_mut().input_error =
-                Some(format!("No active sessions on {}.", addr));
+            app.active_tab_mut().start_command("remote session kill".into());
+            app.active_tab_mut().push_output(format!("Error: No active sessions on {}.", addr));
+            app.active_tab_mut().finish_command(1);
+            app.active_tab_mut().pending_command = PendingCommand::None;
         }
         Ok(sessions) => {
             app.active_tab_mut().dialog = state::Dialog::RemoteSessionKillPicker {
@@ -1774,22 +1795,26 @@ async fn fetch_and_show_session_kill_picker(app: &mut App, addr: String, api_key
             };
         }
         Err(e) => {
-            app.active_tab_mut().input_error = Some(format!("Failed to fetch sessions: {}", e));
+            app.active_tab_mut().start_command("remote session kill".into());
+            app.active_tab_mut().push_output(format!("Error: Failed to fetch sessions: {}", e));
+            app.active_tab_mut().finish_command(1);
+            app.active_tab_mut().pending_command = PendingCommand::None;
         }
     }
 }
 
 /// Launch a remote run command as a background text task.
 async fn launch_remote_run(app: &mut App, remote_addr: String, session_id: String, command: Vec<String>, follow: bool, api_key: Option<String>) {
+    let label = format!("remote run {} (session: {})", command.join(" "), &session_id[..8.min(session_id.len())]);
     // Guard: session_id should always be resolved before this point.
     // An empty string means the picker flow was bypassed incorrectly.
     if session_id.is_empty() {
-        app.active_tab_mut().input_error =
-            Some("Cannot launch: session ID was not resolved. Please specify --session or select one from the picker.".into());
+        app.active_tab_mut().start_command(label);
+        app.active_tab_mut().push_output("Error: session ID was not resolved. Please specify --session or select one from the picker.");
+        app.active_tab_mut().finish_command(1);
         app.active_tab_mut().pending_command = PendingCommand::None;
         return;
     }
-    let label = format!("remote run {} (session: {})", command.join(" "), &session_id[..8.min(session_id.len())]);
     app.active_tab_mut().start_command(label);
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     app.active_tab_mut().exit_rx = Some(exit_rx);
@@ -1805,8 +1830,9 @@ async fn launch_remote_run(app: &mut App, remote_addr: String, session_id: Strin
 async fn launch_remote_session_start(app: &mut App, remote_addr: String, dir: String, api_key: Option<String>) {
     // Guard: dir should always be resolved before this point.
     if dir.is_empty() {
-        app.active_tab_mut().input_error =
-            Some("Cannot launch: working directory was not resolved. Please specify a directory or select one from the picker.".into());
+        app.active_tab_mut().start_command("remote session start".into());
+        app.active_tab_mut().push_output("Error: working directory was not resolved. Please specify a directory or select one from the picker.");
+        app.active_tab_mut().finish_command(1);
         app.active_tab_mut().pending_command = PendingCommand::None;
         return;
     }

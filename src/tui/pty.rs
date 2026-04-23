@@ -128,14 +128,13 @@ pub fn spawn_text_command<F, Fut>(
     let span = tracing::debug_span!("text_command_task");
     tokio::spawn(
         async move {
-            let sink = crate::commands::output::OutputSink::Channel(output_tx);
+            let sink = crate::commands::output::OutputSink::Channel(output_tx.clone());
             let code = match f(sink).await {
                 Ok(()) => 0,
                 Err(e) => {
-                    // The error message was not printed by the command — send it now.
-                    // (The sink was consumed so we can't use it here; the error is
-                    //  surfaced via the exit code and the TUI shows a generic message.)
-                    eprintln!("command error: {}", e);
+                    // Send the error message to the output channel so it appears in the
+                    // execution window, then propagate via the exit code.
+                    let _ = output_tx.send(format!("Error: {}", e));
                     1
                 }
             };

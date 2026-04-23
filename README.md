@@ -1,6 +1,6 @@
 <p align="center">
   <strong>Run and coordinate AI code agents from your terminal.</strong> <br>
-  Multiple sessions, multi-step workflows, full container isolation.<br>
+  Parallel sessions, multi-step workflows, full container isolation.<br>
   <br>
   <img src="./docs/amux_logo_v3.svg" width="320" alt="AMUX">
 </p>
@@ -11,7 +11,7 @@
 
 ---
 
-`amux` is a terminal multiplexer for AI code agents. Open multiple agent sessions in parallel, run them through structured multi-step workflows, and keep your machine safe — every agent runs inside a container, never on the host.
+`amux` is a terminal multiplexer for AI code agents. Open multiple agent sessions in parallel, run them through structured multi-step workflows, run agents on a fleet of machines, and keep everything safe — every agent runs inside a container, never on the host.
 
 ![amux TUI](./docs/blog/images/tui-screenshot.png)
 
@@ -62,8 +62,9 @@ amux
 # 3. Start an agent session
 chat
 
-# 4. Or implement a specific work item
-implement 0027
+# 4. Run the Dockerfile.dev refresh agent to
+#    ensure all your project's tools get installed 
+ready --refresh
 ```
 
 See the [Getting Started Guide](docs/00-getting-started.md) for a full walkthrough.
@@ -76,15 +77,15 @@ See the [Getting Started Guide](docs/00-getting-started.md) for a full walkthrou
 
 Open a new tab with **Ctrl+T**. Each tab is independent — its own working directory, its own container, running in the background while you work in another tab. Switch between tabs with **Ctrl+A** / **Ctrl+D**.
 
-If a running agent goes quiet, the tab turns yellow so you know to check in. For workflow steps, amux opens a control panel automatically.
+If a running agent gets stuck or completes its task, its tab turns yellow so you know to check in. 
 
 ### Run structured workflows
 
 ![amux workflows](./docs/blog/images/tui-workflow.png)
 
-A workflow breaks a task into phases — for example, plan → implement → review → docs. Each phase is a separate agent session. You review the output between phases and decide whether to continue, retry, or redirect.
+A workflow breaks complex work into phases — for example, plan → implement → review → docs. Each phase is a separate agent session. You review the output between phases and decide whether to continue, retry, or redirect.
 
-Workflows are plain Markdown files in your repo:
+Workflows are plain Markdown (or TOML, or YAML) files in your repo:
 
 ```markdown
 ## Step: plan
@@ -100,8 +101,10 @@ Prompt: Review the implementation for correctness and style.
 ```
 
 ```sh
-amux implement 0027 --workflow aspec/workflows/implement-feature.md
+amux exec workflow ./aspec/workflows/implement-feature.md --work-item 0027
 ```
+Workflows can optionally be passed a specific work item - a spec you've written - to work on new features, fix bugs, etc.
+
 
 ### Use different agents per step
 
@@ -126,11 +129,11 @@ Supported agents: `claude`, `codex`, `opencode`, `maki`, `gemini`. Steps without
 
 ![amux yolo mode](./docs/blog/images/tui-yolo-mode.png)
 
-`--yolo` removes all permission prompts and auto-advances stuck workflow steps. Use it when you have a well-specified task and want to return to a finished result.
+`--yolo` disables your agent's permission prompts and auto-advances completed workflow steps. Use it when you have a well-specified task and want to return to a finished result.
 
 ```sh
-# Implement fully autonomously, changes isolated to a branch
-amux implement 0027 --yolo --workflow aspec/workflows/implement-feature.md
+# Implement fully autonomously, changes isolated to a git worktree
+amux exec workflow ./aspec/workflows/implement-feature.md --yolo --work-item 0042
 ```
 
 When a workflow step completes, a 60-second yolo countdown starts. If the agent doesn't resume, the workflow advances automatically. The countdown is visible in the tab bar across all tabs — you can monitor multiple autonomous sessions without switching to each one.
@@ -139,14 +142,25 @@ When a workflow step completes, a 60-second yolo countdown starts. If the agent 
 
 For lighter autonomy, `--auto` approves file edits automatically but still requires permission for other commands.
 
-### Run agents from scripts and CI
+### Manage agents across remote machines 
 
-`amux headless start` runs an HTTP server that accepts session and command requests. Useful when you want to drive agent runs from a script, a CI pipeline, or a remote machine without a terminal session.
+`amux headless start` runs an HTTP server that allows remote control of amux. This is useful when you want to run heavy agent workflows on a remote machine or manage a fleet of agent-runner boxes.
 
 ```sh
-# Start the server (prints an API key on first run)
+# On the remote machine, start headless server (prints an API key on first run)
 amux headless start --port 9090
+```
 
+From your local machine, use `amux remote` or cURL:
+
+```sh
+amux config set remote.defaultAPIKey <key>
+amux config set remote.defaultAddr <host>
+amux remote session start /workspace/myproject
+amux remote run implement 0027 --session <id> --follow
+```
+
+```sh
 # Create a session bound to a directory
 curl -s -X POST http://localhost:9090/v1/sessions \
   -H "Authorization: Bearer <key>" \

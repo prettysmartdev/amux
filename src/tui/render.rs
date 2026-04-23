@@ -2110,7 +2110,13 @@ fn draw_config_dialog(
     frame.render_widget(block, popup);
 
     // inner layout: table rows, separator, hint line, key hints
-    let bottom_height = if state.error_msg.is_some() { 3u16 } else { 2u16 };
+    // In edit mode we add one extra line to display the full current value (which
+    // may be wider than the table column and would otherwise be clipped with "…").
+    let bottom_height = match (state.edit_mode, state.error_msg.is_some()) {
+        (true, true)  => 4u16,
+        (true, false) | (false, true) => 3u16,
+        (false, false) => 2u16,
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(5), Constraint::Length(bottom_height)])
@@ -2218,6 +2224,15 @@ fn draw_config_dialog(
     }
 
     if state.edit_mode {
+        // Show the full current edit value with cursor marker so that long values
+        // are visible even when the table cell clips them with "…".
+        let ev = &state.edit_value;
+        let cursor = state.edit_cursor;
+        let value_line = format!("  {}|{}", &ev[..cursor], &ev[cursor..]);
+        hint_lines.push(Line::from(Span::styled(
+            value_line,
+            Style::default().fg(Color::Green),
+        )));
         hint_lines.push(Line::from(Span::styled(
             format!("  Editing {}  |  Accepted: {}  |  Enter=save  Esc=cancel", selected_field.key, selected_field.hint),
             Style::default().fg(Color::Green),
