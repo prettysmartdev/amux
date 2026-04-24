@@ -82,7 +82,23 @@ The installer detects your platform and installs `amux` to `/usr/local/bin`.
 <details>
 <summary>Other installation options</summary>
 
+**With mise** — using the [GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html):
+
+```sh
+mise use -g github:prettysmartdev/amux
+```
+
+To pin to a specific version: `mise use -g github:prettysmartdev/amux@0.7.0`
+
 **From GitHub Releases** — download the binary for your platform from the [Releases page](https://github.com/prettysmartdev/amux/releases), make it executable, and move it onto your `PATH`:
+
+| Platform | Asset |
+|----------|-------|
+| Linux (x86_64) | `amux-linux-amd64` |
+| Linux (ARM64) | `amux-linux-arm64` |
+| macOS (Intel) | `amux-macos-amd64` |
+| macOS (Apple Silicon) | `amux-macos-arm64` |
+| Windows (x86_64) | `amux-windows-amd64.exe` |
 
 ```sh
 chmod +x amux-*
@@ -203,7 +219,7 @@ chat
 
 This launches an agent session in a container against your project. A **container window** opens over the execution window — this is a full terminal emulator connected to the agent. You can type directly to the agent, ask questions, request changes, and see output in real time.
 
-Press **Esc** to minimize the container window (the agent keeps running in the background). Press **c** to bring it back.
+Press **Ctrl-M** to toggle the container window between maximized and minimized (the agent keeps running in the background either way). When the window is maximized, **Esc** and other terminal keys are forwarded directly to the agent.
 
 ### Implementing a work item
 

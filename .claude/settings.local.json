@@ -108,7 +108,8 @@
       "Bash(ls /workspace/Dockerfile*)",
       "Read(//usr/local/cargo/**)",
       "Read(//home/**)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(ls docs/blog/*.md)"
     ]
   }
 }

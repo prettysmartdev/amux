@@ -28,10 +28,18 @@ The installer detects your platform and puts `amux` on your `PATH`.
 <details>
 <summary>Other installation options</summary>
 
+**With mise** — using the [GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html):
+
+```sh
+mise use -g github:prettysmartdev/amux
+```
+
+To pin to a specific version: `mise use -g github:prettysmartdev/amux@0.7.0`
+
 **From GitHub Releases** — download the binary for your platform from [GitHub Releases](https://github.com/prettysmartdev/amux/releases):
 
-| Platform | Binary |
-|----------|--------|
+| Platform | Asset |
+|----------|-------|
 | Linux (x86_64) | `amux-linux-amd64` |
 | Linux (ARM64) | `amux-linux-arm64` |
 | macOS (Intel) | `amux-macos-amd64` |
