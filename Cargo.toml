@@ -38,10 +38,12 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tower-http = { version = "0.5", features = ["trace"] }
-nix = { version = "0.29", features = ["signal", "process"] }
 chrono = { version = "0.4", features = ["serde"] }
 ring = "0.17"
 subtle = "2"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal", "process"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

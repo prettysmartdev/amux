@@ -46,13 +46,25 @@ pub fn remove_pid_file(root: &Path) -> Result<()> {
 }
 
 /// Check whether a process with the given PID is alive.
+#[cfg(unix)]
 pub fn is_process_alive(pid: u32) -> bool {
     // Send signal 0 to check existence without actually signaling.
-    nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(pid as i32),
-        None,
-    )
-    .is_ok()
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+}
+
+/// Check whether a process with the given PID is alive.
+#[cfg(windows)]
+pub fn is_process_alive(pid: u32) -> bool {
+    // Use tasklist to check if a process with this PID exists.
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
+        .output()
+        .map(|o| {
+            // CSV output format: "ImageName","PID",...
+            // If the process exists, the PID appears as a quoted CSV field.
+            String::from_utf8_lossy(&o.stdout).contains(&format!(",\"{}\",", pid))
+        })
+        .unwrap_or(false)
 }
 
 /// Check if the server is already running (PID file exists and process is alive).
@@ -68,7 +80,31 @@ pub fn check_already_running(root: &Path) -> Result<Option<u32>> {
     }
 }
 
-/// Kill the background server by reading the PID file and sending SIGTERM.
+/// Send the termination signal (SIGTERM on Unix, taskkill on Windows) to a process.
+#[cfg(unix)]
+fn kill_process(pid: u32) -> Result<()> {
+    tracing::info!(pid, "Sending SIGTERM to headless server");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .with_context(|| format!("Failed to send SIGTERM to PID {}", pid))
+}
+
+#[cfg(windows)]
+fn kill_process(pid: u32) -> Result<()> {
+    tracing::info!(pid, "Terminating headless server");
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .status()
+        .with_context(|| format!("Failed to terminate PID {}", pid))?;
+    if !status.success() {
+        bail!("taskkill /PID {} /F failed", pid);
+    }
+    Ok(())
+}
+
+/// Kill the background server by reading the PID file and sending a termination signal.
 pub fn kill_server(root: &Path) -> Result<()> {
     let pid = match read_pid_file(root)? {
         Some(pid) => pid,
@@ -80,13 +116,7 @@ pub fn kill_server(root: &Path) -> Result<()> {
         bail!("Server process (PID {}) is not running. Removed stale PID file.", pid);
     }
 
-    tracing::info!(pid, "Sending SIGTERM to headless server");
-    nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(pid as i32),
-        nix::sys::signal::Signal::SIGTERM,
-    )
-    .with_context(|| format!("Failed to send SIGTERM to PID {}", pid))?;
-
+    kill_process(pid)?;
     remove_pid_file(root)?;
 
     // On macOS, also try to unload the launchd plist.
@@ -335,6 +365,7 @@ mod tests {
         assert!(is_process_alive(pid), "current process must report as alive");
     }
 
+    #[cfg(unix)]
     #[test]
     fn is_process_alive_false_for_reaped_process() {
         // Spawn a trivial child and wait for it to exit (reap it).
@@ -373,6 +404,7 @@ mod tests {
         assert!(pid_file_path(tmp.path()).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn check_already_running_removes_stale_pid_file_and_returns_none() {
         let tmp = TempDir::new().unwrap();
