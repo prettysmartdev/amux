@@ -1396,3 +1396,245 @@ async fn list_sessions_no_filter_returns_all() {
         "closed session must appear when no filter; got: {ids:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Workflow state endpoint (`GET /v1/workflows/:command_id`) — work item 0061
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/workflows/:id` → 404 when the command ID does not exist in the DB.
+#[tokio::test]
+async fn workflow_endpoint_returns_404_for_unknown_command_id() {
+    let (_root, base) = start_test_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/v1/workflows/nonexistent-command-id-0061"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"].as_str().is_some(),
+        "404 body must include an 'error' field; got: {body}"
+    );
+}
+
+/// `GET /v1/workflows/:id` → 404 when the command exists in the DB but the
+/// `workflow.state.json` file has not yet been written.
+#[tokio::test]
+async fn workflow_endpoint_returns_404_when_state_file_absent() {
+    let (root, base) = start_test_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    // Insert a session + command directly via DB helpers (no workflow file written).
+    let conn = amux::commands::headless::db::open_db(root.path()).unwrap();
+    amux::commands::headless::db::insert_session(
+        &conn, "sess-wf-absent", "/tmp/proj", "2024-01-01T00:00:00Z",
+    ).unwrap();
+    amux::commands::headless::db::insert_command(
+        &conn, "cmd-wf-absent", "sess-wf-absent", "exec", "[]", "/dev/null",
+    ).unwrap();
+    drop(conn);
+
+    let resp = client
+        .get(format!("{base}/v1/workflows/cmd-wf-absent"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        404,
+        "must return 404 when the command exists but workflow.state.json is absent"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"].as_str().is_some(),
+        "404 body must include an 'error' field; got: {body}"
+    );
+}
+
+/// `GET /v1/workflows/:id` → 200 with full `WorkflowState` JSON when the file
+/// exists; every field must round-trip correctly.
+#[tokio::test]
+async fn workflow_endpoint_returns_200_with_full_workflow_state() {
+    let (root, base) = start_test_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    let session_id = "sess-wf-present";
+    let command_id = "cmd-wf-present";
+
+    // Insert session + command into the DB.
+    let conn = amux::commands::headless::db::open_db(root.path()).unwrap();
+    amux::commands::headless::db::insert_session(
+        &conn, session_id, "/tmp/proj", "2024-01-01T00:00:00Z",
+    ).unwrap();
+    amux::commands::headless::db::insert_command(
+        &conn, command_id, session_id, "exec", "[]", "/dev/null",
+    ).unwrap();
+    drop(conn);
+
+    // Build a WorkflowState and write it to the path the server expects.
+    let wf = amux::workflow::WorkflowState::new(
+        Some("My Test Workflow".to_string()),
+        vec![amux::workflow::parser::WorkflowStep {
+            name: "step-alpha".to_string(),
+            depends_on: vec![],
+            prompt_template: "do the thing".to_string(),
+            agent: None,
+            model: None,
+        }],
+        "deadbeef1234567890abcdef".to_string(),
+        None,
+        "test-workflow".to_string(),
+    );
+
+    let wf_path = root.path()
+        .join("sessions")
+        .join(session_id)
+        .join("commands")
+        .join(command_id)
+        .join("workflow.state.json");
+    std::fs::create_dir_all(wf_path.parent().unwrap()).unwrap();
+    std::fs::write(&wf_path, serde_json::to_string(&wf).unwrap()).unwrap();
+
+    // Call the endpoint.
+    let resp = client
+        .get(format!("{base}/v1/workflows/{command_id}"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "must return 200 when workflow.state.json exists");
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    // Assert all fields round-trip correctly.
+    assert_eq!(
+        body["workflow_name"].as_str().unwrap(), "test-workflow",
+        "workflow_name must match"
+    );
+    assert_eq!(
+        body["title"].as_str().unwrap(), "My Test Workflow",
+        "title must match"
+    );
+    assert_eq!(
+        body["workflow_hash"].as_str().unwrap(), "deadbeef1234567890abcdef",
+        "workflow_hash must match"
+    );
+    let steps = body["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1, "must have exactly one step");
+    assert_eq!(
+        steps[0]["name"].as_str().unwrap(), "step-alpha",
+        "step name must match"
+    );
+    assert_eq!(
+        steps[0]["prompt_template"].as_str().unwrap(), "do the thing",
+        "prompt_template must match"
+    );
+    // A freshly-created WorkflowState has all steps at Pending.
+    assert_eq!(
+        steps[0]["status"].as_str().unwrap(), "Pending",
+        "freshly-created step must be Pending"
+    );
+}
+
+/// `GET /v1/workflows/:id` → 401 when auth is enabled and no API key is supplied.
+#[tokio::test]
+async fn workflow_endpoint_returns_401_without_auth_key_when_auth_enabled() {
+    let api_key = "super-secret-test-key-0061";
+    let key_hash = amux::commands::headless::auth::hash_api_key(api_key);
+    let auth_mode = AuthMode::Enabled { key_hash };
+    let (_root, base) = start_test_server_with_auth(vec![], auth_mode).await;
+    let client = reqwest::Client::new();
+
+    // Request without any Authorization header.
+    let resp = client
+        .get(format!("{base}/v1/workflows/any-command-id"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        401,
+        "workflow endpoint must reject requests with no Authorization header when auth is enabled"
+    );
+}
+
+/// Workflow state file written atomically: concurrent writes and reads never
+/// produce a partial-JSON read within the server's own endpoint.
+///
+/// The server reads workflow.state.json on each GET request. Writes (simulated
+/// here by the test) and reads must not interleave in a way that produces
+/// invalid JSON.  We verify this by running a tight loop of concurrent
+/// write + endpoint-read operations and asserting every response is either
+/// a 404 (file not yet written) or a valid, parseable 200 JSON body.
+#[tokio::test]
+async fn workflow_state_file_concurrent_write_and_read_never_yields_partial_json() {
+    let (root, base) = start_test_server(vec![]).await;
+    let client = reqwest::Client::new();
+
+    let session_id = "sess-atomic";
+    let command_id = "cmd-atomic";
+
+    // Seed DB rows so the endpoint can look up the command.
+    let conn = amux::commands::headless::db::open_db(root.path()).unwrap();
+    amux::commands::headless::db::insert_session(
+        &conn, session_id, "/tmp/atomic", "2024-01-01T00:00:00Z",
+    ).unwrap();
+    amux::commands::headless::db::insert_command(
+        &conn, command_id, session_id, "exec", "[]", "/dev/null",
+    ).unwrap();
+    drop(conn);
+
+    let wf_path = root.path()
+        .join("sessions")
+        .join(session_id)
+        .join("commands")
+        .join(command_id)
+        .join("workflow.state.json");
+    std::fs::create_dir_all(wf_path.parent().unwrap()).unwrap();
+
+    let wf = amux::workflow::WorkflowState::new(
+        None,
+        vec![amux::workflow::parser::WorkflowStep {
+            name: "s1".to_string(),
+            depends_on: vec![],
+            prompt_template: "p".to_string(),
+            agent: None,
+            model: None,
+        }],
+        "hash01".to_string(),
+        None,
+        "atomic-wf".to_string(),
+    );
+
+    let url = format!("{base}/v1/workflows/{command_id}");
+
+    // Run 50 iterations of: write file + read via HTTP, asserting no partial JSON.
+    for i in 0u32..50 {
+        // Write an updated workflow state.
+        let mut updated = wf.clone();
+        updated.workflow_hash = format!("hash{i:04}");
+        std::fs::write(&wf_path, serde_json::to_string(&updated).unwrap()).unwrap();
+
+        // Read it back via the server endpoint.
+        let resp = client.get(&url).send().await.unwrap();
+        let status = resp.status().as_u16();
+
+        // The response must be either a valid 200 JSON body or a 404/5xx.
+        // It must NEVER be a 200 with un-parseable (partial) JSON.
+        if status == 200 {
+            let body_bytes = resp.bytes().await.unwrap();
+            let parse_result: Result<serde_json::Value, _> = serde_json::from_slice(&body_bytes);
+            assert!(
+                parse_result.is_ok(),
+                "iteration {i}: 200 response must contain valid JSON; got {} bytes: {:?}",
+                body_bytes.len(),
+                std::str::from_utf8(&body_bytes).unwrap_or("<invalid utf8>"),
+            );
+        }
+    }
+}

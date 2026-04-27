@@ -319,6 +319,117 @@ If you run `remote session kill` in the TUI without a session ID, amux fetches t
 
 ---
 
+## Remote-bound TUI tabs
+
+When `remote.defaultAddr` is configured in `~/.amux/config.json`, the TUI's **new-tab dialog** (opened with **Ctrl+T**) can permanently bind a new tab to a remote headless session. Every command typed in a remote-bound tab is forwarded to the remote host via the headless API — no `remote run` prefix or `--session` flag required.
+
+### Creating a remote-bound tab
+
+Press **Ctrl+T**. When `remote.defaultAddr` is configured, amux asynchronously fetches the list of active sessions from the remote host and displays them below the working directory field:
+
+```
+┌──── New Tab ─────────────────────────────────────────────┐
+│  Working directory:                                       │
+│  [ /workspace/myproject                               ]   │
+│                                                           │
+│  ─── Remote sessions (1.2.3.4:9876) ───────────────────  │
+│    abc123  /workspace/proj-a                              │
+│  > def456  /workspace/proj-b          ← selected         │
+│    + Create new remote session                            │
+│                                                           │
+│  [Enter] confirm  [Esc] cancel  [↓] move to remote list  │
+└───────────────────────────────────────────────────────────┘
+```
+
+While the fetch is in-flight, the list area shows `"  Loading remote sessions…"`. The dialog does not block — you can open a local tab immediately by pressing **Enter** in the workdir field if the remote host is slow to respond.
+
+Only **active** sessions are shown; closed sessions are excluded.
+
+| Key | Action |
+|-----|--------|
+| **↓** (workdir field focused) | Move focus to the remote session list |
+| **↑ / ↓** (list focused) | Navigate the session list |
+| **↑** (top of list, list focused) | Return focus to the workdir field |
+| **Enter** (workdir field focused) | Open a local tab with that working directory — unchanged behavior |
+| **Enter** (session selected) | Create a new tab permanently bound to that remote session |
+| **Enter** (`+ Create new remote session` selected) | Open the create-session sub-modal |
+| **Esc** | Cancel the entire modal |
+
+**Fetch failure messages** (non-fatal — a local tab can still be opened):
+
+| Situation | Message shown |
+|-----------|---------------|
+| Remote host unreachable | `"  ⚠ Could not reach <host>: <error>"` |
+| Auth required but no key configured | `"  ⚠ Auth required for <host>. Set remote.defaultAPIKey or pass --api-key."` |
+
+### Creating a new remote session from the dialog
+
+Selecting **"+ Create new remote session"** transitions the dialog to a session-creation sub-modal:
+
+```
+┌──── New Remote Session ──────────────────────────────────┐
+│  Remote working directory:                                │
+│  [ /workspace/                                        ]   │
+│                                                           │
+│  Saved directories:                                       │
+│    /workspace/proj-a                                      │
+│  > /workspace/proj-b          ← selected                 │
+│                                                           │
+│  [Enter] confirm  [Esc] back  [↑↓] navigate saved dirs   │
+└───────────────────────────────────────────────────────────┘
+```
+
+Entries from `remote.savedDirs` appear in the list. Selecting one populates the text field at the top. Press **Enter** to create the session on the remote host and open a tab bound to it. Press **Esc** to return to the new-tab dialog.
+
+If session creation fails (e.g. the directory is not in the server's allowlist), the modal shows the error text. Press **Esc** to close and press **Ctrl+T** to start over.
+
+### Remote-bound tab appearance
+
+Remote-bound tabs are **purple** in the tab bar. The tab label shows the `host:port` of the remote host (the `display_host`, extracted from `remote.defaultAddr` at binding time) instead of the local working directory short name.
+
+```
+┌─ Tab 1: myproject ──────────┬─ 1.2.3.4:9876 ─────────────┐
+│  implement 0001              │  implement 0059             │
+└──────────────────────────────┴─────────────────────────────┘
+```
+
+The `display_host` label is fixed for the lifetime of the tab — it does not change if `remote.defaultAddr` is later modified in config. The inner subtitle (below the hostname) shows the command currently running on the remote session, or `(ready)` when idle.
+
+### Command execution in a remote-bound tab
+
+Every command typed in a remote-bound tab is sent to the remote session via `POST /v1/commands`, then output is streamed back in real time via the SSE log-streaming endpoint — identical to `remote run <command> --follow` but with no flags required. The tab transitions through the same execution phase states as a local tab (running → done / error).
+
+When first created, the tab automatically dispatches a `ready` command to the remote session (matching local tab behavior). The `ready` output appears in the execution window.
+
+If the remote host returns an error (auth failure, session not found, network error), the error appears in the execution window. The tab remains bound to the remote session and accepts subsequent commands normally — the binding is permanent for the lifetime of the tab.
+
+Flags that refer to remote addressing (`--session`, `--remote-addr`, `--api-key`) are stripped from forwarded commands, since the binding already supplies the target.
+
+### Closing a remote-bound tab
+
+Closing a remote-bound tab (with **Ctrl+C** when multiple tabs are open) cancels any in-flight command stream and any active workflow polling task. The remote session itself is **not** closed — it continues running on the remote host and can be accessed again later via a new remote-bound tab or the `remote` CLI subcommands.
+
+### Workflow state strip for remote-bound tabs
+
+When a workflow command is dispatched from a remote-bound tab (`exec workflow`, `implement --workflow`), the workflow state strip appears automatically — exactly as it does for local workflow runs.
+
+Starting 5 seconds after the command is dispatched, amux polls `GET /v1/workflows/:command_id` on the remote headless server every 5 seconds. As soon as a workflow state is found, the strip renders and continues updating until the workflow reaches a terminal state (`complete` or `error`).
+
+The remote workflow strip is visually identical to the local strip: parallel steps, paused states, running steps, and completion markers all render the same way. No extra configuration is required.
+
+**Polling behavior:**
+
+| Situation | Behavior |
+|-----------|----------|
+| No workflow found (HTTP 404) on first poll | Polling stops silently — the command is not a workflow command |
+| No workflow found (HTTP 404) after a previous 200 | Polling stops — workflow state was removed |
+| Transient network error during polling | Retried on the next 5-second interval; no error shown to the user |
+| Workflow reaches `complete` or `error` | Polling stops; strip reflects the final state |
+| Tab closed while polling | Poll task cancelled immediately |
+| New command dispatched from the same tab | Previous poll task cancelled; new poll task starts for the new command |
+
+---
+
 ## Configuration
 
 Remote mode settings live under a `remote` key in the global config (`~/.amux/config.json`). All fields are optional.
@@ -480,6 +591,18 @@ See [Headless Mode](08-headless-mode.md) for the full HTTP API reference, includ
 | `remote.defaultAPIKey` set but target address differs from `remote.defaultAddr` | Config key is ignored; request proceeds without auth (server returns 401 if auth is required) |
 | `remote.defaultAPIKey` matches `remote.defaultAddr` with trailing slash difference | Trailing slashes are stripped from both sides before comparison; key is used |
 | Session closed between picker fetch and command dispatch | Server returns HTTP 404; client surfaces a clear error; session is not re-opened |
+| **Ctrl+T** with `remote.defaultAddr` not configured | New-tab dialog behaves exactly as before — no remote session list, no fetch, no binding option |
+| **Ctrl+T** opened while a previous remote session fetch is still in-flight | Previous fetch is cancelled; new fetch starts for the fresh modal open |
+| Remote-bound tab: auth error when dispatching a command | Error appears in the execution window; no `command_id` returned; workflow polling does not start; tab stays bound |
+| Remote-bound tab: remote session closed externally while tab is open | `POST /v1/commands` returns HTTP 404; error shown in execution window; subsequent commands also fail until the session is recreated on the remote host |
+| Remote-bound tab: command contains `--session` or `--remote-addr` flags | These flags are stripped before forwarding; the tab's binding supplies the target |
+| Remote-bound tab: tab closed while a command stream is in-flight | SSE stream task and any workflow poll task are cancelled; the remote command continues executing on the server |
+| Remote-bound tab: new command dispatched while workflow polling is active | Previous poll task cancelled; new poll task starts 5 seconds after the new command is dispatched |
+| Remote-bound tab: create-new-session sub-modal — remote dir creation fails | Modal shows error text; no tab created; press **Esc** and retry with **Ctrl+T** |
+| Remote workflow strip: `GET /v1/workflows/:command_id` returns HTTP 404 | Polling stops silently; no error shown; strip does not appear |
+| Remote workflow strip: transient network errors during polling | Retried on next 5-second interval; not surfaced to user |
+| Remote workflow strip: parallel steps | Rendered stacked in the strip, identical to local workflow parallel steps |
+| Remote workflow strip: paused step | Strip shows the paused indicator on the paused step; polling continues since the workflow may resume |
 
 ---
 

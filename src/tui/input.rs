@@ -145,6 +145,20 @@ pub enum Action {
     RemoteSaveDirDeclined,
     /// Remote: user selected a session to kill from the kill picker.
     RemoteSessionKillChosen { session_id: String },
+    /// New-tab dialog: user selected a remote session to bind a new tab to.
+    NewTabRemoteSessionChosen {
+        remote_addr: String,
+        session_id: String,
+        api_key: Option<String>,
+    },
+    /// New-tab dialog: user wants to create a new remote session.
+    NewTabCreateRemoteSession,
+    /// Create-remote-session dialog: user confirmed creation.
+    NewRemoteSessionCreated {
+        remote_addr: String,
+        dir: String,
+        api_key: Option<String>,
+    },
 }
 
 /// Dispatch a key press to the correct handler based on application state.
@@ -192,8 +206,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
                 cursor_pos,
             )
         }
-        Dialog::NewTabDirectory { input } => {
-            return handle_new_tab_directory(app.active_tab_mut(), key, input)
+        Dialog::NewTabDirectory { input, remote_sessions, remote_selected_idx, focus_workdir } => {
+            return handle_new_tab_directory(app.active_tab_mut(), key, input, remote_sessions, remote_selected_idx, focus_workdir)
+        }
+        Dialog::NewRemoteSession { remote_addr, api_key, dir_input, saved_dirs, saved_selected_idx, focus_input, .. } => {
+            return handle_new_remote_session(app.active_tab_mut(), key, remote_addr, api_key, dir_input, saved_dirs, saved_selected_idx, focus_input)
         }
         Dialog::ClawsAuditConfirm => return handle_claws_audit_confirm(app.active_tab_mut(), key),
         Dialog::ClawsReadyHasForked => return handle_claws_has_forked(app.active_tab_mut(), key),
@@ -612,32 +629,231 @@ fn handle_close_tab_confirm(tab: &mut TabState, key: KeyEvent) -> Action {
     Action::None
 }
 
-fn handle_new_tab_directory(tab: &mut TabState, key: KeyEvent, mut input: String) -> Action {
-    match key.code {
-        KeyCode::Enter => {
-            tab.dialog = Dialog::None;
-            let path = if input.trim().is_empty() {
-                tab.cwd.clone()
-            } else {
-                PathBuf::from(input.trim())
-            };
-            Action::NewTabDirectoryChosen(path)
+fn handle_new_tab_directory(
+    tab: &mut TabState,
+    key: KeyEvent,
+    mut input: String,
+    remote_sessions: Option<Result<Vec<crate::commands::remote::RemoteSessionEntry>, String>>,
+    remote_selected_idx: Option<usize>,
+    focus_workdir: bool,
+) -> Action {
+    if focus_workdir {
+        // Focus is on the workdir text input.
+        match key.code {
+            KeyCode::Enter => {
+                tab.dialog = Dialog::None;
+                let path = if input.trim().is_empty() {
+                    tab.cwd.clone()
+                } else {
+                    PathBuf::from(input.trim())
+                };
+                Action::NewTabDirectoryChosen(path)
+            }
+            KeyCode::Esc => {
+                tab.dialog = Dialog::None;
+                tab.remote_sessions_fetch_rx = None;
+                Action::None
+            }
+            KeyCode::Down => {
+                // Move focus to the remote sessions list if available.
+                let has_entries = match &remote_sessions {
+                    Some(Ok(sessions)) => !sessions.is_empty() || true, // always have "+ Create new"
+                    _ => false,
+                };
+                if has_entries {
+                    tab.dialog = Dialog::NewTabDirectory {
+                        input,
+                        remote_sessions,
+                        remote_selected_idx: Some(0),
+                        focus_workdir: false,
+                    };
+                }
+                Action::None
+            }
+            KeyCode::Backspace => {
+                input.pop();
+                tab.dialog = Dialog::NewTabDirectory { input, remote_sessions, remote_selected_idx, focus_workdir: true };
+                Action::None
+            }
+            KeyCode::Char(c) => {
+                input.push(c);
+                tab.dialog = Dialog::NewTabDirectory { input, remote_sessions, remote_selected_idx, focus_workdir: true };
+                Action::None
+            }
+            _ => Action::None,
         }
-        KeyCode::Esc => {
-            tab.dialog = Dialog::None;
-            Action::None
+    } else {
+        // Focus is on the remote sessions list.
+        let sessions = match &remote_sessions {
+            Some(Ok(s)) => s.clone(),
+            _ => vec![],
+        };
+        // Total entries = sessions + 1 for "+ Create new remote session"
+        let total_entries = sessions.len() + 1;
+        let idx = remote_selected_idx.unwrap_or(0);
+
+        match key.code {
+            KeyCode::Up => {
+                if idx == 0 {
+                    // Move back to workdir input.
+                    tab.dialog = Dialog::NewTabDirectory {
+                        input,
+                        remote_sessions,
+                        remote_selected_idx: Some(0),
+                        focus_workdir: true,
+                    };
+                } else {
+                    tab.dialog = Dialog::NewTabDirectory {
+                        input,
+                        remote_sessions,
+                        remote_selected_idx: Some(idx - 1),
+                        focus_workdir: false,
+                    };
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                let new_idx = (idx + 1).min(total_entries.saturating_sub(1));
+                tab.dialog = Dialog::NewTabDirectory {
+                    input,
+                    remote_sessions,
+                    remote_selected_idx: Some(new_idx),
+                    focus_workdir: false,
+                };
+                Action::None
+            }
+            KeyCode::Enter => {
+                tab.dialog = Dialog::None;
+                tab.remote_sessions_fetch_rx = None;
+                if idx < sessions.len() {
+                    // User selected an existing session.
+                    let session = &sessions[idx];
+                    let remote_addr = crate::config::effective_remote_default_addr().unwrap_or_default();
+                    let api_key = crate::commands::remote::resolve_api_key(None, &remote_addr);
+                    Action::NewTabRemoteSessionChosen {
+                        remote_addr,
+                        session_id: session.id.clone(),
+                        api_key,
+                    }
+                } else {
+                    // "+ Create new remote session"
+                    Action::NewTabCreateRemoteSession
+                }
+            }
+            KeyCode::Esc => {
+                tab.dialog = Dialog::None;
+                tab.remote_sessions_fetch_rx = None;
+                Action::None
+            }
+            _ => Action::None,
         }
-        KeyCode::Backspace => {
-            input.pop();
-            tab.dialog = Dialog::NewTabDirectory { input };
-            Action::None
+    }
+}
+
+fn handle_new_remote_session(
+    tab: &mut TabState,
+    key: KeyEvent,
+    remote_addr: String,
+    api_key: Option<String>,
+    mut dir_input: String,
+    saved_dirs: Vec<String>,
+    saved_selected_idx: Option<usize>,
+    focus_input: bool,
+) -> Action {
+    if focus_input {
+        match key.code {
+            KeyCode::Enter => {
+                if dir_input.trim().is_empty() {
+                    return Action::None;
+                }
+                tab.dialog = Dialog::None;
+                Action::NewRemoteSessionCreated {
+                    remote_addr,
+                    dir: dir_input.trim().to_string(),
+                    api_key,
+                }
+            }
+            KeyCode::Esc => {
+                // Return to new-tab dialog.
+                tab.dialog = Dialog::None;
+                Action::CreateTab
+            }
+            KeyCode::Down if !saved_dirs.is_empty() => {
+                tab.dialog = Dialog::NewRemoteSession {
+                    remote_addr,
+                    api_key,
+                    dir_input,
+                    saved_dirs,
+                    saved_selected_idx: Some(0),
+                    focus_input: false,
+                    creation_error: None,
+                };
+                Action::None
+            }
+            KeyCode::Backspace => {
+                dir_input.pop();
+                tab.dialog = Dialog::NewRemoteSession {
+                    remote_addr, api_key, dir_input, saved_dirs, saved_selected_idx, focus_input: true,
+                    creation_error: None,
+                };
+                Action::None
+            }
+            KeyCode::Char(c) => {
+                dir_input.push(c);
+                tab.dialog = Dialog::NewRemoteSession {
+                    remote_addr, api_key, dir_input, saved_dirs, saved_selected_idx, focus_input: true,
+                    creation_error: None,
+                };
+                Action::None
+            }
+            _ => Action::None,
         }
-        KeyCode::Char(c) => {
-            input.push(c);
-            tab.dialog = Dialog::NewTabDirectory { input };
-            Action::None
+    } else {
+        let idx = saved_selected_idx.unwrap_or(0);
+        match key.code {
+            KeyCode::Up => {
+                if idx == 0 {
+                    tab.dialog = Dialog::NewRemoteSession {
+                        remote_addr, api_key, dir_input, saved_dirs, saved_selected_idx: Some(0), focus_input: true,
+                        creation_error: None,
+                    };
+                } else {
+                    tab.dialog = Dialog::NewRemoteSession {
+                        remote_addr, api_key, dir_input, saved_dirs, saved_selected_idx: Some(idx - 1), focus_input: false,
+                        creation_error: None,
+                    };
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                let new_idx = (idx + 1).min(saved_dirs.len().saturating_sub(1));
+                tab.dialog = Dialog::NewRemoteSession {
+                    remote_addr, api_key, dir_input, saved_dirs, saved_selected_idx: Some(new_idx), focus_input: false,
+                    creation_error: None,
+                };
+                Action::None
+            }
+            KeyCode::Enter => {
+                // Selecting a saved dir populates the text field and confirms.
+                if idx < saved_dirs.len() {
+                    let dir = saved_dirs[idx].clone();
+                    tab.dialog = Dialog::None;
+                    Action::NewRemoteSessionCreated {
+                        remote_addr,
+                        dir,
+                        api_key,
+                    }
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Esc => {
+                // Return to new-tab dialog.
+                tab.dialog = Dialog::None;
+                Action::CreateTab
+            }
+            _ => Action::None,
         }
-        _ => Action::None,
     }
 }
 

@@ -17,7 +17,7 @@ use anyhow::Result;
 /// Build a `reqwest::Client` with the timeouts required by the spec:
 /// - connect timeout: 10 seconds
 /// - read timeout: 600 seconds (10 min — agent commands can run for a long time)
-fn make_client() -> Result<reqwest::Client> {
+pub(crate) fn make_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .read_timeout(std::time::Duration::from_secs(600))
@@ -525,6 +525,46 @@ pub async fn stream_command_logs(
 }
 
 // ---------------------------------------------------------------------------
+// Workflow state fetching
+// ---------------------------------------------------------------------------
+
+/// Fetch the workflow state for a command from the remote headless server.
+/// Returns `Ok(None)` on HTTP 404 (no workflow for this command).
+/// Returns `Ok(Some(state))` on HTTP 200.
+/// Returns `Err` on network/auth errors or unexpected HTTP status.
+pub async fn fetch_workflow_state(
+    remote_addr: &str,
+    command_id: &str,
+    api_key: Option<&str>,
+) -> Result<Option<crate::workflow::WorkflowState>> {
+    let client = make_client()?;
+    let response = build_request(
+        &client,
+        reqwest::Method::GET,
+        &format!("{}/v1/workflows/{}", remote_addr, command_id),
+        api_key,
+    )
+    .send()
+    .await
+    .map_err(|e| map_reqwest_error(e, "Failed to fetch workflow state"))?;
+
+    match response.status() {
+        reqwest::StatusCode::NOT_FOUND => Ok(None),
+        reqwest::StatusCode::OK => {
+            let state: crate::workflow::WorkflowState = response
+                .json()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to parse workflow state: {}", e))?;
+            Ok(Some(state))
+        }
+        status => {
+            let text = response.text().await.unwrap_or_default();
+            Err(anyhow::anyhow!("Unexpected status {}: {}", status, text))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Config helpers
 // ---------------------------------------------------------------------------
 
@@ -985,5 +1025,159 @@ mod tests {
     #[test]
     fn truncate_empty_string_unchanged() {
         assert_eq!(truncate("", 5), "");
+    }
+
+    // ─── fetch_workflow_state unit tests (work item 0061) ────────────────────
+    //
+    // Each test spins up a minimal in-process axum server that returns a
+    // fixed HTTP response, then verifies the client-side behaviour.
+
+    /// Shared state for the mock workflow HTTP server.
+    #[derive(Clone)]
+    struct MockWfServerState {
+        response_status: u16,
+        response_body: String,
+        /// Records the Authorization header value from the most recent request.
+        captured_auth: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    /// Generic handler: returns the configured status + body and captures auth header.
+    async fn mock_wf_handler(
+        axum::extract::State(state): axum::extract::State<MockWfServerState>,
+        headers: axum::http::HeaderMap,
+    ) -> axum::response::Response<axum::body::Body> {
+        *state.captured_auth.lock().unwrap() = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        axum::response::Response::builder()
+            .status(state.response_status)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(state.response_body.clone()))
+            .unwrap()
+    }
+
+    /// Start a mock server that responds to `GET /v1/workflows/:cmd_id`.
+    /// Returns `(base_url, captured_auth_header)`.
+    async fn start_mock_wf_server(
+        status: u16,
+        body: impl Into<String>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Option<String>>>) {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let server_state = MockWfServerState {
+            response_status: status,
+            response_body: body.into(),
+            captured_auth: std::sync::Arc::clone(&captured),
+        };
+        let router = axum::Router::new()
+            .route(
+                "/v1/workflows/:cmd_id",
+                axum::routing::get(mock_wf_handler),
+            )
+            .with_state(server_state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (format!("http://127.0.0.1:{port}"), captured)
+    }
+
+    /// `fetch_workflow_state` returns `Ok(None)` when the server responds with 404.
+    #[tokio::test]
+    async fn fetch_workflow_state_returns_ok_none_on_404() {
+        let (base, _) =
+            start_mock_wf_server(404, r#"{"error":"no workflow for this command"}"#).await;
+
+        let result = fetch_workflow_state(&base, "cmd-notfound", None).await;
+
+        assert!(result.is_ok(), "must not return Err on 404; got: {:?}", result);
+        assert!(
+            result.unwrap().is_none(),
+            "must return None when server returns 404"
+        );
+    }
+
+    /// `fetch_workflow_state` returns `Ok(Some(state))` when the server responds
+    /// with 200 and a valid `WorkflowState` JSON body; every field must match.
+    #[tokio::test]
+    async fn fetch_workflow_state_returns_ok_some_on_200_with_valid_json() {
+        let wf = crate::workflow::WorkflowState::new(
+            Some("Unit Test Workflow".to_string()),
+            vec![crate::workflow::parser::WorkflowStep {
+                name: "unit-step".to_string(),
+                depends_on: vec![],
+                prompt_template: "do something useful".to_string(),
+                agent: None,
+                model: None,
+            }],
+            "cafecafe12345678".to_string(),
+            None,
+            "unit-wf".to_string(),
+        );
+        let json_body = serde_json::to_string(&wf).unwrap();
+
+        let (base, _) = start_mock_wf_server(200, json_body).await;
+
+        let result = fetch_workflow_state(&base, "cmd-present", None).await;
+
+        assert!(result.is_ok(), "must succeed on 200; got: {:?}", result);
+        let got = result.unwrap().expect("must be Some on 200");
+        assert_eq!(got.workflow_name, "unit-wf", "workflow_name must match");
+        assert_eq!(got.workflow_hash, "cafecafe12345678", "workflow_hash must match");
+        assert_eq!(
+            got.title.as_deref(),
+            Some("Unit Test Workflow"),
+            "title must match"
+        );
+        assert_eq!(got.steps.len(), 1, "step count must match");
+        assert_eq!(got.steps[0].name, "unit-step", "step name must match");
+    }
+
+    /// `fetch_workflow_state` returns `Err` when the server responds with 500.
+    #[tokio::test]
+    async fn fetch_workflow_state_returns_err_on_500() {
+        let (base, _) =
+            start_mock_wf_server(500, r#"{"error":"internal server error"}"#).await;
+
+        let result = fetch_workflow_state(&base, "cmd-servererr", None).await;
+
+        assert!(
+            result.is_err(),
+            "must return Err on 500 status; got Ok({:?})",
+            result.ok()
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("500") || msg.contains("Unexpected"),
+            "error must mention the unexpected status; got: {msg}"
+        );
+    }
+
+    /// `fetch_workflow_state` attaches `Authorization: Bearer <key>` when
+    /// `api_key` is `Some`.
+    #[tokio::test]
+    async fn fetch_workflow_state_attaches_authorization_header_when_api_key_is_some() {
+        let (base, captured) =
+            start_mock_wf_server(404, r#"{"error":"not found"}"#).await;
+
+        let _ = fetch_workflow_state(&base, "cmd-authcheck", Some("super-secret-key")).await;
+
+        let auth_header = captured.lock().unwrap().clone();
+        assert!(
+            auth_header.is_some(),
+            "Authorization header must be sent when api_key is Some"
+        );
+        let value = auth_header.unwrap();
+        assert!(
+            value.to_lowercase().starts_with("bearer "),
+            "Authorization header must use Bearer scheme; got: {value}"
+        );
+        assert!(
+            value.contains("super-secret-key"),
+            "Authorization header must contain the api key; got: {value}"
+        );
     }
 }

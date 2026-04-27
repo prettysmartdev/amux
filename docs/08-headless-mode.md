@@ -363,6 +363,7 @@ http://localhost:<port>/v1
 | `GET` | `/v1/commands/:id` | Get command status and metadata |
 | `GET` | `/v1/commands/:id/logs` | Get captured command output (snapshot) |
 | `GET` | `/v1/commands/:id/logs/stream` | Stream live command output via Server-Sent Events |
+| `GET` | `/v1/workflows/:id` | Get the workflow state for a command |
 | `GET` | `/v1/status` | Server health (uptime, active sessions, running commands) |
 
 ---
@@ -617,6 +618,74 @@ curl -s http://localhost:9876/v1/status \
 
 ---
 
+### Workflow state
+
+When a command runs a workflow (`exec workflow`, `implement --workflow`), the headless server writes a `workflow.state.json` file to the per-command directory. This file is updated atomically on every step transition. The `GET /v1/workflows/:command_id` endpoint exposes that state over HTTP.
+
+#### Get workflow state
+
+```sh
+curl -s http://localhost:9876/v1/workflows/<command-id> \
+  -H 'Authorization: Bearer <api-key>'
+```
+
+Returns the current `WorkflowState` for the given command. The structure is identical to the local workflow state format — the same JSON produced by `amux implement --workflow` when it writes state to `$GITROOT/.amux/workflows/`.
+
+```json
+{
+  "steps": [
+    { "name": "plan",      "status": "done"    },
+    { "name": "implement", "status": "running" },
+    { "name": "docs",      "status": "pending" },
+    { "name": "review",    "status": "pending" }
+  ],
+  "status": "running"
+}
+```
+
+Use the `status` field in the response body to determine completion — do not rely solely on the HTTP status code.
+
+| `status` value | Meaning |
+|----------------|---------|
+| `running` | At least one step is actively executing |
+| `paused` | A step is waiting for user confirmation to advance |
+| `complete` | All steps finished successfully |
+| `error` | At least one step failed |
+
+**Response codes:**
+
+| HTTP status | Meaning |
+|-------------|---------|
+| 200 | Workflow state found; body contains the full `WorkflowState` JSON |
+| 404 `{"error": "command not found"}` | No command with that ID exists |
+| 404 `{"error": "no workflow for this command"}` | The command exists but did not run a workflow (e.g. `exec prompt` or `implement` without `--workflow`) |
+| 401 | Missing or invalid API key (same auth middleware as all other endpoints) |
+
+**Polling for live workflow progress:**
+
+Poll this endpoint at your preferred interval to track a running workflow. The state file is updated atomically on every step transition, so polls never observe a partial or corrupted state.
+
+```sh
+SERVER=http://localhost:9876
+KEY=<your-api-key>
+
+# Poll until the workflow reaches a terminal state
+while true; do
+  RESP=$(curl -s "$SERVER/v1/workflows/$CMD" \
+    -H "Authorization: Bearer $KEY")
+  STATUS=$(echo "$RESP" | jq -r '.status')
+  echo "Workflow status: $STATUS"
+  [ "$STATUS" = "complete" ] || [ "$STATUS" = "error" ] && break
+  sleep 5
+done
+```
+
+If the endpoint returns HTTP 404 on the first poll, the command either has not started yet or is not a workflow command — treat 404 as "no workflow" and skip the strip. If 404 is returned after a non-404 response, the workflow was removed; stop polling.
+
+The [Remote-bound TUI tabs](09-remote-mode.md#remote-bound-tui-tabs) feature uses this endpoint internally to render the workflow state strip for commands running on a remote headless server.
+
+---
+
 ## Full example: session lifecycle
 
 ```sh
@@ -706,7 +775,10 @@ Everything headless mode writes lives under `~/.amux/headless/`:
         <command-uuid>/
           output.log               # combined stdout+stderr (written incrementally)
           metadata.json            # request payload, timestamps, exit code
+          workflow.state.json      # workflow state — only present for workflow commands
 ```
+
+`workflow.state.json` is written and updated atomically (write to a temp file, then rename) each time the workflow advances to a new step. The file uses the identical JSON structure as the local workflow state in `$GITROOT/.amux/workflows/`. It is created only when the command runs a workflow; it is never present for `exec prompt`, `chat`, `implement` (without `--workflow`), or other non-workflow commands.
 
 `amux.db` contains two tables:
 
@@ -837,6 +909,12 @@ On `SIGTERM` or `SIGINT`, the server finishes all in-flight HTTP responses and a
 | Session transitions to closed between list fetch and command dispatch | Server enforces rejection at `POST /v1/commands` regardless of filter; client receives HTTP 404 |
 | Startup cleanup: sessions closed exactly 24h ago | Not deleted until the next second boundary passes (exclusive `<` comparison) |
 | Startup cleanup: on-disk log files for cleaned sessions | Not deleted; they remain in `~/.amux/headless/sessions/<uuid>/` for audit purposes |
+| `GET /v1/workflows/:command_id` — unknown command ID | HTTP 404 `{"error": "command not found"}` |
+| `GET /v1/workflows/:command_id` — command is not a workflow command | HTTP 404 `{"error": "no workflow for this command"}`; `workflow.state.json` is never created |
+| `GET /v1/workflows/:command_id` — command is `pending` (not yet started) | HTTP 404 `{"error": "no workflow for this command"}`; file does not exist yet |
+| `GET /v1/workflows/:command_id` — workflow is paused | HTTP 200; `WorkflowState.status` is `"paused"`; the paused step is identified in the body; polling may continue since the workflow can resume |
+| `GET /v1/workflows/:command_id` — workflow is complete | HTTP 200; `WorkflowState.status` is `"complete"`; all steps present with terminal statuses; clients should stop polling |
+| Concurrent reads of `workflow.state.json` during a write | File is written atomically via rename; clients never observe a partial JSON document |
 
 ---
 

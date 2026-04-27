@@ -257,10 +257,20 @@ The tab bar shows each tab's project name, current or last command, and an arrow
 | Grey | Idle or completed |
 | Blue | Running (no container) |
 | Green | Running with active container |
-| Purple / Magenta | Running a claws (nanoclaw) session |
+| Purple / Magenta | Running a claws (nanoclaw) session, **or** permanently bound to a remote headless session |
 | Red | Exited with error |
 | Yellow | Container silent for >10 seconds (stuck warning) |
 | Alternating Yellow / Purple | Background yolo countdown in progress (see [Yolo Mode](05-yolo-mode.md#background-yolo-countdown)) |
+
+### Remote-bound tabs
+
+When `remote.defaultAddr` is set in `~/.amux/config.json`, opening a new tab with **Ctrl+T** offers an option to bind the tab to a remote headless session. A **remote-bound tab** forwards every command you type to the remote host via the headless API — no `remote run` prefix or session flags needed.
+
+Remote-bound tabs are **purple** in the tab bar. The tab label shows `host:port` of the remote host instead of the local directory name. When a workflow runs on the remote session, the workflow state strip appears automatically and updates every 5 seconds.
+
+For full details on creating remote-bound tabs, the create-session sub-modal, and workflow strip behavior, see [Remote Mode: Remote-bound TUI tabs](09-remote-mode.md#remote-bound-tui-tabs).
+
+---
 
 ### Stuck detection
 

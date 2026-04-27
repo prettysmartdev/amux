@@ -392,7 +392,25 @@ async fn handle_action(app: &mut App, action: Action) {
 
         Action::CreateTab => {
             let cwd = app.active_tab().cwd.clone();
-            app.active_tab_mut().dialog = Dialog::NewTabDirectory { input: cwd.to_string_lossy().to_string() };
+            let has_remote = crate::config::effective_remote_default_addr().is_some();
+            app.active_tab_mut().dialog = Dialog::NewTabDirectory {
+                input: cwd.to_string_lossy().to_string(),
+                remote_sessions: if has_remote { None } else { Some(Ok(vec![])) },
+                remote_selected_idx: None,
+                focus_workdir: true,
+            };
+
+            // If remote is configured, kick off an async fetch of active sessions.
+            if has_remote {
+                let addr = crate::config::effective_remote_default_addr().unwrap();
+                let api_key = crate::commands::remote::resolve_api_key(None, &addr);
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                app.active_tab_mut().remote_sessions_fetch_rx = Some(rx);
+                tokio::spawn(async move {
+                    let result = crate::commands::remote::fetch_sessions(&addr, api_key.as_deref()).await;
+                    let _ = tx.send(result.map_err(|e| e.to_string()));
+                });
+            }
         }
 
         Action::SwitchTabLeft => {
@@ -457,7 +475,66 @@ async fn handle_action(app: &mut App, action: Action) {
         Action::NewTabDirectoryChosen(path) => {
             let new_idx = app.create_tab(path.clone());
             app.active_tab_idx = new_idx;
-            execute_tab_command(app, new_idx, "ready").await;
+            execute_tab_command(app, "ready").await;
+        }
+
+        Action::NewTabRemoteSessionChosen { remote_addr, session_id, api_key } => {
+            // Create a new tab bound to the remote session.
+            let cwd = app.active_tab().cwd.clone();
+            let new_idx = app.create_tab(cwd);
+            app.active_tab_idx = new_idx;
+            let binding = crate::tui::state::RemoteTabBinding::new(
+                remote_addr, session_id, api_key,
+            );
+            app.tabs[new_idx].remote_binding = Some(binding);
+            // Auto-execute `ready` on the remote tab.
+            launch_remote_bound_command(app, new_idx, "ready").await;
+        }
+
+        Action::NewTabCreateRemoteSession => {
+            let remote_addr = crate::config::effective_remote_default_addr().unwrap_or_default();
+            let api_key = crate::commands::remote::resolve_api_key(None, &remote_addr);
+            let saved_dirs = crate::config::effective_remote_saved_dirs();
+            app.active_tab_mut().dialog = Dialog::NewRemoteSession {
+                remote_addr,
+                api_key,
+                dir_input: String::new(),
+                saved_dirs,
+                saved_selected_idx: None,
+                focus_input: true,
+                creation_error: None,
+            };
+        }
+
+        Action::NewRemoteSessionCreated { remote_addr, dir, api_key } => {
+            // Create a session on the remote host, then bind a new tab to it.
+            // On failure, re-open the creation dialog with the error shown inline
+            // so the user can correct the path and retry without pressing Ctrl-T.
+            let cwd = app.active_tab().cwd.clone();
+            match crate::commands::remote::run_remote_session_start(&remote_addr, &dir, api_key.as_deref()).await {
+                Ok(session_id) => {
+                    let new_idx = app.create_tab(cwd);
+                    app.active_tab_idx = new_idx;
+                    let binding = crate::tui::state::RemoteTabBinding::new(
+                        remote_addr, session_id, api_key,
+                    );
+                    app.tabs[new_idx].remote_binding = Some(binding);
+                    launch_remote_bound_command(app, new_idx, "ready").await;
+                }
+                Err(e) => {
+                    // Re-open the creation dialog with the error shown — no new tab is created.
+                    let saved_dirs = crate::config::effective_remote_saved_dirs();
+                    app.active_tab_mut().dialog = Dialog::NewRemoteSession {
+                        remote_addr,
+                        api_key,
+                        dir_input: dir,
+                        saved_dirs,
+                        saved_selected_idx: None,
+                        focus_input: true,
+                        creation_error: Some(format!("Failed to create session: {}", e)),
+                    };
+                }
+            }
         }
 
         Action::WorkflowAdvance => {
@@ -1051,9 +1128,189 @@ fn handle_worktree_skip(app: &mut App) {
     app.active_tab_mut().worktree_git_root = None;
 }
 
-/// Execute a command on a specific tab by index.
-async fn execute_tab_command(app: &mut App, _tab_idx: usize, cmd: &str) {
+/// Execute a command on the active tab.
+async fn execute_tab_command(app: &mut App, cmd: &str) {
     execute_command(app, cmd).await;
+}
+
+/// Launch a command on a remote-bound tab.
+///
+/// Submits the command to the remote headless server via `POST /v1/commands`,
+/// streams logs to the tab's output, and updates the tab's execution phase.
+async fn launch_remote_bound_command(app: &mut App, tab_idx: usize, raw_command: &str) {
+    let binding = match app.tabs[tab_idx].remote_binding.clone() {
+        Some(b) => b,
+        None => return,
+    };
+
+    let parts: Vec<String> = raw_command.split_whitespace().map(|s| s.to_string()).collect();
+    if parts.is_empty() {
+        return;
+    }
+
+    app.tabs[tab_idx].start_command(raw_command.to_string());
+
+    let tx = app.tabs[tab_idx].output_tx.clone();
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+    app.tabs[tab_idx].exit_rx = Some(exit_rx);
+
+    // Set up workflow state polling channel.
+    let (wf_tx, wf_rx) = tokio::sync::mpsc::unbounded_channel();
+    app.tabs[tab_idx].remote_workflow_rx = Some(wf_rx);
+
+    let remote_addr = binding.remote_addr.clone();
+    let session_id = binding.session_id.clone();
+    let api_key = binding.api_key.clone();
+
+    tokio::spawn(async move {
+        let sink = crate::commands::output::OutputSink::Channel(tx.clone());
+
+        // Submit the command and capture the command_id for workflow polling.
+        let client = match crate::commands::remote::make_client() {
+            Ok(c) => c,
+            Err(e) => {
+                sink.println(format!("Failed to build HTTP client: {}", e));
+                let _ = exit_tx.send(1);
+                return;
+            }
+        };
+
+        let subcommand = &parts[0];
+        let args: Vec<&str> = parts[1..].iter().map(|s| s.as_str()).collect();
+        let body = serde_json::json!({
+            "subcommand": subcommand,
+            "args": args,
+        });
+
+        let mut req = client.post(format!("{}/v1/commands", remote_addr))
+            .header("x-amux-session", &session_id)
+            .header("content-type", "application/json")
+            .json(&body);
+        if let Some(ref key) = api_key {
+            req = req.header("authorization", format!("Bearer {}", key));
+        }
+
+        let response = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                sink.println(format!("Failed to submit command: {}", e));
+                let _ = exit_tx.send(1);
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            let msg = if status == reqwest::StatusCode::UNAUTHORIZED {
+                "Authentication failed (401). Check remote.defaultAPIKey in config \
+                 or pass --api-key.".to_string()
+            } else if status == reqwest::StatusCode::NOT_FOUND {
+                format!(
+                    "Session '{}' not found on remote host. The session may have \
+                     been killed — use `remote session start` to create a new one.",
+                    session_id
+                )
+            } else if status == reqwest::StatusCode::FORBIDDEN {
+                format!(
+                    "Session '{}' is busy: another command is already running. \
+                     Wait for it to finish before submitting a new command.",
+                    session_id
+                )
+            } else {
+                format!("Remote error {}: {}", status, text)
+            };
+            sink.println(msg);
+            let _ = exit_tx.send(1);
+            return;
+        }
+
+        let resp_json: serde_json::Value = match response.json().await {
+            Ok(j) => j,
+            Err(e) => {
+                sink.println(format!("Failed to parse response: {}", e));
+                let _ = exit_tx.send(1);
+                return;
+            }
+        };
+
+        let command_id = match resp_json["command_id"].as_str() {
+            Some(id) => id.to_string(),
+            None => {
+                sink.println("Response missing command_id".to_string());
+                let _ = exit_tx.send(1);
+                return;
+            }
+        };
+
+        sink.println(format!("Command submitted: {}", command_id));
+
+        // Spawn workflow state polling task.
+        //
+        // Two-phase design:
+        //   Phase 1 — initial check after 5 s.  If no workflow exists (404) or
+        //             there is a transient error, give up entirely; non-workflow
+        //             commands (ready, chat, …) never produce a state file.
+        //   Phase 2 — once a workflow is found, poll every 5 s until terminal or
+        //             until the server returns 404 (workflow removed).
+        //
+        // In both phases, `wf_tx.is_closed()` is checked before each HTTP call:
+        // `start_command` drops `remote_workflow_rx`, which closes the receiver
+        // end; subsequent `is_closed()` calls return true, letting the background
+        // task exit promptly when the user dispatches a new command or closes the tab.
+        let wf_addr = remote_addr.clone();
+        let wf_cmd_id = command_id.clone();
+        let wf_api_key = api_key.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            // Phase 1: initial check.
+            if wf_tx.is_closed() {
+                return;
+            }
+            let initial = crate::commands::remote::fetch_workflow_state(
+                &wf_addr, &wf_cmd_id, wf_api_key.as_deref(),
+            ).await;
+            let mut state = match initial {
+                Ok(Some(s)) => s,
+                // 404 means this command never produces a workflow — stop here.
+                // Network/auth errors are also non-recoverable at this point.
+                Ok(None) | Err(_) => return,
+            };
+            // Phase 2: workflow found — forward the initial state and keep polling.
+            // Clone before sending so `state` remains valid on the `Err` continue path.
+            loop {
+                let is_terminal = state.is_terminal();
+                if wf_tx.send(state.clone()).is_err() {
+                    return; // tab closed or new command started
+                }
+                if is_terminal {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if wf_tx.is_closed() {
+                    return;
+                }
+                state = match crate::commands::remote::fetch_workflow_state(
+                    &wf_addr, &wf_cmd_id, wf_api_key.as_deref(),
+                ).await {
+                    Ok(Some(s)) => s,
+                    Ok(None) => return, // workflow was removed — stop polling
+                    Err(_) => continue, // transient error — retry after next interval
+                };
+            }
+        });
+
+        // Stream logs.
+        sink.println("Streaming logs...".to_string());
+        let _ = crate::commands::remote::stream_command_logs(
+            &remote_addr,
+            &command_id,
+            api_key.as_deref(),
+            &sink,
+        ).await;
+
+        let _ = exit_tx.send(0);
+    });
 }
 
 /// Parse flags from the command parts, returning (refresh, build, no_cache, non_interactive, allow_docker).
@@ -1076,6 +1333,22 @@ async fn execute_command(app: &mut App, cmd: &str) {
     let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
     if parts.is_empty() {
         return;
+    }
+
+    // If the active tab is bound to a remote session, forward most commands
+    // to the remote host instead of executing locally.
+    // Exception: `config show` / bare `config` opens the local TUI config
+    // dialog regardless of binding — this is a TUI-local operation that
+    // configures the local amux installation, not the remote server.
+    if app.active_tab().remote_binding.is_some() {
+        let is_local_config_show = parts[0] == "config"
+            && matches!(parts.get(1), None | Some(&"show"));
+        if !is_local_config_show {
+            let tab_idx = app.active_tab_idx;
+            launch_remote_bound_command(app, tab_idx, cmd).await;
+            return;
+        }
+        // Fall through to the local `config` match arm below.
     }
 
     match parts[0] {
@@ -7476,6 +7749,111 @@ mod tests {
         assert!(
             qa.ask_run_audit().unwrap(),
             "run_audit answer is stored in pre-collected field, not a deferred pending flag"
+        );
+    }
+
+    // ─── execute_command routing tests (work item 0061) ──────────────────────
+
+    /// Helper: create an App whose active tab is permanently bound to a remote
+    /// session so we can test that execute_command routes to the remote path.
+    fn app_with_remote_binding() -> App {
+        let mut app = App::new(std::path::PathBuf::from("/tmp"));
+        app.active_tab_mut().remote_binding = Some(crate::tui::state::RemoteTabBinding {
+            remote_addr: "http://127.0.0.1:1".to_string(), // port 1 — won't connect
+            session_id: "test-session-0061".to_string(),
+            api_key: None,
+            display_host: "127.0.0.1:1".to_string(),
+        });
+        app
+    }
+
+    /// When the active tab has a remote binding, `execute_command` must route
+    /// to `launch_remote_bound_command` instead of local dispatch.
+    ///
+    /// Observable effect: the tab phase transitions to `Running` (set by
+    /// `start_command` inside `launch_remote_bound_command`) and `exit_rx`
+    /// is populated with a receiver channel.  The background network task
+    /// runs asynchronously and is not awaited here.
+    #[tokio::test]
+    async fn execute_command_with_remote_binding_starts_remote_run() {
+        let mut app = app_with_remote_binding();
+        execute_command(&mut app, "implement 0042").await;
+
+        // start_command is called synchronously inside launch_remote_bound_command.
+        assert!(
+            matches!(
+                app.active_tab().phase,
+                state::ExecutionPhase::Running { .. }
+            ),
+            "remote-bound execute_command must set phase to Running; got {:?}",
+            app.active_tab().phase
+        );
+        // A oneshot receiver for the exit code is set up.
+        assert!(
+            app.active_tab().exit_rx.is_some(),
+            "exit_rx must be set after launching a remote command"
+        );
+    }
+
+    /// When the active tab has NO remote binding, `execute_command` dispatches
+    /// locally (sets a `PendingCommand` for dialog-gated commands like `chat`).
+    #[tokio::test]
+    async fn execute_command_without_remote_binding_uses_local_dispatch() {
+        let mut app = app_no_git();
+        // Confirm no remote binding.
+        assert!(
+            app.active_tab().remote_binding.is_none(),
+            "app_no_git must have no remote binding"
+        );
+
+        execute_command(&mut app, "chat --agent codex").await;
+
+        // Local dispatch sets a PendingCommand rather than a remote Running phase.
+        match &app.active_tab().pending_command {
+            state::PendingCommand::Chat { agent, .. } => {
+                assert_eq!(agent.as_deref(), Some("codex"));
+            }
+            other => panic!(
+                "expected PendingCommand::Chat from local dispatch; got {:?}",
+                other
+            ),
+        }
+        // Phase must NOT be Running (no remote launch happened).
+        assert!(
+            !matches!(
+                app.active_tab().phase,
+                state::ExecutionPhase::Running { .. }
+            ),
+            "local dispatch must not set phase to Running; got {:?}",
+            app.active_tab().phase
+        );
+    }
+
+    /// `config` (bare) and `config show` must open the local TUI config dialog
+    /// even when the active tab has a remote binding, because config is a local
+    /// operation on the installation, not the remote server.
+    #[tokio::test]
+    async fn execute_command_config_show_bypasses_remote_binding() {
+        let mut app = app_with_remote_binding();
+        execute_command(&mut app, "config").await;
+
+        // The local config dialog must be opened.
+        assert!(
+            matches!(
+                app.active_tab().dialog,
+                state::Dialog::ConfigShow(_)
+            ),
+            "bare `config` must open local ConfigShow dialog even with remote binding; got {:?}",
+            app.active_tab().dialog
+        );
+        // Remote launch must NOT have happened.
+        assert!(
+            !matches!(
+                app.active_tab().phase,
+                state::ExecutionPhase::Running { .. }
+            ),
+            "config show must not start a remote command; got {:?}",
+            app.active_tab().phase
         );
     }
 

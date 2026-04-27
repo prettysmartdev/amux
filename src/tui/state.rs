@@ -23,6 +23,44 @@ pub const STUCK_DIALOG_BACKOFF: Duration = Duration::from_secs(60);
 /// In yolo mode, the countdown duration before automatically advancing a stuck workflow step.
 pub const YOLO_COUNTDOWN_DURATION: Duration = Duration::from_secs(60);
 
+/// Permanent binding of a TUI tab to a remote headless session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteTabBinding {
+    /// Full URL of the remote headless host (e.g. "http://1.2.3.4:9876").
+    pub remote_addr: String,
+    /// Session ID on the remote host.
+    pub session_id: String,
+    /// Resolved API key (if any) for authenticating with the remote host.
+    pub api_key: Option<String>,
+    /// Hostname portion extracted from `remote_addr` for display in the tab bar.
+    pub display_host: String,
+}
+
+impl RemoteTabBinding {
+    /// Create a new binding, extracting `display_host` from the URL.
+    pub fn new(remote_addr: String, session_id: String, api_key: Option<String>) -> Self {
+        let display_host = extract_display_host(&remote_addr);
+        Self {
+            remote_addr,
+            session_id,
+            api_key,
+            display_host,
+        }
+    }
+}
+
+/// Extract host:port from a URL for display purposes.
+pub fn extract_display_host(url: &str) -> String {
+    // Strip scheme prefix.
+    let without_scheme = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    // Strip trailing path/slash.
+    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
+    host_port.to_string()
+}
+
 /// Which widget currently receives keyboard input.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Focus {
@@ -71,8 +109,34 @@ pub struct ConfigDialogState {
 pub enum Dialog {
     None,
     QuitConfirm,
-    /// Prompts user for new tab's working directory.
-    NewTabDirectory { input: String },
+    /// Prompts user for new tab's working directory, optionally showing remote sessions.
+    NewTabDirectory {
+        input: String,
+        /// None = not yet fetched or no remote configured; Some(Ok(sessions)) = fetched;
+        /// Some(Err(msg)) = fetch failed.
+        remote_sessions: Option<Result<Vec<crate::commands::remote::RemoteSessionEntry>, String>>,
+        /// Index of the currently selected item in the remote sessions list (or "create new").
+        remote_selected_idx: Option<usize>,
+        /// Whether focus is in the workdir field (true) or the remote sessions list (false).
+        focus_workdir: bool,
+    },
+    /// Create a new remote session: enter directory, optionally pick from saved dirs.
+    NewRemoteSession {
+        /// Remote address we're creating the session on.
+        remote_addr: String,
+        /// API key for the remote host.
+        api_key: Option<String>,
+        /// Text input for the working directory.
+        dir_input: String,
+        /// Saved directories from config.
+        saved_dirs: Vec<String>,
+        /// Currently selected saved dir index (None = text input focused).
+        saved_selected_idx: Option<usize>,
+        /// Whether focus is on the text input (true) or saved dirs list (false).
+        focus_input: bool,
+        /// Error from the last session-creation attempt (shown inline; cleared on next attempt).
+        creation_error: Option<String>,
+    },
     /// Close current tab (when idle + multiple tabs).
     CloseTabConfirm,
     /// Ask whether to mount the Git root or just CWD.
@@ -739,6 +803,18 @@ pub struct TabState {
     /// Session ID of the last successfully started/used remote session on this tab.
     /// Used as the default session when `remote run` is invoked without --session.
     pub last_remote_session_id: Option<String>,
+
+    /// If set, this tab is bound to a remote headless session for its lifetime.
+    /// All commands are sent to this host/session via the headless API.
+    pub remote_binding: Option<RemoteTabBinding>,
+
+    /// Receives the result of a background remote sessions fetch (for the new-tab dialog).
+    pub remote_sessions_fetch_rx: Option<tokio::sync::oneshot::Receiver<Result<Vec<crate::commands::remote::RemoteSessionEntry>, String>>>,
+
+    /// Receives workflow state updates from a remote polling task.
+    pub remote_workflow_rx: Option<UnboundedReceiver<crate::workflow::WorkflowState>>,
+    /// Command ID of the currently running remote command (for workflow polling).
+    pub remote_command_id: Option<String>,
 }
 
 impl TabState {
@@ -819,6 +895,10 @@ impl TabState {
             last_user_activity_time: None,
             yolo_countdown_started_at: None,
             last_remote_session_id: None,
+            remote_binding: None,
+            remote_sessions_fetch_rx: None,
+            remote_workflow_rx: None,
+            remote_command_id: None,
         }
     }
 
@@ -847,6 +927,16 @@ impl TabState {
         self.phase = ExecutionPhase::Running { command };
         self.focus = Focus::ExecutionWindow;
         self.input_error = None;
+        // For remote-bound tabs: clear stale workflow state from the previous
+        // command so the workflow strip does not show out-of-date data while the
+        // new command is starting up (before its first poll returns).
+        // Dropping the receiver also causes any in-flight polling task to exit
+        // cleanly on its next attempted send.
+        if self.remote_binding.is_some() {
+            self.workflow = None;
+            self.remote_workflow_rx = None;
+            self.remote_command_id = None;
+        }
     }
 
     /// Activate the container window for a new PTY container session.
@@ -1276,6 +1366,14 @@ impl TabState {
         if self.is_stuck(is_active) {
             return Color::Yellow;
         }
+        // Remote-bound tabs use purple (Magenta) unless stuck or in error.
+        if self.remote_binding.is_some() {
+            return match &self.phase {
+                ExecutionPhase::Error { .. } => Color::Red,
+                ExecutionPhase::Running { .. } => Color::Magenta,
+                ExecutionPhase::Idle | ExecutionPhase::Done { .. } => Color::Magenta,
+            };
+        }
         match &self.phase {
             ExecutionPhase::Error { .. } => Color::Red,
             ExecutionPhase::Running { command } => {
@@ -1293,6 +1391,15 @@ impl TabState {
 
     /// Project folder name for the tab border title (≤14 chars).
     pub fn tab_project_name(&self) -> String {
+        // Remote-bound tabs show the display_host instead of the local project name.
+        if let Some(ref binding) = self.remote_binding {
+            let host = &binding.display_host;
+            if host.chars().count() > 14 {
+                let t: String = host.chars().take(13).collect();
+                return format!("{}…", t);
+            }
+            return host.clone();
+        }
         let name = self.cwd.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("?")
@@ -1344,7 +1451,13 @@ impl TabState {
             }
         }
         let cmd = match &self.phase {
-            ExecutionPhase::Idle => return String::new(),
+            ExecutionPhase::Idle => {
+                // Remote-bound tabs show "(ready)" when idle.
+                if self.remote_binding.is_some() {
+                    return "(ready)".to_string();
+                }
+                return String::new();
+            }
             ExecutionPhase::Running { command }
             | ExecutionPhase::Done { command }
             | ExecutionPhase::Error { command, .. } => command.as_str(),
@@ -1522,6 +1635,39 @@ impl TabState {
                     let mem = parse_memory_mb(&stats.memory);
                     info.stats_history.push((cpu, mem));
                     info.latest_stats = Some(stats);
+                }
+            }
+        }
+
+        // Check for remote sessions fetch result (new-tab dialog).
+        if let Some(ref mut rx) = self.remote_sessions_fetch_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.remote_sessions_fetch_rx = None;
+                // Update the dialog if it's still the NewTabDirectory dialog.
+                if let Dialog::NewTabDirectory { ref input, .. } = self.dialog {
+                    let input = input.clone();
+                    self.dialog = Dialog::NewTabDirectory {
+                        input,
+                        remote_sessions: Some(result),
+                        remote_selected_idx: Some(0),
+                        focus_workdir: true,
+                    };
+                }
+            }
+        }
+
+        // Drain remote workflow state updates.
+        if let Some(ref mut rx) = self.remote_workflow_rx {
+            let mut latest: Option<WorkflowState> = None;
+            while let Ok(state) = rx.try_recv() {
+                latest = Some(state);
+            }
+            if let Some(state) = latest {
+                let is_terminal = state.is_terminal();
+                self.workflow = Some(state);
+                if is_terminal {
+                    // Stop polling — drop the receiver.
+                    self.remote_workflow_rx = None;
                 }
             }
         }
@@ -3089,6 +3235,288 @@ mod tests {
         assert!(
             result.is_none(),
             "next_step_different_agent must return None when there is no next step"
+        );
+    }
+
+    // ─── RemoteTabBinding and display_host helpers (work item 0061) ──────────
+
+    #[test]
+    fn remote_tab_binding_new_extracts_http_host_port() {
+        let binding = RemoteTabBinding::new(
+            "http://192.168.1.100:9876".to_string(),
+            "sess-abc".to_string(),
+            None,
+        );
+        assert_eq!(
+            binding.display_host, "192.168.1.100:9876",
+            "display_host must be host:port without scheme"
+        );
+    }
+
+    #[test]
+    fn remote_tab_binding_new_extracts_https_host_port() {
+        let binding = RemoteTabBinding::new(
+            "https://amux.example.com:443".to_string(),
+            "sess-xyz".to_string(),
+            Some("key123".to_string()),
+        );
+        assert_eq!(binding.display_host, "amux.example.com:443");
+    }
+
+    #[test]
+    fn remote_tab_binding_new_stores_all_fields() {
+        let binding = RemoteTabBinding::new(
+            "http://10.0.0.1:8080".to_string(),
+            "my-session".to_string(),
+            Some("api-key-value".to_string()),
+        );
+        assert_eq!(binding.remote_addr, "http://10.0.0.1:8080");
+        assert_eq!(binding.session_id, "my-session");
+        assert_eq!(binding.api_key.as_deref(), Some("api-key-value"));
+        assert_eq!(binding.display_host, "10.0.0.1:8080");
+    }
+
+    #[test]
+    fn extract_display_host_strips_http_scheme() {
+        assert_eq!(extract_display_host("http://host.example:9000"), "host.example:9000");
+    }
+
+    #[test]
+    fn extract_display_host_strips_https_scheme() {
+        assert_eq!(extract_display_host("https://secure.example:443"), "secure.example:443");
+    }
+
+    #[test]
+    fn extract_display_host_strips_trailing_path() {
+        assert_eq!(extract_display_host("http://host:9876/some/path"), "host:9876");
+    }
+
+    #[test]
+    fn extract_display_host_no_scheme_returns_host_port_as_is() {
+        assert_eq!(extract_display_host("host:9876"), "host:9876");
+    }
+
+    // ─── tab_color and tab_project_name for remote-bound tabs ────────────────
+
+    #[test]
+    fn tab_color_is_magenta_for_remote_bound_idle_tab() {
+        let mut tab = new_tab();
+        tab.remote_binding = Some(RemoteTabBinding {
+            remote_addr: "http://1.2.3.4:9876".to_string(),
+            session_id: "s1".to_string(),
+            api_key: None,
+            display_host: "1.2.3.4:9876".to_string(),
+        });
+        tab.phase = ExecutionPhase::Idle;
+        assert_eq!(
+            tab.tab_color(true),
+            Color::Magenta,
+            "remote-bound tab must be Magenta (active, idle)"
+        );
+        assert_eq!(
+            tab.tab_color(false),
+            Color::Magenta,
+            "remote-bound tab must be Magenta (inactive, idle)"
+        );
+    }
+
+    #[test]
+    fn tab_color_is_magenta_for_remote_bound_running_tab() {
+        let mut tab = new_tab();
+        tab.remote_binding = Some(RemoteTabBinding {
+            remote_addr: "http://1.2.3.4:9876".to_string(),
+            session_id: "s1".to_string(),
+            api_key: None,
+            display_host: "1.2.3.4:9876".to_string(),
+        });
+        tab.phase = ExecutionPhase::Running { command: "implement 0001".to_string() };
+        assert_eq!(
+            tab.tab_color(true),
+            Color::Magenta,
+            "remote-bound tab must remain Magenta when running"
+        );
+    }
+
+    #[test]
+    fn tab_project_name_returns_display_host_for_remote_bound_tab() {
+        let mut tab = new_tab();
+        tab.remote_binding = Some(RemoteTabBinding {
+            remote_addr: "http://10.0.0.5:8080".to_string(),
+            session_id: "s2".to_string(),
+            api_key: None,
+            display_host: "10.0.0.5:8080".to_string(),
+        });
+        assert_eq!(
+            tab.tab_project_name(),
+            "10.0.0.5:8080",
+            "tab project name must show display_host for remote-bound tabs"
+        );
+    }
+
+    #[test]
+    fn tab_project_name_truncates_long_remote_display_host() {
+        let mut tab = new_tab();
+        // display_host longer than 14 chars must be truncated with ellipsis.
+        tab.remote_binding = Some(RemoteTabBinding {
+            remote_addr: "http://very-long-hostname.example.com:9876".to_string(),
+            session_id: "s3".to_string(),
+            api_key: None,
+            display_host: "very-long-hostname.example.com:9876".to_string(),
+        });
+        let name = tab.tab_project_name();
+        assert!(
+            name.chars().count() <= 14,
+            "tab project name must be truncated to 14 chars; got: '{name}' ({} chars)",
+            name.chars().count()
+        );
+        assert!(name.ends_with('…'), "truncated name must end with ellipsis; got: '{name}'");
+    }
+
+    // ─── tick() drains remote_sessions_fetch_rx and remote_workflow_rx ────────
+
+    #[tokio::test]
+    async fn tick_updates_dialog_with_fetched_remote_sessions_ok() {
+        let mut tab = new_tab();
+        tab.dialog = Dialog::NewTabDirectory {
+            input: String::new(),
+            remote_sessions: None,
+            remote_selected_idx: None,
+            focus_workdir: true,
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<
+            Result<Vec<crate::commands::remote::RemoteSessionEntry>, String>,
+        >();
+        tab.remote_sessions_fetch_rx = Some(rx);
+
+        let sessions = vec![crate::commands::remote::RemoteSessionEntry {
+            id: "abc12345".to_string(),
+            workdir: "/workspace/myproj".to_string(),
+        }];
+        tx.send(Ok(sessions)).unwrap();
+
+        tab.tick();
+
+        match &tab.dialog {
+            Dialog::NewTabDirectory { remote_sessions: Some(Ok(got)), .. } => {
+                assert_eq!(got.len(), 1, "must have one session");
+                assert_eq!(got[0].id, "abc12345");
+                assert_eq!(got[0].workdir, "/workspace/myproj");
+            }
+            other => panic!(
+                "expected NewTabDirectory with Ok sessions after tick; got: {:?}",
+                other
+            ),
+        }
+        assert!(
+            tab.remote_sessions_fetch_rx.is_none(),
+            "receiver must be cleared after receiving the result"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_updates_dialog_with_fetched_remote_sessions_err() {
+        let mut tab = new_tab();
+        tab.dialog = Dialog::NewTabDirectory {
+            input: String::new(),
+            remote_sessions: None,
+            remote_selected_idx: None,
+            focus_workdir: true,
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<
+            Result<Vec<crate::commands::remote::RemoteSessionEntry>, String>,
+        >();
+        tab.remote_sessions_fetch_rx = Some(rx);
+        tx.send(Err("connection refused".to_string())).unwrap();
+
+        tab.tick();
+
+        match &tab.dialog {
+            Dialog::NewTabDirectory { remote_sessions: Some(Err(msg)), .. } => {
+                assert_eq!(
+                    msg, "connection refused",
+                    "error message must match"
+                );
+            }
+            other => panic!(
+                "expected NewTabDirectory with Err after tick; got: {:?}",
+                other
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_updates_workflow_from_remote_workflow_channel() {
+        let mut tab = new_tab();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<WorkflowState>();
+        tab.remote_workflow_rx = Some(rx);
+
+        let wf = WorkflowState::new(
+            None,
+            vec![crate::workflow::parser::WorkflowStep {
+                name: "poll-step".to_string(),
+                depends_on: vec![],
+                prompt_template: "check".to_string(),
+                agent: None,
+                model: None,
+            }],
+            "pollhash42".to_string(),
+            None,
+            "poll-wf".to_string(),
+        );
+        tx.send(wf.clone()).unwrap();
+
+        tab.tick();
+
+        assert!(
+            tab.workflow.is_some(),
+            "workflow must be set after receiving from remote_workflow_rx"
+        );
+        assert_eq!(
+            tab.workflow.as_ref().unwrap().workflow_name,
+            "poll-wf",
+            "workflow_name must match the sent state"
+        );
+        assert!(
+            tab.remote_workflow_rx.is_some(),
+            "receiver must NOT be dropped while workflow is non-terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_drops_remote_workflow_rx_when_state_is_terminal() {
+        let mut tab = new_tab();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<WorkflowState>();
+        tab.remote_workflow_rx = Some(rx);
+
+        // Build a terminal workflow state (all steps Done).
+        let mut wf = WorkflowState::new(
+            None,
+            vec![crate::workflow::parser::WorkflowStep {
+                name: "terminal-step".to_string(),
+                depends_on: vec![],
+                prompt_template: "finish".to_string(),
+                agent: None,
+                model: None,
+            }],
+            "termhash".to_string(),
+            None,
+            "term-wf".to_string(),
+        );
+        wf.set_status("terminal-step", StepStatus::Done);
+        assert!(wf.is_terminal(), "workflow must be terminal for this test");
+
+        tx.send(wf).unwrap();
+        tab.tick();
+
+        assert!(
+            tab.remote_workflow_rx.is_none(),
+            "receiver must be dropped when workflow reaches a terminal state"
+        );
+        assert!(
+            tab.workflow.is_some(),
+            "workflow field must still hold the terminal state"
         );
     }
 }

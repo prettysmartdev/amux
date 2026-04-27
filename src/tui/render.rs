@@ -855,13 +855,76 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
             " Ctrl+C pressed ",
             " Press ctrl-c again to quit amux, ctrl-t to close the current tab, or esc to cancel  ".to_string(),
         ),
-        Dialog::NewTabDirectory { input } => (
-            " New Tab — Working Directory ",
-            format!(
-                "  Enter working directory for new tab:\n\n  > {}\n\n  [Enter to confirm, Esc to cancel]  ",
-                input
-            ),
-        ),
+        Dialog::NewTabDirectory { input, remote_sessions, remote_selected_idx, focus_workdir } => {
+            let mut body = format!(
+                "  Working directory:\n  > {}{}\n",
+                input,
+                if *focus_workdir { "█" } else { "" },
+            );
+
+            // Render remote sessions section if remote is configured.
+            if let Some(result) = remote_sessions {
+                let host_label = crate::config::effective_remote_default_addr()
+                    .map(|a| crate::tui::state::extract_display_host(&a))
+                    .unwrap_or_else(|| "remote".to_string());
+                body.push_str(&format!("\n  ─── Remote sessions ({}) ─────────────\n", host_label));
+
+                match result {
+                    Ok(sessions) => {
+                        for (i, s) in sessions.iter().enumerate() {
+                            let prefix = if !focus_workdir && *remote_selected_idx == Some(i) {
+                                "  > "
+                            } else {
+                                "    "
+                            };
+                            let short_id = if s.id.len() > 8 { &s.id[..8] } else { &s.id };
+                            body.push_str(&format!("{}{}  {}\n", prefix, short_id, s.workdir));
+                        }
+                        let create_idx = sessions.len();
+                        let prefix = if !focus_workdir && *remote_selected_idx == Some(create_idx) {
+                            "  > "
+                        } else {
+                            "    "
+                        };
+                        body.push_str(&format!("{}+ Create new remote session\n", prefix));
+                    }
+                    Err(e) => {
+                        body.push_str(&format!("    ⚠ Could not reach remote: {}\n", e));
+                    }
+                }
+            } else {
+                // Still loading.
+                if crate::config::effective_remote_default_addr().is_some() {
+                    body.push_str("\n    Loading remote sessions…\n");
+                }
+            }
+
+            body.push_str("\n  [Enter] confirm  [Esc] cancel  [↓] remote list  ");
+            (" New Tab ", body)
+        },
+        Dialog::NewRemoteSession { dir_input, saved_dirs, saved_selected_idx, focus_input, creation_error, .. } => {
+            let mut body = format!(
+                "  Remote working directory:\n  > {}{}\n",
+                dir_input,
+                if *focus_input { "█" } else { "" },
+            );
+            if !saved_dirs.is_empty() {
+                body.push_str("\n  Saved directories:\n");
+                for (i, d) in saved_dirs.iter().enumerate() {
+                    let prefix = if !focus_input && *saved_selected_idx == Some(i) {
+                        "  > "
+                    } else {
+                        "    "
+                    };
+                    body.push_str(&format!("{}{}\n", prefix, d));
+                }
+            }
+            if let Some(err) = creation_error {
+                body.push_str(&format!("\n  ⚠ {}\n", err));
+            }
+            body.push_str("\n  [Enter] confirm  [Esc] back  [↑↓] navigate  ");
+            (" New Remote Session ", body)
+        },
         Dialog::QuitConfirm => (
             " Ctrl+C pressed ",
             " Press ctrl-c again to quit amux, or esc to cancel  ".to_string(),
@@ -3306,6 +3369,272 @@ mod tests {
         assert!(
             row.contains(id),
             "id should not be truncated when max_id_chars <= 3; got: {row}"
+        );
+    }
+
+    // ─── Remote-bound tab and new-tab dialog render tests (work item 0061) ────
+
+    /// Serialise env-var mutations: env is process-global state, so tests that
+    /// mutate `AMUX_REMOTE_ADDR` must hold this lock for the duration.
+    static REMOTE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Collect the full text content of a rendered frame into a single `String`.
+    fn full_buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        let area = buf.area;
+        let mut text = String::new();
+        for row in area.y..(area.y + area.height) {
+            for col in area.x..(area.x + area.width) {
+                text.push_str(buf[(col, row)].symbol());
+            }
+        }
+        text
+    }
+
+    /// New-tab dialog renders the remote session list when `remote_sessions =
+    /// Some(Ok([...]))`.  The display should include a short ID prefix and the
+    /// workdir, plus the "Create new remote session" sentinel at the end.
+    #[test]
+    fn new_tab_dialog_renders_session_list_when_sessions_available() {
+        let mut app = new_app();
+        app.active_tab_mut().dialog = Dialog::NewTabDirectory {
+            input: String::new(),
+            remote_sessions: Some(Ok(vec![
+                crate::commands::remote::RemoteSessionEntry {
+                    id: "abc12345-xxxx".to_string(),
+                    workdir: "/workspace/myproject".to_string(),
+                },
+            ])),
+            remote_selected_idx: Some(0),
+            focus_workdir: false,
+        };
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let text = full_buffer_text(terminal.backend().buffer());
+
+        // The first 8 chars of the session ID must appear.
+        assert!(
+            text.contains("abc12345"),
+            "dialog must render the session ID (first 8 chars); buffer:\n{text}"
+        );
+        // The workdir must appear.
+        assert!(
+            text.contains("/workspace/myproject"),
+            "dialog must render the session workdir; buffer:\n{text}"
+        );
+    }
+
+    /// New-tab dialog renders the "Create new remote session" sentinel as the
+    /// last item after the session list.
+    #[test]
+    fn new_tab_dialog_renders_create_new_session_button() {
+        let mut app = new_app();
+        app.active_tab_mut().dialog = Dialog::NewTabDirectory {
+            input: String::new(),
+            remote_sessions: Some(Ok(vec![
+                crate::commands::remote::RemoteSessionEntry {
+                    id: "sess-0001-aaaa".to_string(),
+                    workdir: "/tmp/p".to_string(),
+                },
+            ])),
+            remote_selected_idx: Some(0),
+            focus_workdir: false,
+        };
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let text = full_buffer_text(terminal.backend().buffer());
+
+        assert!(
+            text.contains("Create new remote session"),
+            "dialog must render '+ Create new remote session' as the last list item; \
+             buffer:\n{text}"
+        );
+    }
+
+    /// New-tab dialog renders the ⚠ warning when `remote_sessions = Some(Err(...))`.
+    #[test]
+    fn new_tab_dialog_renders_error_when_sessions_fetch_failed() {
+        let mut app = new_app();
+        app.active_tab_mut().dialog = Dialog::NewTabDirectory {
+            input: String::new(),
+            remote_sessions: Some(Err("connection refused".to_string())),
+            remote_selected_idx: None,
+            focus_workdir: true,
+        };
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let text = full_buffer_text(terminal.backend().buffer());
+
+        assert!(
+            text.contains("Could not reach remote"),
+            "dialog must render 'Could not reach remote' warning on error; buffer:\n{text}"
+        );
+        assert!(
+            text.contains("connection refused"),
+            "dialog must render the specific error message; buffer:\n{text}"
+        );
+    }
+
+    /// The tab bar renders the remote session's `display_host` as the tab title
+    /// for a remote-bound tab (instead of the local working directory name).
+    /// The display_host is kept short (≤14 chars) so it is not truncated.
+    #[test]
+    fn tab_bar_renders_display_host_as_title_for_remote_bound_tab() {
+        let mut app = new_app();
+        // "10.0.1.5:9000" is 13 chars — under the 14-char truncation limit.
+        app.active_tab_mut().remote_binding = Some(crate::tui::state::RemoteTabBinding {
+            remote_addr: "http://10.0.1.5:9000".to_string(),
+            session_id: "remote-sess".to_string(),
+            api_key: None,
+            display_host: "10.0.1.5:9000".to_string(),
+        });
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let text = full_buffer_text(terminal.backend().buffer());
+
+        assert!(
+            text.contains("10.0.1.5:9000"),
+            "tab bar must display the remote host:port for a remote-bound tab; buffer:\n{text}"
+        );
+    }
+
+    /// The tab bar uses `Color::Magenta` for the border of a remote-bound tab.
+    ///
+    /// We verify this by inspecting the foreground color of the tab border cells
+    /// in the rendered buffer (top-left corner of the first tab, row 0).
+    #[test]
+    fn tab_bar_border_is_magenta_for_remote_bound_tab() {
+        let mut app = new_app();
+        app.active_tab_mut().remote_binding = Some(crate::tui::state::RemoteTabBinding {
+            remote_addr: "http://10.0.0.1:9000".to_string(),
+            session_id: "rsess".to_string(),
+            api_key: None,
+            display_host: "10.0.0.1:9000".to_string(),
+        });
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let buf = terminal.backend().buffer();
+
+        // The first tab occupies columns 0-19, rows 0-2.
+        // The top-left border character is at (0, 0).
+        let border_fg = buf[(0u16, 0u16)].style().fg;
+        assert_eq!(
+            border_fg,
+            Some(ratatui::style::Color::Magenta),
+            "tab bar border must be Magenta for a remote-bound tab; got fg: {:?}",
+            border_fg
+        );
+    }
+
+    /// New-tab dialog renders "Loading remote sessions…" when `remote_sessions = None`
+    /// and `remote.defaultAddr` is configured.  The loading placeholder must appear
+    /// while the async session fetch is in-flight.
+    #[test]
+    fn new_tab_dialog_renders_loading_when_remote_sessions_is_none() {
+        let _guard = REMOTE_ENV_LOCK.lock().unwrap();
+
+        // Write a temporary global config with remote.defaultAddr set so
+        // `effective_remote_default_addr()` returns Some(...) during the render.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = serde_json::json!({"remote": {"defaultAddr": "http://10.0.0.1:9876"}});
+        std::fs::write(tmp.path().join("config.json"), cfg.to_string()).unwrap();
+        // SAFETY: test-only; serialised by REMOTE_ENV_LOCK.
+        unsafe { std::env::set_var("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap()) };
+
+        let mut app = new_app();
+        app.active_tab_mut().dialog = Dialog::NewTabDirectory {
+            input: String::new(),
+            remote_sessions: None,
+            remote_selected_idx: None,
+            focus_workdir: true,
+        };
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        unsafe { std::env::remove_var("AMUX_CONFIG_HOME") };
+
+        let text = full_buffer_text(terminal.backend().buffer());
+        assert!(
+            text.contains("Loading remote sessions"),
+            "dialog must render loading placeholder when remote_sessions is None \
+             and remote.defaultAddr is configured; buffer:\n{text}"
+        );
+    }
+
+    /// Workflow state strip renders correctly for a remote-sourced `WorkflowState`
+    /// on a remote-bound tab.  Remote tabs populate `tab.workflow` via the polling
+    /// channel; the renderer must use the same strip path as local workflows.
+    #[test]
+    fn workflow_strip_renders_for_remote_bound_tab() {
+        use crate::workflow::{WorkflowState, WorkflowStepState, StepStatus};
+
+        let mut app = new_app();
+
+        // Attach a remote binding.
+        app.active_tab_mut().remote_binding = Some(crate::tui::state::RemoteTabBinding {
+            remote_addr: "http://10.0.0.2:9876".to_string(),
+            session_id: "remote-sess-wf".to_string(),
+            api_key: None,
+            display_host: "10.0.0.2:9876".to_string(),
+        });
+
+        // Build a running workflow state (same structure as local workflows).
+        let steps = vec![
+            WorkflowStepState {
+                name: "plan".to_string(),
+                depends_on: vec![],
+                prompt_template: "Plan the work.".to_string(),
+                status: StepStatus::Done,
+                container_id: None,
+                agent: None,
+                model: None,
+            },
+            WorkflowStepState {
+                name: "implement".to_string(),
+                depends_on: vec!["plan".to_string()],
+                prompt_template: "Implement it.".to_string(),
+                status: StepStatus::Running,
+                container_id: None,
+                agent: None,
+                model: None,
+            },
+        ];
+        let wf = WorkflowState {
+            title: Some("Remote Workflow".to_string()),
+            steps,
+            workflow_hash: "abc123".to_string(),
+            work_item: Some(61),
+            workflow_name: "remote-wf".to_string(),
+        };
+        app.active_tab_mut().workflow = Some(wf);
+        // Remote tabs don't set workflow_current_step (they use the polled state directly).
+        // The strip renders based on WorkflowState alone.
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let text = full_buffer_text(terminal.backend().buffer());
+        assert!(
+            text.contains("plan") || text.contains("impl"),
+            "workflow strip must render step names for a remote-bound tab; buffer:\n{}",
+            &text[..text.len().min(400)]
         );
     }
 }

@@ -115,6 +115,19 @@ async fn auth_middleware(
 }
 
 /// Build the axum router with all headless API routes.
+///
+/// Routes:
+///   GET    /v1/status                    — server status
+///   GET    /v1/workdirs                  — allowed working directories
+///   GET    /v1/sessions                  — list sessions (optional ?status= filter)
+///   POST   /v1/sessions                  — create a new session
+///   GET    /v1/sessions/:id              — get session details
+///   DELETE /v1/sessions/:id              — close (kill) a session
+///   POST   /v1/commands                  — submit a command (requires x-amux-session header)
+///   GET    /v1/commands/:id              — get command status
+///   GET    /v1/commands/:id/logs         — get command output log
+///   GET    /v1/commands/:id/logs/stream  — SSE stream of command output
+///   GET    /v1/workflows/:command_id     — get workflow state for a command
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/status", get(handle_status))
@@ -125,6 +138,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/commands/:id", get(handle_get_command))
         .route("/v1/commands/:id/logs", get(handle_get_command_logs))
         .route("/v1/commands/:id/logs/stream", get(handle_stream_command_logs))
+        .route("/v1/workflows/:command_id", get(handle_get_workflow))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -778,7 +792,34 @@ async fn execute_command(
 
     match result {
         Ok(mut child) => {
+            // Spawn a background task that polls for workflow state files in the
+            // workdir and copies them atomically to the command's workflow.state.json.
+            // This runs concurrently with the child process.
+            let (wf_cancel_tx, wf_cancel_rx) = tokio::sync::watch::channel(false);
+            let can_have_workflow = matches!(
+                subcommand.as_str(),
+                "implement" | "exec"
+            );
+            if can_have_workflow {
+                if let Some(cmd_dir) = log_path.parent().map(|p| p.to_path_buf()) {
+                    let workdir_path = std::path::PathBuf::from(&workdir);
+                    tokio::spawn(async move {
+                        poll_workflow_state(workdir_path, cmd_dir, wf_cancel_rx).await;
+                    });
+                }
+            }
+
             let exit_status = child.wait().await;
+            // Stop polling for workflow state now that the command has finished.
+            let _ = wf_cancel_tx.send(true);
+            // Do one final copy of the workflow state after the process exits,
+            // since the last write may have occurred between poll intervals.
+            if can_have_workflow {
+                if let Some(cmd_dir) = log_path.parent().map(|p| p.to_path_buf()) {
+                    let workdir_path = std::path::PathBuf::from(&workdir);
+                    let _ = copy_latest_workflow_state(&workdir_path, &cmd_dir).await;
+                }
+            }
             let finished_at = chrono::Utc::now().to_rfc3339();
 
             let (status, exit_code) = match exit_status {
@@ -1224,6 +1265,148 @@ pub async fn start_server(
 
     tracing::info!("Headless server stopped");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Workflow state file polling helpers
+// ---------------------------------------------------------------------------
+
+/// Find the most recently modified `.json` workflow state file in the workdir's
+/// `.amux/workflows/` directory. Returns `None` if the directory doesn't exist
+/// or contains no JSON files.
+async fn find_latest_workflow_state(workdir: &std::path::Path) -> Option<PathBuf> {
+    let wf_dir = workdir.join(".amux/workflows");
+    let mut read_dir = match tokio::fs::read_dir(&wf_dir).await {
+        Ok(rd) => rd,
+        Err(_) => return None,
+    };
+
+    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            if let Ok(meta) = tokio::fs::metadata(&path).await {
+                if let Ok(modified) = meta.modified() {
+                    if best.as_ref().map_or(true, |(_, t)| modified > *t) {
+                        best = Some((path, modified));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(p, _)| p)
+}
+
+/// Copy the latest workflow state file from the workdir to the command directory,
+/// writing atomically (temp file + rename).
+async fn copy_latest_workflow_state(
+    workdir: &std::path::Path,
+    cmd_dir: &std::path::Path,
+) -> Option<()> {
+    let src = find_latest_workflow_state(workdir).await?;
+    let content = tokio::fs::read(&src).await.ok()?;
+    let dest = cmd_dir.join("workflow.state.json");
+    let tmp = cmd_dir.join("workflow.state.json.tmp");
+    tokio::fs::write(&tmp, &content).await.ok()?;
+    tokio::fs::rename(&tmp, &dest).await.ok()?;
+    Some(())
+}
+
+/// Background task: poll the workdir for workflow state files and copy them
+/// to the command directory. Runs until the cancel signal is received.
+async fn poll_workflow_state(
+    workdir: PathBuf,
+    cmd_dir: PathBuf,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+) {
+    // Wait 2 seconds before the first poll to give the subprocess time to start.
+    tokio::select! {
+        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+        _ = cancel.changed() => return,
+    }
+    loop {
+        let _ = copy_latest_workflow_state(&workdir, &cmd_dir).await;
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {}
+            _ = cancel.changed() => return,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Workflow state API handler
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/workflows/:command_id` — return the workflow state for a command.
+async fn handle_get_workflow(
+    State(state): State<Arc<AppState>>,
+    AxumPath(command_id): AxumPath<String>,
+) -> Response {
+    // Look up the command to get its session_id.
+    let session_id = {
+        let db = state.db.lock().await;
+        match db::get_command(&db, &command_id) {
+            Ok(Some(c)) => c.session_id,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    error_json("command not found"),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to get command for workflow lookup");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_json("Failed to get command"),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    // Resolve the workflow state file path.
+    let wf_path = state
+        .headless_root
+        .join("sessions")
+        .join(&session_id)
+        .join("commands")
+        .join(&command_id)
+        .join("workflow.state.json");
+
+    match tokio::fs::read_to_string(&wf_path).await {
+        Ok(content) => {
+            match serde_json::from_str::<crate::workflow::WorkflowState>(&content) {
+                Ok(wf_state) => {
+                    // Return the full WorkflowState as JSON.
+                    Json(serde_json::to_value(&wf_state).unwrap_or_default()).into_response()
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, path = %wf_path.display(), "Failed to parse workflow state");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        error_json("Failed to parse workflow state"),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            (
+                StatusCode::NOT_FOUND,
+                error_json("no workflow for this command"),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, path = %wf_path.display(), "Failed to read workflow state");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_json("Failed to read workflow state"),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[cfg(test)]

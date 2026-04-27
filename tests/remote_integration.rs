@@ -12,8 +12,8 @@ use amux::commands::headless::db;
 use amux::commands::headless::server::{AppState, AuthMode, build_router};
 use amux::commands::output::OutputSink;
 use amux::commands::remote::{
-    fetch_sessions, run_remote_run, run_remote_session_kill, run_remote_session_start,
-    stream_command_logs,
+    fetch_sessions, fetch_workflow_state, run_remote_run, run_remote_session_kill,
+    run_remote_session_start, stream_command_logs,
 };
 use amux::runtime::{AgentRuntime, ContainerStats, HostSettings, StoppedContainerInfo};
 use tempfile::TempDir;
@@ -577,4 +577,86 @@ async fn fetch_sessions_excludes_killed_sessions_when_filtering_active() {
         !sessions.iter().any(|s| s.id == session_id),
         "killed session must NOT appear when fetching active sessions; got: {sessions:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// fetch_workflow_state integration tests (work item 0061)
+// ---------------------------------------------------------------------------
+
+/// `fetch_workflow_state` returns `Ok(None)` when the command exists in the DB
+/// but no workflow state file has been written (non-workflow command).
+#[tokio::test]
+async fn fetch_workflow_state_returns_none_for_command_without_workflow() {
+    let (root, base) = start_test_server(vec![]).await;
+
+    // Seed a session + command without writing a workflow.state.json.
+    let conn = amux::commands::headless::db::open_db(root.path()).unwrap();
+    amux::commands::headless::db::insert_session(
+        &conn, "sess-ri-no-wf", "/tmp/proj", "2024-01-01T00:00:00Z",
+    ).unwrap();
+    amux::commands::headless::db::insert_command(
+        &conn, "cmd-ri-no-wf", "sess-ri-no-wf", "exec", "[]", "/dev/null",
+    ).unwrap();
+    drop(conn);
+
+    let result = fetch_workflow_state(&base, "cmd-ri-no-wf", None).await;
+    assert!(result.is_ok(), "should not error on 404; got: {:?}", result);
+    assert!(
+        result.unwrap().is_none(),
+        "must return None when workflow.state.json is absent"
+    );
+}
+
+/// `fetch_workflow_state` returns `Ok(Some(state))` and the state matches
+/// the file written to disk when the workflow state file exists.
+#[tokio::test]
+async fn fetch_workflow_state_returns_some_when_state_file_exists() {
+    let (root, base) = start_test_server(vec![]).await;
+
+    let session_id = "sess-ri-with-wf";
+    let command_id = "cmd-ri-with-wf";
+
+    // Seed DB.
+    let conn = amux::commands::headless::db::open_db(root.path()).unwrap();
+    amux::commands::headless::db::insert_session(
+        &conn, session_id, "/tmp/proj", "2024-01-01T00:00:00Z",
+    ).unwrap();
+    amux::commands::headless::db::insert_command(
+        &conn, command_id, session_id, "exec", "[]", "/dev/null",
+    ).unwrap();
+    drop(conn);
+
+    // Write a known workflow state to the server's expected path.
+    let wf = amux::workflow::WorkflowState::new(
+        Some("Remote Integration WF".to_string()),
+        vec![amux::workflow::parser::WorkflowStep {
+            name: "verify-step".to_string(),
+            depends_on: vec![],
+            prompt_template: "check something".to_string(),
+            agent: None,
+            model: None,
+        }],
+        "cafebabe0000".to_string(),
+        None,
+        "remote-wf".to_string(),
+    );
+
+    let wf_path = root.path()
+        .join("sessions")
+        .join(session_id)
+        .join("commands")
+        .join(command_id)
+        .join("workflow.state.json");
+    std::fs::create_dir_all(wf_path.parent().unwrap()).unwrap();
+    std::fs::write(&wf_path, serde_json::to_string(&wf).unwrap()).unwrap();
+
+    let result = fetch_workflow_state(&base, command_id, None).await;
+    assert!(result.is_ok(), "should succeed; got: {:?}", result);
+
+    let got = result.unwrap().expect("must be Some when file exists");
+    assert_eq!(got.workflow_name, "remote-wf", "workflow_name must match");
+    assert_eq!(got.workflow_hash, "cafebabe0000", "workflow_hash must match");
+    assert_eq!(got.title.as_deref(), Some("Remote Integration WF"), "title must match");
+    assert_eq!(got.steps.len(), 1, "step count must match");
+    assert_eq!(got.steps[0].name, "verify-step", "step name must match");
 }

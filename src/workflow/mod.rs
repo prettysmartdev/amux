@@ -166,6 +166,15 @@ impl WorkflowState {
             .collect()
     }
 
+    /// Returns `true` when the workflow is in a terminal state: all steps are `Done`,
+    /// or any step is `Error`.
+    pub fn is_terminal(&self) -> bool {
+        if self.all_done() {
+            return true;
+        }
+        self.steps.iter().any(|s| matches!(s.status, StepStatus::Error(_)))
+    }
+
     /// Returns step names that are in a "parallel group" for a given step:
     /// all steps that share exactly the same set of depends_on values.
     /// Returns them in file order.
