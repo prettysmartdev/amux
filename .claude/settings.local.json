@@ -109,7 +109,10 @@
       "Read(//usr/local/cargo/**)",
       "Read(//home/**)",
       "Bash(echo \"exit: $?\")",
-      "Bash(ls docs/blog/*.md)"
+      "Bash(ls docs/blog/*.md)",
+      "WebFetch(domain:cli.github.com)",
+      "WebFetch(domain:docs.github.com)",
+      "WebFetch(domain:gh.io)"
     ]
   }
 }
