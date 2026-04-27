@@ -1143,7 +1143,13 @@ async fn launch_remote_bound_command(app: &mut App, tab_idx: usize, raw_command:
         None => return,
     };
 
-    let parts: Vec<String> = raw_command.split_whitespace().map(|s| s.to_string()).collect();
+    let parts: Vec<String> = match shell_words::split(raw_command) {
+        Ok(w) => w,
+        Err(_) => {
+            app.tabs[tab_idx].input_error = Some("Invalid command: unmatched quote.".into());
+            return;
+        }
+    };
     if parts.is_empty() {
         return;
     }
@@ -1330,7 +1336,14 @@ fn ready_needs_template_audit_confirm(git_root: &std::path::Path) -> bool {
 
 /// Parse and dispatch a command string entered by the user.
 async fn execute_command(app: &mut App, cmd: &str) {
-    let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
+    let owned = match shell_words::split(cmd.trim()) {
+        Ok(w) => w,
+        Err(_) => {
+            app.active_tab_mut().input_error = Some("Invalid command: unmatched quote.".into());
+            return;
+        }
+    };
+    let parts: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
     if parts.is_empty() {
         return;
     }
