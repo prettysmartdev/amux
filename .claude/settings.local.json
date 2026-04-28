@@ -112,7 +112,8 @@
       "Bash(ls docs/blog/*.md)",
       "WebFetch(domain:cli.github.com)",
       "WebFetch(domain:docs.github.com)",
-      "WebFetch(domain:gh.io)"
+      "WebFetch(domain:gh.io)",
+      "Bash(getent passwd *)"
     ]
   }
 }
