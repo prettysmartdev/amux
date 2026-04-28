@@ -894,6 +894,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec!["AMUX_TEST_GEMINI_API_KEY_PT_999".to_string()]),
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 

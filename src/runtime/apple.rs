@@ -64,6 +64,18 @@ fn append_docker_socket_mount_args(args: &mut Vec<String>) {
     args.push(format!("{}:{}", path_str, path_str));
 }
 
+fn append_overlay_mounts(args: &mut Vec<String>, settings: &HostSettings) {
+    for overlay in &settings.overlays {
+        args.push("-v".into());
+        args.push(format!(
+            "{}:{}:{}",
+            overlay.host_path.display(),
+            overlay.container_path.display(),
+            overlay.permission.as_str(),
+        ));
+    }
+}
+
 fn append_settings_mounts(args: &mut Vec<String>, settings: &HostSettings) {
     if settings.mount_claude_files {
         args.push("-v".into());
@@ -83,6 +95,7 @@ fn append_settings_mounts(args: &mut Vec<String>, settings: &HostSettings) {
         args.push("-v".into());
         args.push(format!("{}:{}", host_dir.display(), container_dir));
     }
+    append_overlay_mounts(args, settings);
 }
 
 fn append_settings_mounts_display(args: &mut Vec<String>, settings: Option<&HostSettings>) {
@@ -96,6 +109,17 @@ fn append_settings_mounts_display(args: &mut Vec<String>, settings: Option<&Host
     if settings.and_then(|s| s.agent_config_dir.as_ref()).is_some() {
         args.push("-v".into());
         args.push("<agent-config>:<agent-config-dir>".into());
+    }
+    if let Some(s) = settings {
+        for overlay in &s.overlays {
+            args.push("-v".into());
+            args.push(format!(
+                "{}:{}:{}",
+                overlay.host_path.display(),
+                overlay.container_path.display(),
+                overlay.permission.as_str(),
+            ));
+        }
     }
 }
 

@@ -29,6 +29,7 @@ pub async fn run(
     auto: bool,
     agent_override: Option<String>,
     model_override: Option<String>,
+    raw_overlay_flags: &[String],
     runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
 ) -> Result<()> {
     let work_item = parse_work_item(work_item_str)?;
@@ -107,12 +108,23 @@ pub async fn run(
     let config_agent = config.agent.as_deref().unwrap_or("claude").to_string();
     let agent = agent_override.as_deref().unwrap_or(&config_agent).to_string();
     let credentials = resolve_auth(&git_root, &agent)?;
-    let host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
+    let mut host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
 
     // Suppress the dangerous-mode permission dialog when running with --yolo.
     if yolo {
         if let Some(ref s) = host_settings {
             let _ = s.apply_yolo_settings();
+        }
+    }
+
+    // Resolve directory overlays from config + env + flags.
+    // Malformed --overlay values are fatal (per spec).
+    let resolved_overlays = crate::overlays::resolve_overlays(&git_root, raw_overlay_flags)
+        .context("invalid --overlay flag")?;
+    if !resolved_overlays.is_empty() {
+        match host_settings.as_mut() {
+            Some(hs) => hs.set_overlays(resolved_overlays),
+            None => host_settings = Some(crate::runtime::HostSettings::overlays_only(resolved_overlays)),
         }
     }
 
@@ -165,9 +177,18 @@ pub async fn run(
         prepare_agent_cli(&git_root, &agent, &config_agent, &*runtime).await?;
 
     // Recompute credentials and env_vars if fallback changed the agent.
+    // Preserve overlays across agent fallback — they are agent-independent.
     let (final_env_vars, final_host_settings) = if effective_agent != agent {
         let new_creds = crate::commands::auth::resolve_auth(&git_root, &effective_agent)?;
-        let new_hs = crate::passthrough::passthrough_for_agent(&effective_agent).prepare_host_settings();
+        let mut new_hs = crate::passthrough::passthrough_for_agent(&effective_agent).prepare_host_settings();
+        // Carry overlays from the original host_settings to the new one.
+        let overlays = host_settings.as_ref().map(|hs| hs.overlays.clone()).unwrap_or_default();
+        if !overlays.is_empty() {
+            match new_hs.as_mut() {
+                Some(hs) => hs.set_overlays(overlays),
+                None => new_hs = Some(crate::runtime::HostSettings::overlays_only(overlays)),
+            }
+        }
         let mut new_ev = new_creds.env_vars.clone();
         for name in &passthrough_names {
             if new_ev.iter().any(|(k, _)| k == name) { continue; }

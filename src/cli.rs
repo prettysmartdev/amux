@@ -110,6 +110,11 @@ pub enum Command {
         /// Override the model used by the launched agent (e.g. claude-opus-4-6).
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
+
+        /// Mount a host directory into the agent container. Repeatable.
+        /// Format: dir(/host/path:/container/path[:ro|rw])
+        #[arg(long = "overlay", value_name = "SPEC")]
+        overlay: Vec<String>,
     },
 
     /// Start a freeform chat session with the configured agent in a container.
@@ -149,6 +154,11 @@ pub enum Command {
         /// Override the model used by the launched agent (e.g. claude-opus-4-6).
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
+
+        /// Mount a host directory into the agent container. Repeatable.
+        /// Format: dir(/host/path:/container/path[:ro|rw])
+        #[arg(long = "overlay", value_name = "SPEC")]
+        overlay: Vec<String>,
     },
 
     /// Manage work item specs (create, interview, amend).
@@ -290,6 +300,11 @@ pub enum ExecAction {
         /// Override the model used by the launched agent (e.g. claude-opus-4-6).
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
+
+        /// Mount a host directory into the agent container. Repeatable.
+        /// Format: dir(/host/path:/container/path[:ro|rw])
+        #[arg(long = "overlay", value_name = "SPEC")]
+        overlay: Vec<String>,
     },
 
     /// Run a workflow file without requiring a work item number.
@@ -341,6 +356,11 @@ pub enum ExecAction {
         /// Override the model used by the launched agent (e.g. claude-opus-4-6).
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
+
+        /// Mount a host directory into the agent container. Repeatable.
+        /// Format: dir(/host/path:/container/path[:ro|rw])
+        #[arg(long = "overlay", value_name = "SPEC")]
+        overlay: Vec<String>,
     },
 }
 

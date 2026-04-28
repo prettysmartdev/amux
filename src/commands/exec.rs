@@ -20,6 +20,7 @@ pub async fn run_prompt(
     auto: bool,
     agent_override: Option<String>,
     model_override: Option<String>,
+    raw_overlay_flags: &[String],
     runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
 ) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
@@ -49,7 +50,7 @@ pub async fn run_prompt(
 
     let effective_agent = prepare_agent_cli(&git_root, &agent, &config_agent, &*runtime).await?;
 
-    let (final_env_vars, final_host_settings) = if effective_agent != agent {
+    let (final_env_vars, mut final_host_settings) = if effective_agent != agent {
         let new_creds = resolve_auth(&git_root, &effective_agent)?;
         let new_hs =
             crate::passthrough::passthrough_for_agent(&effective_agent).prepare_host_settings();
@@ -66,6 +67,17 @@ pub async fn run_prompt(
     } else {
         (env_vars, host_settings)
     };
+
+    // Resolve directory overlays from config + env + flags.
+    // Malformed --overlay values are fatal (per spec).
+    let resolved_overlays = crate::overlays::resolve_overlays(&git_root, raw_overlay_flags)
+        .context("invalid --overlay flag")?;
+    if !resolved_overlays.is_empty() {
+        match final_host_settings.as_mut() {
+            Some(hs) => hs.set_overlays(resolved_overlays),
+            None => final_host_settings = Some(crate::runtime::HostSettings::overlays_only(resolved_overlays)),
+        }
+    }
 
     let mut entrypoint = chat_entrypoint_with_prompt(&effective_agent, prompt, plan);
     let disallowed_tools = if yolo || auto {
@@ -127,6 +139,7 @@ pub async fn run_exec_workflow(
     auto: bool,
     agent_override: Option<String>,
     model_override: Option<String>,
+    raw_overlay_flags: &[String],
     runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>,
 ) -> Result<()> {
     let work_item = work_item_str.map(parse_work_item).transpose()?;
@@ -178,11 +191,22 @@ pub async fn run_exec_workflow(
     let config_agent = config.agent.as_deref().unwrap_or("claude").to_string();
     let agent = agent_override.as_deref().unwrap_or(&config_agent).to_string();
     let credentials = resolve_auth(&git_root, &agent)?;
-    let host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
+    let mut host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
 
     if yolo {
         if let Some(ref s) = host_settings {
             let _ = s.apply_yolo_settings();
+        }
+    }
+
+    // Resolve directory overlays from config + env + flags.
+    // Malformed --overlay values are fatal (per spec).
+    let resolved_overlays = crate::overlays::resolve_overlays(&git_root, raw_overlay_flags)
+        .context("invalid --overlay flag")?;
+    if !resolved_overlays.is_empty() {
+        match host_settings.as_mut() {
+            Some(hs) => hs.set_overlays(resolved_overlays),
+            None => host_settings = Some(crate::runtime::HostSettings::overlays_only(resolved_overlays)),
         }
     }
 

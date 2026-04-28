@@ -41,6 +41,7 @@ pub static IMPLEMENT_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "mount-ssh",       takes_value: false, value_name: "",     hint: "mount SSH agent" },
     FlagSpec { name: "yolo",            takes_value: false, value_name: "",     hint: "skip confirmation prompts" },
     FlagSpec { name: "auto",            takes_value: false, value_name: "",     hint: "auto mode" },
+    FlagSpec { name: "overlay",         takes_value: true,  value_name: "SPEC", hint: "mount host directory into container" },
 ];
 
 pub static CHAT_FLAGS: &[FlagSpec] = &[
@@ -52,6 +53,7 @@ pub static CHAT_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "mount-ssh",       takes_value: false, value_name: "",     hint: "mount SSH agent" },
     FlagSpec { name: "yolo",            takes_value: false, value_name: "",     hint: "skip confirmation prompts" },
     FlagSpec { name: "auto",            takes_value: false, value_name: "",     hint: "auto mode" },
+    FlagSpec { name: "overlay",         takes_value: true,  value_name: "SPEC", hint: "mount host directory into container" },
 ];
 
 pub static STATUS_FLAGS: &[FlagSpec] = &[
@@ -76,6 +78,7 @@ pub static EXEC_PROMPT_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "auto",            takes_value: false, value_name: "",     hint: "auto mode" },
     FlagSpec { name: "agent",           takes_value: true,  value_name: "NAME", hint: "override configured agent" },
     FlagSpec { name: "model",           takes_value: true,  value_name: "NAME", hint: "override agent model (e.g. claude-opus-4-6)" },
+    FlagSpec { name: "overlay",         takes_value: true,  value_name: "SPEC", hint: "mount host directory into container" },
 ];
 
 pub static EXEC_WORKFLOW_FLAGS: &[FlagSpec] = &[
@@ -89,6 +92,7 @@ pub static EXEC_WORKFLOW_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "auto",            takes_value: false, value_name: "",     hint: "auto mode" },
     FlagSpec { name: "agent",           takes_value: true,  value_name: "NAME", hint: "override configured agent" },
     FlagSpec { name: "model",           takes_value: true,  value_name: "NAME", hint: "override agent model (e.g. claude-opus-4-6)" },
+    FlagSpec { name: "overlay",         takes_value: true,  value_name: "SPEC", hint: "mount host directory into container" },
 ];
 
 pub static CONFIG_SET_FLAGS: &[FlagSpec] = &[

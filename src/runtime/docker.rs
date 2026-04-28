@@ -58,6 +58,18 @@ fn append_docker_socket_mount_args(args: &mut Vec<String>) {
     }
 }
 
+fn append_overlay_mounts(args: &mut Vec<String>, settings: &HostSettings) {
+    for overlay in &settings.overlays {
+        args.push("-v".into());
+        args.push(format!(
+            "{}:{}:{}",
+            overlay.host_path.display(),
+            overlay.container_path.display(),
+            overlay.permission.as_str(),
+        ));
+    }
+}
+
 fn append_settings_mounts(args: &mut Vec<String>, settings: &HostSettings) {
     if settings.mount_claude_files {
         args.push("-v".into());
@@ -77,6 +89,7 @@ fn append_settings_mounts(args: &mut Vec<String>, settings: &HostSettings) {
         args.push("-v".into());
         args.push(format!("{}:{}", host_dir.display(), container_dir));
     }
+    append_overlay_mounts(args, settings);
 }
 
 fn append_settings_mounts_display(args: &mut Vec<String>, settings: Option<&HostSettings>) {
@@ -90,6 +103,17 @@ fn append_settings_mounts_display(args: &mut Vec<String>, settings: Option<&Host
     if settings.and_then(|s| s.agent_config_dir.as_ref()).is_some() {
         args.push("-v".into());
         args.push("<agent-config>:<agent-config-dir>".into());
+    }
+    if let Some(s) = settings {
+        for overlay in &s.overlays {
+            args.push("-v".into());
+            args.push(format!(
+                "{}:{}:{}",
+                overlay.host_path.display(),
+                overlay.container_path.display(),
+                overlay.permission.as_str(),
+            ));
+        }
     }
 }
 
@@ -1337,6 +1361,100 @@ mod tests {
         assert_eq!(
             cmd,
             "docker build --no-cache -t amux-test:latest -f Dockerfile.dev /repo"
+        );
+    }
+
+    // ─── overlay mount tests (work item 0063) ────────────────────────────────
+
+    #[test]
+    fn build_run_args_pty_with_overlays_adds_volume_flags() {
+        use crate::overlays::directory::{DirectoryOverlay, MountPermission};
+
+        let overlays = vec![
+            DirectoryOverlay {
+                host_path: PathBuf::from("/tmp/test"),
+                container_path: PathBuf::from("/mnt/test"),
+                permission: MountPermission::ReadOnly,
+            },
+            DirectoryOverlay {
+                host_path: PathBuf::from("/data/ref"),
+                container_path: PathBuf::from("/mnt/ref"),
+                permission: MountPermission::ReadWrite,
+            },
+        ];
+
+        let mut settings = HostSettings::from_paths(
+            PathBuf::from("/fake/claude.json"),
+            PathBuf::from("/fake/dot-claude"),
+        );
+        settings.set_overlays(overlays);
+
+        let args =
+            rt().build_run_args_pty("img", "/h", &[], &[], Some(&settings), false, None, None);
+
+        // First overlay: -v /tmp/test:/mnt/test:ro
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-v" && w[1] == "/tmp/test:/mnt/test:ro"),
+            "expected -v /tmp/test:/mnt/test:ro in run args; got {:?}",
+            args
+        );
+        // Second overlay: -v /data/ref:/mnt/ref:rw
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-v" && w[1] == "/data/ref:/mnt/ref:rw"),
+            "expected -v /data/ref:/mnt/ref:rw in run args; got {:?}",
+            args
+        );
+    }
+
+    #[test]
+    fn build_run_args_pty_without_overlays_has_no_extra_volume_flags() {
+        // Baseline: default HostSettings (overlays field is empty vec) must not
+        // add extra -v flags beyond the standard claude-config mounts.
+        let settings = HostSettings::from_paths(
+            PathBuf::from("/fake/claude.json"),
+            PathBuf::from("/fake/dot-claude"),
+        );
+        let args =
+            rt().build_run_args_pty("img", "/h", &[], &[], Some(&settings), false, None, None);
+
+        // Only the .claude.json and .claude/ mounts should be present.
+        let v_count = args.iter().filter(|a| *a == "-v").count();
+        // workspace mount (1) + claude.json (1) + .claude/ (1) = 3 -v flags
+        assert_eq!(v_count, 3, "expected exactly 3 -v flags with no overlays; got {:?}", args);
+    }
+
+    #[test]
+    fn overlays_only_host_settings_stores_overlays_and_skips_claude_mounts() {
+        use crate::overlays::directory::{DirectoryOverlay, MountPermission};
+
+        let overlays = vec![DirectoryOverlay {
+            host_path: PathBuf::from("/data"),
+            container_path: PathBuf::from("/mnt/data"),
+            permission: MountPermission::ReadOnly,
+        }];
+
+        let settings = HostSettings::overlays_only(overlays.clone());
+        assert_eq!(settings.overlays, overlays, "overlays_only must store provided overlays");
+        assert!(!settings.mount_claude_files, "overlays_only must not mount claude files");
+        assert!(settings.agent_config_dir.is_none(), "overlays_only must have no agent_config_dir");
+
+        let args =
+            rt().build_run_args_pty("img", "/h", &[], &[], Some(&settings), false, None, None);
+
+        // Overlay -v must be present.
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-v" && w[1] == "/data:/mnt/data:ro"),
+            "expected overlay -v mount in run args; got {:?}",
+            args
+        );
+        // Claude-specific mounts must NOT appear.
+        assert!(
+            !args.iter().any(|a| a.contains("/.claude")),
+            "claude mounts must not appear for overlays_only settings; got {:?}",
+            args
         );
     }
 

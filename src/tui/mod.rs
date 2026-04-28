@@ -1448,6 +1448,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
             let agent = flag_parser::flag_string(&flags, "agent").map(str::to_string);
             let model = flag_parser::flag_string(&flags, "model").map(str::to_string);
             let workflow = flag_parser::flag_string(&flags, "workflow").map(std::path::PathBuf::from);
+            let overlay = flag_parser::flag_string(&flags, "overlay").map(str::to_string);
             // --yolo/--auto + --workflow implies --worktree.
             if yolo && workflow.is_some() && !worktree {
                 app.active_tab_mut().push_output(
@@ -1471,11 +1472,11 @@ async fn execute_command(app: &mut App, cmd: &str) {
                 Some(n) => n,
                 None => {
                     app.active_tab_mut().input_error =
-                        Some("Usage: implement <work-item-number> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>] [--worktree] [--mount-ssh] [--yolo] [--auto] [--agent=<NAME>] [--model=<NAME>]".into());
+                        Some("Usage: implement <work-item-number> [--non-interactive] [--plan] [--allow-docker] [--workflow=<path>] [--worktree] [--mount-ssh] [--yolo] [--auto] [--agent=<NAME>] [--model=<NAME>] [--overlay=<SPEC>]".into());
                     return;
                 }
             };
-            app.active_tab_mut().pending_command = PendingCommand::Implement { agent, model, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto };
+            app.active_tab_mut().pending_command = PendingCommand::Implement { agent, model, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto, overlay };
             show_pre_command_dialogs(app).await;
         }
 
@@ -1490,7 +1491,8 @@ async fn execute_command(app: &mut App, cmd: &str) {
             let auto = flag_parser::flag_bool(&flags, "auto");
             let agent = flag_parser::flag_string(&flags, "agent").map(str::to_string);
             let model = flag_parser::flag_string(&flags, "model").map(str::to_string);
-            app.active_tab_mut().pending_command = PendingCommand::Chat { agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto };
+            let overlay = flag_parser::flag_string(&flags, "overlay").map(str::to_string);
+            app.active_tab_mut().pending_command = PendingCommand::Chat { agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, overlay };
             show_pre_command_dialogs(app).await;
         }
 
@@ -1585,6 +1587,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
                     let auto = flag_parser::flag_bool(&flags, "auto");
                     let agent = flag_parser::flag_string(&flags, "agent").map(str::to_string);
                     let model = flag_parser::flag_string(&flags, "model").map(str::to_string);
+                    let overlay = flag_parser::flag_string(&flags, "overlay").map(str::to_string);
 
                     // Extract the prompt text: everything after "exec prompt" that isn't a flag.
                     let prompt: String = parts.iter()
@@ -1596,12 +1599,12 @@ async fn execute_command(app: &mut App, cmd: &str) {
                         .join(" ");
                     if prompt.trim().is_empty() {
                         app.active_tab_mut().input_error =
-                            Some("Usage: exec prompt <text> [--plan] [--allow-docker] [--mount-ssh] [--yolo] [--auto] [--agent=<NAME>] [--model=<NAME>]".into());
+                            Some("Usage: exec prompt <text> [--plan] [--allow-docker] [--mount-ssh] [--yolo] [--auto] [--agent=<NAME>] [--model=<NAME>] [--overlay=<SPEC>]".into());
                         return;
                     }
 
                     app.active_tab_mut().pending_command = PendingCommand::ExecPrompt {
-                        prompt, agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto,
+                        prompt, agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, overlay,
                     };
                     show_pre_command_dialogs(app).await;
                 }
@@ -1617,6 +1620,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
                     let auto = flag_parser::flag_bool(&flags, "auto");
                     let agent = flag_parser::flag_string(&flags, "agent").map(str::to_string);
                     let model = flag_parser::flag_string(&flags, "model").map(str::to_string);
+                    let overlay = flag_parser::flag_string(&flags, "overlay").map(str::to_string);
                     let work_item_str = flag_parser::flag_string(&flags, "work-item");
                     let work_item: Option<u32> = match work_item_str {
                         Some(s) => match parse_work_item(s) {
@@ -1638,7 +1642,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
                         Some(p) => p,
                         None => {
                             app.active_tab_mut().input_error =
-                                Some("Usage: exec workflow <path> [--work-item=<NUM>] [--plan] [--allow-docker] [--worktree] [--mount-ssh] [--yolo] [--auto] [--agent=<NAME>] [--model=<NAME>]".into());
+                                Some("Usage: exec workflow <path> [--work-item=<NUM>] [--plan] [--allow-docker] [--worktree] [--mount-ssh] [--yolo] [--auto] [--agent=<NAME>] [--model=<NAME>] [--overlay=<SPEC>]".into());
                             return;
                         }
                     };
@@ -1658,7 +1662,7 @@ async fn execute_command(app: &mut App, cmd: &str) {
                     }
 
                     app.active_tab_mut().pending_command = PendingCommand::ExecWorkflow {
-                        workflow, work_item, agent, model, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto,
+                        workflow, work_item, agent, model, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto, overlay,
                     };
                     show_pre_command_dialogs(app).await;
                 }
@@ -1941,11 +1945,11 @@ async fn launch_pending_command(app: &mut App) {
         PendingCommand::Ready { .. } => {
             launch_ready(app).await;
         }
-        PendingCommand::Implement { agent, model, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto } => {
-            launch_implement(app, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto, agent, model).await;
+        PendingCommand::Implement { agent, model, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto, overlay } => {
+            launch_implement(app, work_item, non_interactive, plan, allow_docker, workflow, worktree, mount_ssh, yolo, auto, agent, model, overlay).await;
         }
-        PendingCommand::Chat { agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto } => {
-            launch_chat(app, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model).await;
+        PendingCommand::Chat { agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, overlay } => {
+            launch_chat(app, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model, overlay).await;
         }
         PendingCommand::ClawsReady => {
             // Claws ready is launched directly from dialog actions (ClawsReadyProceed /
@@ -1957,11 +1961,11 @@ async fn launch_pending_command(app: &mut App) {
         PendingCommand::SpecsNewInterview { work_item_number, kind, title, summary, allow_docker } => {
             launch_specs_interview_agent(app, work_item_number, kind, title, summary, allow_docker).await;
         }
-        PendingCommand::ExecPrompt { prompt, agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto } => {
-            launch_exec_prompt(app, &prompt, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model).await;
+        PendingCommand::ExecPrompt { prompt, agent, model, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, overlay } => {
+            launch_exec_prompt(app, &prompt, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model, overlay).await;
         }
-        PendingCommand::ExecWorkflow { workflow, work_item, agent, model, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto } => {
-            launch_exec_workflow(app, workflow, work_item, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto, agent, model).await;
+        PendingCommand::ExecWorkflow { workflow, work_item, agent, model, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto, overlay } => {
+            launch_exec_workflow(app, workflow, work_item, non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto, agent, model, overlay).await;
         }
         PendingCommand::RemoteRun { remote_addr, session_id, command, follow, api_key } => {
             launch_remote_run(app, remote_addr, session_id, command, follow, api_key).await;
@@ -2312,8 +2316,17 @@ impl init_flow::InitContainerLauncher for TuiContainerLauncher {
                 env_vars.push((name.clone(), val));
             }
         }
-        let host_settings =
+        let mut host_settings =
             crate::passthrough::passthrough_for_agent(agent.as_str()).prepare_host_settings();
+        // Audit container: resolve overlays from config + env (no per-command flags).
+        let resolved_overlays = crate::overlays::resolve_overlays(git_root, &[])
+            .map_err(|e| anyhow::anyhow!("overlay resolution failed: {e}"))?;
+        if !resolved_overlays.is_empty() {
+            match host_settings.as_mut() {
+                Some(hs) => hs.set_overlays(resolved_overlays),
+                None => host_settings = Some(crate::runtime::HostSettings::overlays_only(resolved_overlays)),
+            }
+        }
 
         // TUI owns the terminal; run_container (Stdio::inherit + -it) would conflict
         // with the TUI renderer.  Use captured mode with the non-interactive entrypoint
@@ -2440,7 +2453,7 @@ async fn launch_init(
 
 /// Actually spawn the docker container for `implement` via PTY.
 #[allow(clippy::too_many_arguments)]
-async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, plan: bool, allow_docker: bool, workflow_path: Option<std::path::PathBuf>, worktree: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>, model: Option<String>) {
+async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, plan: bool, allow_docker: bool, workflow_path: Option<std::path::PathBuf>, worktree: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>, model: Option<String>, overlay: Option<String>) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
         Some(r) => r,
@@ -2535,6 +2548,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
                         mount_ssh,
                         yolo,
                         auto,
+                        overlay: overlay.clone(),
                     };
                     app.active_tab_mut().dialog = Dialog::WorktreePreCommitWarning {
                         uncommitted_files: files,
@@ -2598,6 +2612,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
                 mount_ssh,
                 yolo,
                 auto,
+                overlay: overlay.clone(),
             };
             app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
                 agent: agent_name.clone(),
@@ -2615,7 +2630,13 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
     }
 
     // Prepare host settings (sanitized config files in a temp dir).
+    let raw_overlay_flags: Vec<String> = overlay.as_deref().map(|s| vec![s.to_string()]).unwrap_or_default();
+    if let Err(e) = app.active_tab_mut().resolve_and_cache_overlays(&git_root, &raw_overlay_flags) {
+        app.active_tab_mut().input_error = Some(format!("invalid --overlay: {}", e));
+        return;
+    }
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
+    app.active_tab_mut().apply_overlays_to_host_settings();
     {
         // Use the agent dockerfile for USER detection in the new layout, Dockerfile.dev for legacy.
         let msg = app.active_tab_mut().host_settings.as_mut()
@@ -2703,6 +2724,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
                     mount_ssh,
                     yolo,
                     auto,
+                    overlay: overlay.clone(),
                 };
                 app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
                     agent: missing,
@@ -2744,6 +2766,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
             // Refresh host settings for the step's agent.
             app.active_tab_mut().host_settings =
                 crate::passthrough::passthrough_for_agent(&step_agent).prepare_host_settings();
+            app.active_tab_mut().apply_overlays_to_host_settings();
             let msg = app.active_tab_mut().host_settings.as_mut()
                 .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
             if let Some(msg) = msg {
@@ -2933,7 +2956,7 @@ async fn launch_implement(app: &mut App, work_item: u32, non_interactive: bool, 
 }
 
 /// Actually spawn the docker container for `chat` via PTY.
-async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>, model: Option<String>) {
+async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>, model: Option<String>, overlay: Option<String>) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
         Some(r) => r,
@@ -3002,6 +3025,7 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
             mount_ssh,
             yolo,
             auto,
+            overlay: overlay.clone(),
         };
         app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
             agent: agent_name.clone(),
@@ -3018,7 +3042,13 @@ async fn launch_chat(app: &mut App, non_interactive: bool, plan: bool, allow_doc
     }
 
     // Prepare host settings (sanitized config files in a temp dir).
+    let raw_overlay_flags: Vec<String> = overlay.as_deref().map(|s| vec![s.to_string()]).unwrap_or_default();
+    if let Err(e) = app.active_tab_mut().resolve_and_cache_overlays(&git_root, &raw_overlay_flags) {
+        app.active_tab_mut().input_error = Some(format!("invalid --overlay: {}", e));
+        return;
+    }
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
+    app.active_tab_mut().apply_overlays_to_host_settings();
     {
         let msg = app.active_tab_mut().host_settings.as_mut()
             .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
@@ -3186,6 +3216,7 @@ async fn launch_exec_prompt(
     auto: bool,
     agent_override: Option<String>,
     model: Option<String>,
+    overlay: Option<String>,
 ) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
@@ -3254,6 +3285,7 @@ async fn launch_exec_prompt(
             mount_ssh,
             yolo,
             auto,
+            overlay: overlay.clone(),
         };
         app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
             agent: agent_name.clone(),
@@ -3270,7 +3302,13 @@ async fn launch_exec_prompt(
     }
 
     // Prepare host settings.
+    let raw_overlay_flags: Vec<String> = overlay.as_deref().map(|s| vec![s.to_string()]).unwrap_or_default();
+    if let Err(e) = app.active_tab_mut().resolve_and_cache_overlays(&git_root, &raw_overlay_flags) {
+        app.active_tab_mut().input_error = Some(format!("invalid --overlay: {}", e));
+        return;
+    }
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
+    app.active_tab_mut().apply_overlays_to_host_settings();
     {
         let msg = app.active_tab_mut().host_settings.as_mut()
             .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
@@ -3431,6 +3469,7 @@ async fn launch_exec_workflow(
     auto: bool,
     agent_override: Option<String>,
     model: Option<String>,
+    overlay: Option<String>,
 ) {
     let tab_cwd = app.active_tab().cwd.clone();
     let git_root = match find_git_root_from(&tab_cwd) {
@@ -3537,6 +3576,7 @@ async fn launch_exec_workflow(
                         mount_ssh,
                         yolo,
                         auto,
+                        overlay: overlay.clone(),
                     };
                     app.active_tab_mut().dialog = Dialog::WorktreePreCommitWarning {
                         uncommitted_files: files,
@@ -3588,7 +3628,13 @@ async fn launch_exec_workflow(
         crate::commands::agent::resolve_agent_image_and_dockerfile(&git_root, &agent_name);
 
     // Prepare host settings.
+    let raw_overlay_flags: Vec<String> = overlay.as_deref().map(|s| vec![s.to_string()]).unwrap_or_default();
+    if let Err(e) = app.active_tab_mut().resolve_and_cache_overlays(&git_root, &raw_overlay_flags) {
+        app.active_tab_mut().input_error = Some(format!("invalid --overlay: {}", e));
+        return;
+    }
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
+    app.active_tab_mut().apply_overlays_to_host_settings();
     {
         let msg = app.active_tab_mut().host_settings.as_mut()
             .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
@@ -3652,6 +3698,7 @@ async fn launch_exec_workflow(
                 mount_ssh,
                 yolo,
                 auto,
+                overlay: overlay.clone(),
             };
             app.active_tab_mut().dialog = Dialog::AgentSetupConfirm {
                 agent: missing,
@@ -3690,6 +3737,7 @@ async fn launch_exec_workflow(
         agent_dockerfile_path = r.1;
         app.active_tab_mut().host_settings =
             crate::passthrough::passthrough_for_agent(&step_agent).prepare_host_settings();
+        app.active_tab_mut().apply_overlays_to_host_settings();
         let msg = app.active_tab_mut().host_settings.as_mut()
             .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
         if let Some(msg) = msg {
@@ -4062,6 +4110,7 @@ async fn launch_claws_ready(app: &mut App) {
     // Stored in tab.host_settings so the temp dir outlives all phases of the wizard
     // and remains valid through the subsequent PTY exec session.
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
+    app.active_tab_mut().apply_overlays_to_host_settings();
     // A path-only view is moved into the closure; the actual TempDir lives in the tab.
     let closure_host_settings = app.active_tab().host_settings.as_ref().map(|hs| {
         hs.clone_view()
@@ -4219,6 +4268,7 @@ async fn launch_claws_start_container_status_only(app: &mut App) {
 
     let settings_dir = claws::nanoclaw_settings_dir();
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings_to_dir(&settings_dir);
+    app.active_tab_mut().apply_overlays_to_host_settings();
     let closure_host_settings = app.active_tab().host_settings.as_ref().map(|hs| {
         hs.clone_view()
     });
@@ -4344,6 +4394,7 @@ async fn launch_claws_delete_and_start_fresh(app: &mut App, container_id: String
 
     let settings_dir = claws::nanoclaw_settings_dir();
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings_to_dir(&settings_dir);
+    app.active_tab_mut().apply_overlays_to_host_settings();
     let closure_host_settings = app.active_tab().host_settings.as_ref().map(|hs| {
         hs.clone_view()
     });
@@ -4526,6 +4577,7 @@ async fn launch_ready_audit_pty(app: &mut App) {
 
     // Move host_settings into TabState so the TempDir persists until finish_command.
     app.active_tab_mut().host_settings = host_settings;
+    app.active_tab_mut().apply_overlays_to_host_settings();
 
     // Re-store the rest of the handoff (without host_settings) for the post-audit phase.
     app.active_tab_mut().ready_audit_handoff = Some(ready_flow::ReadyAuditHandoff {
@@ -4654,7 +4706,13 @@ async fn launch_init_audit_pty(app: &mut App) {
     }
 
     // Move host_settings into TabState so the TempDir persists until finish_command.
+    if let Err(e) = app.active_tab_mut().resolve_overlays_once(&git_root) {
+        app.active_tab_mut().push_output(format!("Error: overlay resolution failed: {e}"));
+        app.active_tab_mut().finish_command(1);
+        return;
+    }
     app.active_tab_mut().host_settings = host_settings;
+    app.active_tab_mut().apply_overlays_to_host_settings();
 
     // Re-store the handoff (without host_settings) for the post-audit phase.
     app.active_tab_mut().init_audit_handoff = Some(init_flow::InitAuditHandoff {
@@ -5036,7 +5094,13 @@ async fn launch_specs_amend(app: &mut App, work_item: u32, allow_docker: bool) {
         return;
     }
 
+    if let Err(e) = app.active_tab_mut().resolve_overlays_once(&git_root) {
+        app.active_tab_mut().push_output(format!("Error: overlay resolution failed: {e}"));
+        app.active_tab_mut().finish_command(1);
+        return;
+    }
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
+    app.active_tab_mut().apply_overlays_to_host_settings();
     {
         let msg = app.active_tab_mut().host_settings.as_mut()
             .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
@@ -5169,7 +5233,13 @@ async fn launch_specs_interview_agent(
         return;
     }
 
+    if let Err(e) = app.active_tab_mut().resolve_overlays_once(&git_root) {
+        app.active_tab_mut().push_output(format!("Error: overlay resolution failed: {e}"));
+        app.active_tab_mut().finish_command(1);
+        return;
+    }
     app.active_tab_mut().host_settings = crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
+    app.active_tab_mut().apply_overlays_to_host_settings();
     {
         let msg = app.active_tab_mut().host_settings.as_mut()
             .and_then(|s| crate::runtime::apply_dockerfile_user(s, &agent_dockerfile_path));
@@ -5562,8 +5632,14 @@ async fn launch_next_workflow_step(app: &mut App) {
         .and_then(|s| app.active_tab().workflow_step_agents.get(s).cloned())
         .unwrap_or_else(|| agent_name.clone());
     if step_agent != prev_step_agent || app.active_tab().host_settings.is_none() {
+        if let Err(e) = app.active_tab_mut().resolve_overlays_once(&git_root) {
+            app.active_tab_mut().push_output(format!("Error: overlay resolution failed: {e}"));
+            app.active_tab_mut().finish_command(1);
+            return;
+        }
         app.active_tab_mut().host_settings =
             crate::passthrough::passthrough_for_agent(&step_agent).prepare_host_settings();
+        app.active_tab_mut().apply_overlays_to_host_settings();
         if yolo_mode {
             if let Some(ref s) = app.active_tab().host_settings {
                 let _ = s.apply_yolo_settings();

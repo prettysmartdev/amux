@@ -24,6 +24,11 @@ use anyhow::Result;
 use std::sync::Arc;
 
 pub async fn run(mut command: Command, runtime: Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
+    // Validate AMUX_OVERLAYS early so a malformed value is always a fatal error,
+    // regardless of which command is run and before any agent availability checks.
+    crate::overlays::parse_env_overlays()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     // When `headless.alwaysNonInteractive` is set in global config, force non-interactive
     // mode on every command variant that carries that flag before dispatch.
     if crate::config::effective_always_non_interactive() {
@@ -70,9 +75,10 @@ pub async fn run(mut command: Command, runtime: Arc<dyn crate::runtime::AgentRun
             auto,
             agent,
             model,
-        } => implement::run(&work_item, non_interactive, plan, allow_docker, workflow.as_deref(), worktree, mount_ssh, yolo, auto, agent, model, runtime).await,
-        Command::Chat { non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model } => {
-            chat::run(non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model, runtime).await
+            overlay,
+        } => implement::run(&work_item, non_interactive, plan, allow_docker, workflow.as_deref(), worktree, mount_ssh, yolo, auto, agent, model, &overlay, runtime).await,
+        Command::Chat { non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model, overlay } => {
+            chat::run(non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model, &overlay, runtime).await
         }
         Command::Exec { action } => match action {
             ExecAction::Prompt {
@@ -85,8 +91,9 @@ pub async fn run(mut command: Command, runtime: Arc<dyn crate::runtime::AgentRun
                 auto,
                 agent,
                 model,
+                overlay,
             } => {
-                exec::run_prompt(&prompt, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model, runtime).await
+                exec::run_prompt(&prompt, non_interactive, plan, allow_docker, mount_ssh, yolo, auto, agent, model, &overlay, runtime).await
             }
             ExecAction::Workflow {
                 workflow,
@@ -100,8 +107,9 @@ pub async fn run(mut command: Command, runtime: Arc<dyn crate::runtime::AgentRun
                 auto,
                 agent,
                 model,
+                overlay,
             } => {
-                exec::run_exec_workflow(&workflow, work_item.as_deref(), non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto, agent, model, runtime).await
+                exec::run_exec_workflow(&workflow, work_item.as_deref(), non_interactive, plan, allow_docker, worktree, mount_ssh, yolo, auto, agent, model, &overlay, runtime).await
             }
         },
         Command::Claws { action } => claws::run(action, runtime).await,

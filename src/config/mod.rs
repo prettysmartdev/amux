@@ -2,6 +2,25 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Overlay configuration for mounting host resources into agent containers.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OverlaysConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directories: Option<Vec<DirectoryOverlayConfig>>,
+}
+
+/// A single directory overlay entry in config JSON.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DirectoryOverlayConfig {
+    /// Host path (absolute or `~`-expanded).
+    pub host: String,
+    /// Container path (absolute).
+    pub container: String,
+    /// Mount permission: `"ro"` or `"rw"`. Defaults to `"ro"` when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission: Option<String>,
+}
+
 /// Work-items configuration nested within `RepoConfig`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkItemsConfig {
@@ -38,6 +57,9 @@ pub struct RepoConfig {
     /// Configurable work items directory and template paths.
     #[serde(rename = "workItems", skip_serializing_if = "Option::is_none")]
     pub work_items: Option<WorkItemsConfig>,
+    /// Overlay configuration for mounting host directories into agent containers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlays: Option<OverlaysConfig>,
 }
 
 impl RepoConfig {
@@ -129,6 +151,9 @@ pub struct GlobalConfig {
     /// Remote headless amux connection configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteConfig>,
+    /// Overlay configuration for mounting host directories into agent containers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlays: Option<OverlaysConfig>,
 }
 
 /// Built-in default number of scrollback lines for the container terminal emulator.
@@ -380,6 +405,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: None,
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -415,6 +441,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: None,
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -434,6 +461,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: None,
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &repo_cfg).unwrap();
 
@@ -455,6 +483,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: None,
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -479,6 +508,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: None,
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -531,6 +561,7 @@ mod tests {
             yolo_disallowed_tools: Some(vec!["Bash".to_string(), "computer".to_string()]),
             env_passthrough: None,
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -550,6 +581,7 @@ mod tests {
             yolo_disallowed_tools: Some(vec!["Bash".to_string()]),
             env_passthrough: None,
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let tools = effective_yolo_disallowed_tools(tmp.path());
@@ -568,6 +600,7 @@ mod tests {
             yolo_disallowed_tools: Some(vec!["Bash".to_string(), "computer".to_string()]),
             env_passthrough: None,
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let tools = effective_yolo_disallowed_tools(tmp.path());
@@ -633,6 +666,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec!["ANTHROPIC_API_KEY".to_string()]),
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let loaded = load_repo_config(tmp.path()).unwrap();
@@ -652,6 +686,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec!["MY_VAR".to_string(), "OTHER_VAR".to_string()]),
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let names = effective_env_passthrough(tmp.path());
@@ -670,6 +705,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec!["REPO_ONLY_VAR".to_string()]),
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let names = effective_env_passthrough(tmp.path());
@@ -702,6 +738,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec![]), // explicit empty array
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         let names = effective_env_passthrough(tmp.path());
@@ -723,6 +760,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: None,
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         // Since repo.env_passthrough is None, the function must not panic and must
@@ -1314,6 +1352,157 @@ mod tests {
         assert!(json.contains("savedDirs"), "must contain savedDirs");
         assert!(json.contains("defaultAPIKey"), "must contain defaultAPIKey");
         let restored: RemoteConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    // ─── overlays config tests (work item 0063) ───────────────────────────────
+
+    #[test]
+    fn overlays_field_in_repo_config_serializes_correctly() {
+        let config = RepoConfig {
+            overlays: Some(OverlaysConfig {
+                directories: Some(vec![DirectoryOverlayConfig {
+                    host: "/data/ref".to_string(),
+                    container: "/mnt/ref".to_string(),
+                    permission: Some("ro".to_string()),
+                }]),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"overlays\""), "overlays key must appear in JSON; got: {json}");
+        assert!(json.contains("\"directories\""), "directories key must appear; got: {json}");
+        assert!(json.contains("/data/ref"), "host path must appear; got: {json}");
+        assert!(json.contains("/mnt/ref"), "container path must appear; got: {json}");
+        assert!(json.contains("\"ro\""), "permission must appear; got: {json}");
+    }
+
+    #[test]
+    fn overlays_field_in_global_config_serializes_correctly() {
+        let config = GlobalConfig {
+            overlays: Some(OverlaysConfig {
+                directories: Some(vec![DirectoryOverlayConfig {
+                    host: "~/shared".to_string(),
+                    container: "/mnt/shared".to_string(),
+                    permission: Some("rw".to_string()),
+                }]),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"overlays\""), "overlays key must appear; got: {json}");
+        assert!(json.contains("~/shared"), "tilde host must be preserved; got: {json}");
+        assert!(json.contains("\"rw\""), "rw permission must appear; got: {json}");
+    }
+
+    #[test]
+    fn overlays_absent_in_repo_config_json_deserializes_to_none() {
+        let json = r#"{"agent": "claude"}"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            config.overlays.is_none(),
+            "absent overlays key must deserialize to None in RepoConfig"
+        );
+    }
+
+    #[test]
+    fn overlays_absent_in_global_config_json_deserializes_to_none() {
+        let json = r#"{"default_agent": "claude"}"#;
+        let config: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            config.overlays.is_none(),
+            "absent overlays key must deserialize to None in GlobalConfig"
+        );
+    }
+
+    #[test]
+    fn overlay_permission_field_absent_deserializes_to_none() {
+        // When the permission key is absent, DirectoryOverlayConfig.permission is None.
+        // The resolution layer (config_to_overlay) interprets None as the default "ro".
+        let json = r#"{"overlays":{"directories":[{"host":"/data","container":"/mnt"}]}}"#;
+        let config: RepoConfig = serde_json::from_str(json).unwrap();
+        let dirs = config.overlays.unwrap().directories.unwrap();
+        assert!(
+            dirs[0].permission.is_none(),
+            "absent permission field must deserialize to None (defaults to ro at resolution)"
+        );
+    }
+
+    #[test]
+    fn overlay_permission_none_is_omitted_from_serialized_json() {
+        // skip_serializing_if = "Option::is_none" must suppress the permission field.
+        let entry = DirectoryOverlayConfig {
+            host: "/data".to_string(),
+            container: "/mnt".to_string(),
+            permission: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            !json.contains("permission"),
+            "absent permission must be omitted from JSON; got: {json}"
+        );
+    }
+
+    #[test]
+    fn overlays_absent_is_omitted_from_repo_config_json() {
+        let config = RepoConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            !json.contains("overlays"),
+            "absent overlays must be omitted (skip_serializing_if); got: {json}"
+        );
+    }
+
+    #[test]
+    fn overlays_field_roundtrips_through_repo_config_save_load() {
+        let tmp = TempDir::new().unwrap();
+        let config = RepoConfig {
+            overlays: Some(OverlaysConfig {
+                directories: Some(vec![
+                    DirectoryOverlayConfig {
+                        host: "/data/ref".to_string(),
+                        container: "/mnt/ref".to_string(),
+                        permission: Some("ro".to_string()),
+                    },
+                    DirectoryOverlayConfig {
+                        host: "~/prompts".to_string(),
+                        container: "/mnt/prompts".to_string(),
+                        permission: None,
+                    },
+                ]),
+            }),
+            ..Default::default()
+        };
+        save_repo_config(tmp.path(), &config).unwrap();
+        let loaded = load_repo_config(tmp.path()).unwrap();
+        assert_eq!(config, loaded, "overlays must round-trip through save/load");
+        let dirs = loaded.overlays.unwrap().directories.unwrap();
+        assert_eq!(dirs.len(), 2);
+        assert_eq!(dirs[0].permission.as_deref(), Some("ro"));
+        assert!(dirs[1].permission.is_none(), "absent permission must remain None after roundtrip");
+    }
+
+    #[test]
+    fn overlays_with_multiple_directories_roundtrips_through_json() {
+        let original = RepoConfig {
+            overlays: Some(OverlaysConfig {
+                directories: Some(vec![
+                    DirectoryOverlayConfig {
+                        host: "/a".to_string(),
+                        container: "/mnt/a".to_string(),
+                        permission: Some("ro".to_string()),
+                    },
+                    DirectoryOverlayConfig {
+                        host: "/b".to_string(),
+                        container: "/mnt/b".to_string(),
+                        permission: Some("rw".to_string()),
+                    },
+                ]),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        let restored: RepoConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(original, restored);
     }
 }

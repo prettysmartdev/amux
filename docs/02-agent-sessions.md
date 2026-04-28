@@ -139,6 +139,29 @@ Run the agent in read-only mode — it can analyse the codebase and suggest chan
 
 `--plan` can be combined with `--non-interactive`.
 
+### `--overlay <SPEC>`
+
+Mount additional host directories into the agent container. Accepts a typed overlay expression in the format `dir(host_path:container_path[:ro|rw])`. May be repeated or combined with a comma-separated list.
+
+```sh
+# CLI
+amux implement 0030 --overlay "dir(/data/reference:/mnt/reference:ro)"
+amux chat --overlay "dir(~/prompts:/mnt/prompts:rw)"
+
+# Two overlays — flag repeated or comma-separated (both produce identical results)
+amux implement 0030 --overlay "dir(/a:/mnt/a:ro)" --overlay "dir(/b:/mnt/b:rw)"
+amux implement 0030 --overlay "dir(/a:/mnt/a:ro),dir(/b:/mnt/b:rw)"
+
+# TUI command box (use comma-separated syntax — repeated --overlay in TUI keeps only the last value)
+implement 0030 --overlay "dir(/data/reference:/mnt/reference:ro),dir(~/prompts:/mnt/prompts)"
+```
+
+Permission defaults to `:ro` when omitted. `:rw` grants read-write access.
+
+Available on all four agent-launching commands: `implement`, `chat`, `exec prompt`, and `exec workflow`.
+
+See [Security & Isolation](03-security-and-isolation.md#overlay-mounts) for the full overlay reference including the `AMUX_OVERLAYS` env var, config-based overlays, and conflict resolution rules.
+
 ### `--allow-docker`
 
 Mount the host Docker socket into the container, giving the agent the ability to build and run Docker containers. See [Security & Isolation](03-security-and-isolation.md#docker-socket-access) for details on when to use this.

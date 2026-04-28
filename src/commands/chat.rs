@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 /// Command-mode entry point for `amux chat`.
-pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>, model_override: Option<String>, runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
+pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ssh: bool, yolo: bool, auto: bool, agent_override: Option<String>, model_override: Option<String>, raw_overlay_flags: &[String], runtime: std::sync::Arc<dyn crate::runtime::AgentRuntime>) -> Result<()> {
     let git_root = find_git_root().context("Not inside a Git repository")?;
     let mount_path = confirm_mount_scope_stdin(&git_root)?;
     let config = load_repo_config(&git_root)?;
@@ -41,7 +41,7 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
     let effective_agent = prepare_agent_cli(&git_root, &agent, &config_agent, &*runtime).await?;
 
     // Recompute credentials and env_vars if fallback changed the agent.
-    let (final_env_vars, final_host_settings) = if effective_agent != agent {
+    let (final_env_vars, mut final_host_settings) = if effective_agent != agent {
         let new_creds = resolve_auth(&git_root, &effective_agent)?;
         let new_hs = crate::passthrough::passthrough_for_agent(&effective_agent).prepare_host_settings();
         let mut new_ev = new_creds.env_vars.clone();
@@ -53,6 +53,17 @@ pub async fn run(non_interactive: bool, plan: bool, allow_docker: bool, mount_ss
     } else {
         (env_vars, host_settings)
     };
+
+    // Resolve directory overlays from config + env + flags.
+    // Malformed --overlay values are fatal (per spec).
+    let resolved_overlays = crate::overlays::resolve_overlays(&git_root, raw_overlay_flags)
+        .context("invalid --overlay flag")?;
+    if !resolved_overlays.is_empty() {
+        match final_host_settings.as_mut() {
+            Some(hs) => hs.set_overlays(resolved_overlays),
+            None => final_host_settings = Some(crate::runtime::HostSettings::overlays_only(resolved_overlays)),
+        }
+    }
 
     run_with_sink(
         &OutputSink::Stdout,
@@ -432,6 +443,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec!["AMUX_TEST_PT_INJECT_PRESENT".to_string()]),
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -473,6 +485,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec![absent_var.to_string()]),
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
 
@@ -506,6 +519,7 @@ mod tests {
             yolo_disallowed_tools: None,
             env_passthrough: Some(vec![var_name.to_string()]),
             work_items: None,
+            overlays: None,
         };
         save_repo_config(tmp.path(), &config).unwrap();
         // SAFETY: test-only env mutation; unique var name avoids races with other tests.

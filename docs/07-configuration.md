@@ -18,6 +18,11 @@ This file is created by `amux init` and should be committed to source control. I
   "terminal_scrollback_lines": 10000,
   "yoloDisallowedTools": ["Bash", "computer"],
   "envPassthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+  "overlays": {
+    "directories": [
+      { "host": "/data/fixtures", "container": "/mnt/fixtures", "permission": "ro" }
+    ]
+  },
   "workItems": {
     "dir": "docs/work-items",
     "template": "docs/work-items/0000-template.md"
@@ -31,6 +36,7 @@ This file is created by `amux init` and should be committed to source control. I
 | `terminal_scrollback_lines` | integer | `10000` | Number of scrollback lines in the container terminal emulator. Overrides the global value |
 | `yoloDisallowedTools` | string array | `[]` | Tools the agent cannot use when `--yolo` is active. Overrides the global list entirely |
 | `envPassthrough` | string array | `[]` | Host environment variable names to inject into agent containers at launch. Overrides the global list entirely. See [`envPassthrough`](#envpassthrough) |
+| `overlays.directories` | object array | `[]` | Host directories to mount into agent containers automatically. **Additive** with the global list — entries from both scopes are merged, not replaced. See [`overlays`](#overlays) |
 | `workItems.dir` | string | (not set) | Path to the work items directory, relative to repo root. See [Work item paths](#work-item-paths) |
 | `workItems.template` | string | (not set) | Path to the work item template file, relative to repo root. See [Work item paths](#work-item-paths) |
 
@@ -49,6 +55,11 @@ Applies to all projects on the machine unless overridden by a per-repo config.
   "runtime": "docker",
   "yoloDisallowedTools": ["Bash"],
   "envPassthrough": ["ANTHROPIC_API_KEY"],
+  "overlays": {
+    "directories": [
+      { "host": "~/personal-prompts", "container": "/mnt/prompts", "permission": "ro" }
+    ]
+  },
   "headless": {
     "workDirs": ["/home/user/my-project"],
     "alwaysNonInteractive": false
@@ -68,6 +79,7 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 | `runtime` | string | `"docker"` | Container runtime: `"docker"` or `"apple-containers"` (macOS 26+ only) |
 | `yoloDisallowedTools` | string array | `[]` | Global fallback list of tools forbidden when `--yolo` is active |
 | `envPassthrough` | string array | `[]` | Host environment variable names to inject into agent containers at launch. See [`envPassthrough`](#envpassthrough) |
+| `overlays.directories` | object array | `[]` | Host directories to mount into agent containers automatically across all projects. **Additive** with per-repo overlays — both lists are merged. See [`overlays`](#overlays) |
 | `headless.workDirs` | string array | `[]` | Working directories pre-approved for headless mode session creation. Merged with `--workdirs` flags at server startup. See [Headless Mode](08-headless-mode.md#working-directory-allowlist) |
 | `headless.alwaysNonInteractive` | boolean | `false` | When `true`, all dispatched commands automatically run in non-interactive mode. Useful for headless servers where no TTY is available. See [Headless Mode](08-headless-mode.md#alwaysnoninteractive) |
 | `remote.defaultAddr` | string | (not set) | Default address of the remote headless amux server (e.g. `http://host:9876`). Overridden by `--remote-addr` or `AMUX_REMOTE_ADDR`. See [Remote Mode](09-remote-mode.md#connecting-to-a-remote-host) |
@@ -86,6 +98,7 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 | `terminal_scrollback_lines` | Per-repo → Global → Built-in default (10,000) |
 | `yoloDisallowedTools` | Per-repo → Global → Empty list (no restriction) |
 | `envPassthrough` | Per-repo → Global → Empty list (no passthrough) |
+| `overlays.directories` | **Additive**: global + per-repo + `AMUX_OVERLAYS` env var + `--overlay` flags, merged with conflict resolution |
 | `runtime` | Global only |
 | `workItems.dir` / `workItems.template` | Per-repo only |
 | `headless.workDirs` | Global only (merged with `--workdirs` flags at startup) |
@@ -95,6 +108,8 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 | `remote.savedDirs` | Global only |
 
 For `yoloDisallowedTools` and `envPassthrough`, if a per-repo list is set it **replaces** the global list entirely — lists are not merged. To inherit the global list for a repo, omit the field from the repo config.
+
+`overlays.directories` behaves differently: all sources are **additive**. Entries from global config, per-repo config, the `AMUX_OVERLAYS` env var, and `--overlay` CLI flags are all merged into a single list. When the same host path appears in multiple sources, conflict resolution applies (higher-priority source wins for the container path; more restrictive permission always wins). See [`overlays`](#overlays) for the full resolution rules.
 
 A 10,000-line scrollback buffer at 80 columns uses approximately 3 MB per tab. Increase for long-running build or test sessions; decrease when running many simultaneous tabs.
 
@@ -116,6 +131,7 @@ runtime                          docker (built-in)   N/A               docker   
 terminal_scrollback_lines        10000 (built-in)    5000              5000               yes
 yolo_disallowed_tools            (empty)             (not set)         (empty)            —
 env_passthrough                  HOME, PATH          (not set)         HOME, PATH         —
+overlays.directories             1 entry             1 entry           2 entries (merged) —
 agent                            N/A                 codex             codex              yes
 auto_agent_auth_accepted         N/A                 true (read-only)  true               —
 work_items.dir                   N/A                 docs/work-items   docs/work-items    —
@@ -158,7 +174,7 @@ When neither scope has the field set, the built-in default is shown for both Glo
 Passing an unknown field name prints a helpful error listing all valid names:
 
 ```
-error: Unknown config field 'scrollback'. Valid fields: default_agent, runtime, terminal_scrollback_lines, yolo_disallowed_tools, env_passthrough, agent, auto_agent_auth_accepted, headless.workDirs, headless.alwaysNonInteractive, remote.defaultAddr, remote.defaultAPIKey, remote.savedDirs
+error: Unknown config field 'scrollback'. Valid fields: default_agent, runtime, terminal_scrollback_lines, yolo_disallowed_tools, env_passthrough, overlays.directories, agent, auto_agent_auth_accepted, headless.workDirs, headless.alwaysNonInteractive, remote.defaultAddr, remote.defaultAPIKey, remote.savedDirs
 ```
 
 ### `amux config set [--global] <field> <value>`
@@ -496,6 +512,124 @@ amux copies `~/.cline/data/` (excluding task history and workspace state) into a
 Per-repo config wins entirely over global config — lists are not merged. To use the global list for a specific repo, omit `envPassthrough` from the repo config.
 
 If a variable name appears in both `envPassthrough` and the agent's keychain credentials (e.g. a user who configured `CLAUDE_CODE_OAUTH_TOKEN` in both places), the keychain value takes precedence and the passthrough entry for that name is skipped.
+
+---
+
+## Overlays
+
+Overlays let you mount additional host directories into agent containers. Unlike `envPassthrough`, overlay sources from all scopes are **additive** — entries from global config, per-repo config, the `AMUX_OVERLAYS` env var, and `--overlay` CLI flags are all merged into the final mount list.
+
+### Configuration
+
+**Per-repo config** (`aspec/.amux.json`) — applied to every session in this repo:
+```json
+{
+  "overlays": {
+    "directories": [
+      { "host": "/data/fixtures", "container": "/mnt/fixtures", "permission": "ro" },
+      { "host": "~/shared-prompts", "container": "/mnt/prompts" }
+    ]
+  }
+}
+```
+
+**Global config** (`~/.amux/config.json`) — applied to every session across all repos:
+```json
+{
+  "overlays": {
+    "directories": [
+      { "host": "~/personal-prompts", "container": "/mnt/prompts", "permission": "ro" }
+    ]
+  }
+}
+```
+
+Each directory entry accepts:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `host` | string | yes | Host path. Absolute or `~`-prefixed (expanded to home directory). |
+| `container` | string | yes | Absolute path inside the container. |
+| `permission` | string | no | `"ro"` (read-only, default) or `"rw"` (read-write). |
+
+### The `AMUX_OVERLAYS` environment variable
+
+Set `AMUX_OVERLAYS` in your shell profile to inject personal overlays into every session without touching any config file. It uses the same `dir(...)` syntax as the `--overlay` CLI flag — a comma-separated list of typed overlay expressions:
+
+```sh
+# In ~/.bashrc, ~/.zshrc, etc.
+export AMUX_OVERLAYS="dir(~/personal-prompts:/mnt/prompts),dir(/data/shared-fixtures:/mnt/fixtures:ro)"
+```
+
+`AMUX_OVERLAYS` has higher priority than config file entries but lower priority than `--overlay` flags.
+
+### Priority order
+
+Overlays are resolved from all sources, then merged. Priority order from lowest to highest:
+
+| Priority | Source |
+|----------|--------|
+| 0 (lowest) | Global config (`~/.amux/config.json`) |
+| 1 | Per-repo config (`aspec/.amux.json`) |
+| 2 | `AMUX_OVERLAYS` environment variable |
+| 3 (highest) | `--overlay` CLI flags |
+
+All entries from all sources are combined into one list. Entries with different host paths are kept as independent mounts — they do not replace each other.
+
+### Conflict resolution
+
+When two sources specify the **same host path**:
+
+- The **higher-priority source** wins for the container path.
+- The **more restrictive permission wins** — `:ro` always beats `:rw`, regardless of which source is higher priority. A warning is logged when permissions are downgraded. This is intentional: a lower-priority config (e.g. global) declaring `:ro` prevents a higher-priority flag from silently escalating access to `:rw`.
+
+Example: global config sets `/data` as `:rw`, but a `--overlay` flag sets `/data` as `:ro` → the final mount is `:ro`, and a warning is logged.
+
+When two sources specify **different host paths** that map to the **same container path**, both mounts are applied and a warning is logged. Docker will shadow one mount with the other (the last one in the list wins).
+
+### Missing host paths
+
+If a configured host path does not exist at launch time, amux logs a warning and skips that entry — the session proceeds without it:
+
+```
+WARN overlay host path '/data/reference' does not exist; skipping
+```
+
+### CLI flag
+
+The `--overlay` flag is available on all four agent-launching commands: `implement`, `chat`, `exec prompt`, and `exec workflow`.
+
+```sh
+# Single overlay
+amux implement 0042 --overlay "dir(/data/reference:/mnt/reference:ro)"
+
+# Multiple overlays (repeated flag or comma-separated — equivalent on CLI)
+amux chat --overlay "dir(/a:/mnt/a:ro)" --overlay "dir(/b:/mnt/b:rw)"
+amux chat --overlay "dir(/a:/mnt/a:ro),dir(/b:/mnt/b:rw)"
+
+# Tilde expansion
+amux implement 0042 --overlay "dir(~/prompts:/mnt/prompts)"
+```
+
+Malformed `--overlay` values are a fatal error — the command exits immediately with a descriptive message rather than silently skipping the bad entry:
+
+```
+error: malformed overlay expression (missing opening parenthesis): "notvalid"
+```
+
+### Paths with spaces
+
+Spaces in host or container paths are supported natively — the parser splits on `:`, not on whitespace, so no quoting or percent-encoding is needed inside the `dir(...)` expression:
+
+```sh
+amux chat --overlay "dir(/path with spaces:/mnt/ref:ro)"
+```
+
+### Security
+
+Overlay mounts are printed in the full Docker command before each session, so you always see exactly what is mounted. `:ro` prevents the agent from modifying the overlaid directory. Only use `:rw` when the task genuinely requires write access to that directory.
+
+See [Security & Isolation](03-security-and-isolation.md#overlay-mounts) for a complete reference.
 
 ---
 

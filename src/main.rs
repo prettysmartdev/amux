@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod config;
 mod git;
+mod overlays;
 mod passthrough;
 mod runtime;
 mod tui;

@@ -88,6 +88,8 @@ pub struct HostSettings {
     /// `(~/.local/share/opencode/, /root/.local/share/opencode)`.
     /// Mounted read-write because the source is a temp copy, not the live host directory.
     pub agent_config_dir: Option<(PathBuf, String)>,
+    /// Directory overlays: host directories to mount into the container.
+    pub overlays: Vec<crate::overlays::directory::DirectoryOverlay>,
 }
 
 /// Top-level entries in `~/.claude/` that are large, host-specific, or
@@ -167,6 +169,7 @@ impl HostSettings {
             container_home: "/root".to_string(),
             mount_claude_files: true,
             agent_config_dir: None,
+            overlays: vec![],
         })
     }
 
@@ -222,6 +225,7 @@ impl HostSettings {
             container_home: "/root".to_string(),
             mount_claude_files: true,
             agent_config_dir: None,
+            overlays: vec![],
         })
     }
 
@@ -238,6 +242,7 @@ impl HostSettings {
             container_home: "/root".to_string(),
             mount_claude_files: true,
             agent_config_dir: None,
+            overlays: vec![],
         }
     }
 
@@ -259,6 +264,7 @@ impl HostSettings {
             container_home,
             mount_claude_files: false,
             agent_config_dir,
+            overlays: vec![],
         }
     }
 
@@ -275,7 +281,29 @@ impl HostSettings {
             container_home: self.container_home.clone(),
             mount_claude_files: self.mount_claude_files,
             agent_config_dir: self.agent_config_dir.clone(),
+            overlays: self.overlays.clone(),
         }
+    }
+
+    /// Creates a minimal `HostSettings` that only carries directory overlays.
+    ///
+    /// Use this when the agent has no host settings (`prepare_host_settings` returns `None`)
+    /// but overlays need to be mounted.
+    pub fn overlays_only(overlays: Vec<crate::overlays::directory::DirectoryOverlay>) -> Self {
+        HostSettings {
+            _temp_dir: None,
+            config_path: PathBuf::new(),
+            claude_dir_path: PathBuf::new(),
+            container_home: "/root".to_string(),
+            mount_claude_files: false,
+            agent_config_dir: None,
+            overlays,
+        }
+    }
+
+    /// Set the overlay mounts on this settings instance.
+    pub fn set_overlays(&mut self, overlays: Vec<crate::overlays::directory::DirectoryOverlay>) {
+        self.overlays = overlays;
     }
 
     /// Sets `skipDangerousModePermissionPrompt: true` in the container's `settings.json`.
@@ -336,6 +364,7 @@ impl HostSettings {
             container_home: "/root".to_string(),
             mount_claude_files: true,
             agent_config_dir: None,
+            overlays: vec![],
         })
     }
 }

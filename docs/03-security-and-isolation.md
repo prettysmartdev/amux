@@ -116,6 +116,128 @@ amux implement 0030 --worktree --mount-ssh            # worktree + SSH keys in c
 
 ---
 
+## Overlay mounts
+
+The `--overlay` flag mounts additional host directories into the agent container beyond the default Git repository mount. This lets you give an agent read-only access to a reference dataset, a shared prompts directory, or any other host resource without permanently modifying any config file.
+
+### Format
+
+```
+dir(host_path:container_path[:ro|rw])
+```
+
+| Field | Description |
+|-------|-------------|
+| `host_path` | Absolute path on the host. Leading `~` is expanded to your home directory. |
+| `container_path` | Absolute path inside the container where the directory will appear. |
+| `ro` / `rw` | Mount permission. Defaults to `ro` when omitted. |
+
+### Basic examples
+
+```sh
+# Mount a reference dataset read-only
+amux implement 0042 --overlay "dir(/data/reference:/mnt/reference:ro)"
+
+# Mount a shared prompts directory read-write
+amux chat --overlay "dir(~/prompts:/mnt/prompts:rw)"
+
+# Mount multiple directories (repeated flag or comma-separated — both are equivalent)
+amux implement 0042 --overlay "dir(/data/ref:/mnt/ref:ro)" --overlay "dir(~/snippets:/mnt/snippets)"
+amux implement 0042 --overlay "dir(/data/ref:/mnt/ref:ro),dir(~/snippets:/mnt/snippets)"
+```
+
+Available on all four agent-launching commands: `implement`, `chat`, `exec prompt`, and `exec workflow`.
+
+### `AMUX_OVERLAYS` environment variable
+
+Set `AMUX_OVERLAYS` in your shell profile to apply overlays automatically to every agent session regardless of which repo you're working in. It uses the same format as `--overlay` — a comma-separated list of `dir(...)` expressions:
+
+```sh
+export AMUX_OVERLAYS="dir(~/personal-prompts:/mnt/prompts),dir(/data/shared-fixtures:/mnt/fixtures:ro)"
+```
+
+### Config-based overlays
+
+Overlay directories can be declared in config files so they are applied automatically without requiring any flags each time. Both the per-repo and global configs support an `overlays.directories` list:
+
+**Per-repo config** (`aspec/.amux.json`):
+```json
+{
+  "overlays": {
+    "directories": [
+      { "host": "/data/fixtures", "container": "/mnt/fixtures", "permission": "ro" },
+      { "host": "~/shared-prompts", "container": "/mnt/prompts" }
+    ]
+  }
+}
+```
+
+**Global config** (`~/.amux/config.json`):
+```json
+{
+  "overlays": {
+    "directories": [
+      { "host": "~/personal-prompts", "container": "/mnt/prompts", "permission": "ro" }
+    ]
+  }
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `host` | string | yes | Host path (absolute or `~`-prefixed). |
+| `container` | string | yes | Container path (absolute). |
+| `permission` | string | no | `"ro"` or `"rw"`. Defaults to `"ro"` when omitted. |
+
+### Priority and conflict resolution
+
+Overlays are **additive**: all four sources contribute entries, then conflicts are resolved. The priority order, from lowest to highest:
+
+1. Global config (`~/.amux/config.json`)
+2. Per-repo config (`aspec/.amux.json`)
+3. `AMUX_OVERLAYS` environment variable
+4. `--overlay` CLI flags (highest priority)
+
+Unlike `envPassthrough` (where the per-repo list replaces the global list entirely), overlay sources are merged — entries from all four sources appear in the final mount list unless they conflict.
+
+**Conflict resolution rules:**
+
+When two sources specify the same host path:
+- The **higher-priority source** wins for the container path.
+- The **more restrictive permission always wins** — `:ro` beats `:rw` regardless of which source is higher priority. A warning is logged whenever permissions are downgraded. This prevents a CLI flag from silently escalating a read-only global config entry to read-write.
+
+When two sources specify different host paths that map to the **same container path**, both mounts are applied and a warning is logged (Docker will shadow one with the other; the last mount in the list wins).
+
+### Missing host paths
+
+If a configured host path does not exist when the container launches, amux logs a warning and skips that overlay — it does not abort the session. This matches the behaviour of other optional mounts (SSH keys, Docker socket).
+
+```
+WARN overlay host path '/data/reference' does not exist; skipping
+```
+
+### Security note
+
+Overlay mounts extend the base isolation model: the agent still cannot access anything outside your Git repo **plus the explicitly listed overlay directories**. `:ro` mounts prevent the agent from modifying the overlaid directory. Only use `:rw` when the task genuinely requires the agent to write to that directory, and only with agent images you trust.
+
+Like `--mount-ssh` and `--allow-docker`, overlay mounts are always printed in the Docker command before execution so you can see exactly what is mounted.
+
+### TUI usage
+
+In the TUI command box, use comma-separated syntax when specifying multiple overlays — the TUI flag parser stores one value per flag, so repeating `--overlay` keeps only the last value:
+
+```
+# Correct: comma-separated in one value
+implement 0042 --overlay "dir(/data/ref:/mnt/ref:ro),dir(~/prompts:/mnt/prompts)"
+
+# Incorrect in TUI (second value silently overwrites first):
+implement 0042 --overlay "dir(/data/ref:/mnt/ref:ro)" --overlay "dir(~/prompts:/mnt/prompts)"
+```
+
+On the CLI, both repeated flags and comma-separated syntax are equivalent.
+
+---
+
 ## Docker socket access
 
 The `--allow-docker` flag mounts the host Docker daemon socket into the agent container. This lets the agent build and run Docker containers itself.

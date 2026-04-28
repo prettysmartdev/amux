@@ -397,6 +397,8 @@ pub enum PendingCommand {
         yolo: bool,
         /// Enable auto permission mode (--permission-mode auto, no auto-advance).
         auto: bool,
+        /// Raw `--overlay` flag value from the TUI command input (comma-separated overlay spec).
+        overlay: Option<String>,
     },
     Chat {
         /// Override the configured agent for this session.
@@ -412,6 +414,8 @@ pub enum PendingCommand {
         yolo: bool,
         /// Enable auto permission mode (--permission-mode auto).
         auto: bool,
+        /// Raw `--overlay` flag value from the TUI command input (comma-separated overlay spec).
+        overlay: Option<String>,
     },
     ClawsReady,
     /// specs amend: run amend agent for a work item.
@@ -438,6 +442,8 @@ pub enum PendingCommand {
         mount_ssh: bool,
         yolo: bool,
         auto: bool,
+        /// Raw `--overlay` flag value from the TUI command input (comma-separated overlay spec).
+        overlay: Option<String>,
     },
     /// exec workflow: run a workflow file (optionally with a work item).
     ExecWorkflow {
@@ -452,6 +458,8 @@ pub enum PendingCommand {
         mount_ssh: bool,
         yolo: bool,
         auto: bool,
+        /// Raw `--overlay` flag value from the TUI command input (comma-separated overlay spec).
+        overlay: Option<String>,
     },
     /// remote run: execute a command on the remote host.
     RemoteRun {
@@ -645,6 +653,11 @@ pub struct TabState {
     /// Host settings mounted into the container (sanitized config files in a temp dir).
     /// Held here so the temp dir lives as long as the container runs; dropped on finish.
     pub host_settings: Option<HostSettings>,
+
+    /// Directory overlays resolved from config + env (no CLI flags in TUI mode).
+    /// Resolved once when the git root is determined and applied to `host_settings`
+    /// whenever it is (re-)created.
+    pub resolved_overlays: Vec<crate::overlays::directory::DirectoryOverlay>,
 
     /// Number of scrollback lines for the vt100 parser. Loaded from config before
     /// `start_container` is called; defaults to `crate::config::DEFAULT_SCROLLBACK_LINES`.
@@ -848,6 +861,7 @@ impl TabState {
             last_container_summary: None,
             stats_rx: None,
             host_settings: None,
+            resolved_overlays: Vec::new(),
             terminal_scrollback_lines: crate::config::DEFAULT_SCROLLBACK_LINES,
             terminal_selection_start: None,
             terminal_selection_end: None,
@@ -899,6 +913,49 @@ impl TabState {
             remote_sessions_fetch_rx: None,
             remote_workflow_rx: None,
             remote_command_id: None,
+        }
+    }
+
+    /// Resolve overlays for the given git root (config + env only) and cache them.
+    ///
+    /// No-op if overlays have already been resolved for this tab.
+    /// For commands that also accept `--overlay` flags, call `resolve_and_cache_overlays`
+    /// instead, which always re-resolves including flag values.
+    pub fn resolve_overlays_once(&mut self, git_root: &std::path::Path) -> anyhow::Result<()> {
+        if self.resolved_overlays.is_empty() {
+            self.resolved_overlays = crate::overlays::resolve_overlays(git_root, &[])?;
+        }
+        Ok(())
+    }
+
+    /// Resolve overlays including any per-command `--overlay` flag values and cache them.
+    ///
+    /// Always re-resolves (unlike `resolve_overlays_once`) so that per-command flags
+    /// are incorporated even when overlays were previously cached from an earlier run.
+    /// Returns an error if any flag value is malformed.
+    pub fn resolve_and_cache_overlays(
+        &mut self,
+        git_root: &std::path::Path,
+        raw_overlay_flags: &[String],
+    ) -> anyhow::Result<()> {
+        self.resolved_overlays = crate::overlays::resolve_overlays(git_root, raw_overlay_flags)?;
+        Ok(())
+    }
+
+    /// Apply resolved_overlays to the current host_settings.
+    ///
+    /// Call this after setting `self.host_settings` so overlay mounts are included.
+    pub fn apply_overlays_to_host_settings(&mut self) {
+        if self.resolved_overlays.is_empty() {
+            return;
+        }
+        match self.host_settings.as_mut() {
+            Some(hs) => hs.set_overlays(self.resolved_overlays.clone()),
+            None => {
+                self.host_settings = Some(
+                    HostSettings::overlays_only(self.resolved_overlays.clone()),
+                );
+            }
         }
     }
 

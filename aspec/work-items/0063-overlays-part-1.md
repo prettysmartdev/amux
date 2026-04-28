@@ -277,6 +277,19 @@ Ensure that env var expansion is handled properly (usually by the shell before t
   - Missing host path in overlay logs a warning and does not appear in the Docker args.
   - Overlay flag is forwarded correctly when commands are dispatched through the headless server (verify the child `amux` process receives the correct `-v` args by inspecting the spawned docker command).
 
+- **Parity tests (CLI ↔ TUI ↔ Headless consistency):**
+  - `--overlay "dir(/tmp/ref:/mnt/ref:ro)"` produces identical `-v /tmp/ref:/mnt/ref:ro` Docker args when the command is launched via CLI (`amux implement`), TUI (`implement 42 --overlay "dir(/tmp/ref:/mnt/ref:ro)"`), and headless (via delegated child process). Verify by inspecting the args passed to `DockerRuntime::run_container_pty` / `run_container_text` in each mode.
+  - `AMUX_OVERLAYS` env var is respected in both CLI and TUI modes: set it in the test environment and confirm the mount appears in Docker run args for all four agent-launching commands in both modes.
+  - A malformed `--overlay` value (`--overlay "notvalid"`) causes a **fatal error** in CLI mode (non-zero exit) and displays an `input_error` in the TUI command bar — the container is never launched in either case.
+  - The `overlay` field in `PendingCommand` survives dialog interruptions: when a command is interrupted by a dialog (e.g., `AgentSetupConfirm` because the Dockerfile is missing, or `WorktreePreCommitWarning`), the `overlay` value present when the command was first entered is re-applied when the command resumes after the dialog resolves. Test this for all four commands (`Implement`, `Chat`, `ExecPrompt`, `ExecWorkflow`) and all relevant dialog types.
+  - Comma-separated overlays in a single TUI `--overlay` value (`--overlay "dir(/a:/b:ro),dir(/c:/d:rw)"`) produce two separate `-v` mounts — equivalent to passing `--overlay dir(/a:/b:ro) --overlay dir(/c:/d:rw)` on the CLI.
+
+- **End-to-end tests (full container launch simulation):**
+  - Run `amux implement 0001 --overlay "dir(/tmp:/mnt/tmp:ro)"` against a test repo and confirm the spawned docker command contains `-v /tmp:/mnt/tmp:ro`.
+  - Run `amux chat --overlay "dir(/tmp:/mnt/tmp:rw)"` and confirm `:rw` appears in the docker args.
+  - Verify permission downgrade: project config sets `:rw` for `/data`, CLI flag sets `:ro` for `/data` — the resulting Docker mount must be `:ro`.
+  - Verify `~` expansion: `--overlay "dir(~/data:/mnt/data:ro)"` expands to the current user's home directory in the `-v` arg.
+
 
 ## Codebase Integration:
 

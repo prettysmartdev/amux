@@ -380,6 +380,220 @@ mod tests {
         );
     }
 
+    // ── Overlay flag parity (work item 0063) ────────────────────────────────
+
+    /// The `--overlay` flag must appear in the flag spec for every command that
+    /// accepts container-mount overlays.  This guarantees TUI autocomplete and
+    /// flag-parsing are in sync with CLI and headless behaviour.
+    #[test]
+    fn overlay_flag_present_in_implement_spec() {
+        use crate::commands::spec::IMPLEMENT_FLAGS;
+        assert!(
+            IMPLEMENT_FLAGS.iter().any(|f| f.name == "overlay" && f.takes_value),
+            "IMPLEMENT_FLAGS must include an `overlay` flag with takes_value=true"
+        );
+    }
+
+    #[test]
+    fn overlay_flag_present_in_chat_spec() {
+        use crate::commands::spec::CHAT_FLAGS;
+        assert!(
+            CHAT_FLAGS.iter().any(|f| f.name == "overlay" && f.takes_value),
+            "CHAT_FLAGS must include an `overlay` flag with takes_value=true"
+        );
+    }
+
+    #[test]
+    fn overlay_flag_present_in_exec_prompt_spec() {
+        use crate::commands::spec::EXEC_PROMPT_FLAGS;
+        assert!(
+            EXEC_PROMPT_FLAGS.iter().any(|f| f.name == "overlay" && f.takes_value),
+            "EXEC_PROMPT_FLAGS must include an `overlay` flag with takes_value=true"
+        );
+    }
+
+    #[test]
+    fn overlay_flag_present_in_exec_workflow_spec() {
+        use crate::commands::spec::EXEC_WORKFLOW_FLAGS;
+        assert!(
+            EXEC_WORKFLOW_FLAGS.iter().any(|f| f.name == "overlay" && f.takes_value),
+            "EXEC_WORKFLOW_FLAGS must include an `overlay` flag with takes_value=true"
+        );
+    }
+
+    /// Malformed `--overlay` values must be a **fatal error** in all modes.
+    /// The parser must return `Err` rather than silently skipping the bad spec.
+    #[test]
+    fn resolve_overlays_rejects_malformed_flag_value() {
+        use crate::overlays::resolve_overlays;
+        use std::path::Path;
+
+        let bad_flags = vec!["not-a-valid-overlay-spec".to_string()];
+        let result = resolve_overlays(Path::new("/tmp"), &bad_flags);
+        assert!(
+            result.is_err(),
+            "resolve_overlays must return Err for malformed overlay flag; got Ok"
+        );
+    }
+
+    /// A well-formed but non-existent overlay host path is silently skipped
+    /// (logged as a warning) rather than returning an error.
+    #[test]
+    fn resolve_overlays_skips_nonexistent_host_path() {
+        use crate::overlays::resolve_overlays;
+        use std::path::Path;
+
+        let flags = vec!["dir(/this/path/cannot/possibly/exist:/container:ro)".to_string()];
+        let result = resolve_overlays(Path::new("/tmp"), &flags);
+        assert!(result.is_ok(), "resolve_overlays must return Ok even when host path does not exist");
+        assert!(
+            result.unwrap().is_empty(),
+            "resolve_overlays must skip overlays whose host path does not exist"
+        );
+    }
+
+    /// A `PendingCommand::Implement` with an overlay round-trips correctly —
+    /// the `overlay` field is preserved when the struct is cloned (as
+    /// `launch_pending_command` clones the command before dispatching).
+    #[test]
+    fn pending_command_implement_overlay_field_survives_clone() {
+        use crate::tui::state::PendingCommand;
+
+        let cmd = PendingCommand::Implement {
+            agent: None,
+            model: None,
+            work_item: 42,
+            non_interactive: false,
+            plan: false,
+            allow_docker: false,
+            workflow: None,
+            worktree: false,
+            mount_ssh: false,
+            yolo: false,
+            auto: false,
+            overlay: Some("dir(/foo:/bar:ro)".to_string()),
+        };
+        let cloned = cmd.clone();
+        assert_eq!(
+            cloned,
+            PendingCommand::Implement {
+                agent: None,
+                model: None,
+                work_item: 42,
+                non_interactive: false,
+                plan: false,
+                allow_docker: false,
+                workflow: None,
+                worktree: false,
+                mount_ssh: false,
+                yolo: false,
+                auto: false,
+                overlay: Some("dir(/foo:/bar:ro)".to_string()),
+            },
+            "overlay field must survive PendingCommand::Implement clone"
+        );
+    }
+
+    /// A `PendingCommand::Chat` with an overlay round-trips correctly.
+    #[test]
+    fn pending_command_chat_overlay_field_survives_clone() {
+        use crate::tui::state::PendingCommand;
+
+        let cmd = PendingCommand::Chat {
+            agent: None,
+            model: None,
+            non_interactive: false,
+            plan: false,
+            allow_docker: false,
+            mount_ssh: false,
+            yolo: false,
+            auto: false,
+            overlay: Some("dir(/host:/container:rw)".to_string()),
+        };
+        let cloned = cmd.clone();
+        assert_eq!(
+            cloned,
+            PendingCommand::Chat {
+                agent: None,
+                model: None,
+                non_interactive: false,
+                plan: false,
+                allow_docker: false,
+                mount_ssh: false,
+                yolo: false,
+                auto: false,
+                overlay: Some("dir(/host:/container:rw)".to_string()),
+            },
+            "overlay field must survive PendingCommand::Chat clone"
+        );
+    }
+
+    /// `PendingCommand::ExecPrompt` overlay field survives clone.
+    #[test]
+    fn pending_command_exec_prompt_overlay_field_survives_clone() {
+        use crate::tui::state::PendingCommand;
+
+        let cmd = PendingCommand::ExecPrompt {
+            prompt: "do something".to_string(),
+            agent: None,
+            model: None,
+            non_interactive: true,
+            plan: false,
+            allow_docker: false,
+            mount_ssh: false,
+            yolo: false,
+            auto: false,
+            overlay: Some("dir(/docs:/docs:ro)".to_string()),
+        };
+        let cloned = cmd.clone();
+        assert_eq!(cloned, cmd, "overlay field must survive PendingCommand::ExecPrompt clone");
+    }
+
+    /// `PendingCommand::ExecWorkflow` overlay field survives clone.
+    #[test]
+    fn pending_command_exec_workflow_overlay_field_survives_clone() {
+        use crate::tui::state::PendingCommand;
+
+        let cmd = PendingCommand::ExecWorkflow {
+            workflow: std::path::PathBuf::from("my-workflow.md"),
+            work_item: None,
+            agent: None,
+            model: None,
+            non_interactive: false,
+            plan: false,
+            allow_docker: false,
+            worktree: false,
+            mount_ssh: false,
+            yolo: false,
+            auto: false,
+            overlay: Some("dir(/src:/src:ro)".to_string()),
+        };
+        let cloned = cmd.clone();
+        assert_eq!(cloned, cmd, "overlay field must survive PendingCommand::ExecWorkflow clone");
+    }
+
+    /// Headless mode delegates implement/chat/exec-prompt/exec-workflow to CLI.
+    /// Since `--overlay` and `AMUX_OVERLAYS` are forwarded via subprocess args
+    /// and env inheritance respectively, headless automatically gets overlay
+    /// support for free when it delegates.
+    #[test]
+    fn headless_overlay_commands_delegate_to_cli() {
+        let overlay_commands = [
+            CommandId::Implement,
+            CommandId::Chat,
+            CommandId::ExecPrompt,
+            CommandId::ExecWorkflow,
+        ];
+        for cmd in overlay_commands {
+            assert_eq!(
+                HeadlessMode::command_support(cmd),
+                ModeSupport::DelegatesToCli,
+                "Headless must delegate {:?} to CLI (so --overlay is inherited automatically)",
+                cmd,
+            );
+        }
+    }
+
     /// Cross-check: commands the TUI marks as Implemented must also appear in
     /// the TUI's execute_command match arms. We verify this indirectly through
     /// the spec::ALL_COMMANDS table — every TUI-implemented command must have
