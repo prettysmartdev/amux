@@ -220,6 +220,117 @@ impl AgentPassthrough for GeminiPassthrough {
     }
 }
 
+// ─── Copilot ────────────────────────────────────────────────────────────────
+
+/// Passthrough for the GitHub Copilot CLI agent.
+///
+/// - **Keychain**: none (copilot does not use the system keychain).
+/// - **Env vars**: `COPILOT_OFFLINE=true` is injected by default to suppress outbound
+///   telemetry in container environments. Auth tokens must be supplied via `envPassthrough`
+///   (`COPILOT_GITHUB_TOKEN` or `GH_TOKEN`). For GitHub Enterprise users, set
+///   `COPILOT_GH_HOST` to override the GitHub hostname (e.g. `github.mycompany.com`).
+/// - **Settings**: no config directory mounting needed. Copilot config lives in
+///   `~/.copilot/settings.json` but contains only UX preferences, not auth tokens.
+///   Auth is entirely token-based via env vars.
+pub struct CopilotPassthrough;
+
+impl AgentPassthrough for CopilotPassthrough {
+    fn extra_env_vars(&self) -> Vec<(String, String)> {
+        // Suppress telemetry and restrict network calls to configured model providers
+        // when running inside a container where outbound Microsoft endpoints may be
+        // unreachable or undesirable.
+        vec![("COPILOT_OFFLINE".to_string(), "true".to_string())]
+    }
+
+    fn prepare_host_settings(&self) -> Option<HostSettings> {
+        None
+    }
+    fn prepare_host_settings_to_dir(&self, _dir: &Path) -> Option<HostSettings> {
+        None
+    }
+}
+
+// ─── Crush ──────────────────────────────────────────────────────────────────
+
+/// Passthrough for the Crush agent (Charmbracelet).
+///
+/// - **Keychain**: none.
+/// - **Env vars**: none hardcoded; auth via envPassthrough (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.).
+/// - **Settings**: no config directory mounting needed. Crush's global config is at
+///   `~/.config/crush/crush.json` but contains provider/model setup, not secrets.
+///   Secrets are API keys passed via env vars.
+pub struct CrushPassthrough;
+
+impl AgentPassthrough for CrushPassthrough {
+    fn prepare_host_settings(&self) -> Option<HostSettings> {
+        None
+    }
+    fn prepare_host_settings_to_dir(&self, _dir: &Path) -> Option<HostSettings> {
+        None
+    }
+}
+
+// ─── Cline ──────────────────────────────────────────────────────────────────
+
+/// Top-level entries in `~/.cline/data/` to exclude from the container copy.
+const CLINE_DATA_DENYLIST: &[&str] = &["tasks", "workspace"];
+
+/// Passthrough for the Cline CLI agent.
+///
+/// - **Keychain**: none (cline does not use the system keychain).
+/// - **Env vars**: none (API keys stored in ~/.cline/data/secrets.json).
+/// - **Settings**: copies `~/.cline/data/` (minus task history and workspace state)
+///   into a temp dir and mounts it at `<container_home>/.cline/data` inside the container.
+///   The mount is read-write (temp copy, not the live host dir).
+///   If `~/.cline/data/` does not exist on the host, creates an empty temp dir and
+///   mounts that instead, so the container starts with no credentials (cline will
+///   prompt for auth on first use).
+///
+/// The initial container path is `/root/.cline/data`, which is remapped by
+/// [`apply_dockerfile_user`] to `/home/<username>/.cline/data` when the
+/// Dockerfile specifies a non-root USER directive (e.g. `USER amux`).
+pub struct ClinePassthrough;
+
+impl AgentPassthrough for ClinePassthrough {
+    fn prepare_host_settings(&self) -> Option<HostSettings> {
+        let home = dirs::home_dir()?;
+        let src = home.join(".cline").join("data");
+        let temp_dir = tempfile::TempDir::new().ok()?;
+        let dst = temp_dir.path().join("cline-data");
+        if src.exists() {
+            crate::runtime::copy_dir_filtered(&src, &dst, CLINE_DATA_DENYLIST).ok()?;
+        } else {
+            std::fs::create_dir_all(&dst).ok()?;
+        }
+        Some(HostSettings::new_agent_dir(
+            Some(temp_dir),
+            "/root".to_string(),
+            // Use /root/ prefix so apply_dockerfile_user remaps this to the correct
+            // container home when the Dockerfile sets USER to a non-root user.
+            Some((dst, "/root/.cline/data".to_string())),
+        ))
+    }
+
+    fn prepare_host_settings_to_dir(&self, dir: &Path) -> Option<HostSettings> {
+        let home = dirs::home_dir()?;
+        let src = home.join(".cline").join("data");
+        std::fs::create_dir_all(dir).ok()?;
+        let dst = dir.join("cline-data");
+        if src.exists() {
+            crate::runtime::copy_dir_filtered(&src, &dst, CLINE_DATA_DENYLIST).ok()?;
+        } else {
+            std::fs::create_dir_all(&dst).ok()?;
+        }
+        Some(HostSettings::new_agent_dir(
+            None,
+            "/root".to_string(),
+            // Use /root/ prefix so apply_dockerfile_user remaps this to the correct
+            // container home when the Dockerfile sets USER to a non-root user.
+            Some((dst, "/root/.cline/data".to_string())),
+        ))
+    }
+}
+
 // ─── Noop ─────────────────────────────────────────────────────────────────────
 
 /// Passthrough for agents with no special auth or settings requirements.
@@ -247,6 +358,9 @@ impl AgentPassthrough for NoopPassthrough {
 /// - `"opencode"` → [`OpencodePassthrough`]
 /// - `"codex"` → [`CodexPassthrough`]
 /// - `"gemini"` → [`GeminiPassthrough`]
+/// - `"copilot"` → [`CopilotPassthrough`]
+/// - `"crush"` → [`CrushPassthrough`]
+/// - `"cline"` → [`ClinePassthrough`]
 /// - Any other agent → [`NoopPassthrough`]
 pub fn passthrough_for_agent(agent: &str) -> Box<dyn AgentPassthrough> {
     match agent {
@@ -254,6 +368,9 @@ pub fn passthrough_for_agent(agent: &str) -> Box<dyn AgentPassthrough> {
         "opencode" => Box::new(OpencodePassthrough),
         "codex" => Box::new(CodexPassthrough),
         "gemini" => Box::new(GeminiPassthrough),
+        "copilot" => Box::new(CopilotPassthrough),
+        "crush" => Box::new(CrushPassthrough),
+        "cline" => Box::new(ClinePassthrough),
         _ => Box::new(NoopPassthrough),
     }
 }
@@ -578,6 +695,185 @@ mod tests {
         assert!(p.prepare_host_settings().is_none());
         assert!(p.keychain_credentials().env_vars.is_empty());
         assert!(p.extra_env_vars().is_empty());
+    }
+
+    // ─── CopilotPassthrough ───────────────────────────────────────────────────
+
+    #[test]
+    fn copilot_passthrough_no_keychain_credentials() {
+        assert!(CopilotPassthrough.keychain_credentials().env_vars.is_empty());
+    }
+
+    #[test]
+    fn copilot_passthrough_extra_env_vars_contains_offline_flag() {
+        // COPILOT_OFFLINE=true must be injected to suppress telemetry in containers.
+        let vars = CopilotPassthrough.extra_env_vars();
+        assert!(
+            vars.contains(&("COPILOT_OFFLINE".to_string(), "true".to_string())),
+            "CopilotPassthrough must inject COPILOT_OFFLINE=true; got: {:?}",
+            vars
+        );
+    }
+
+    #[test]
+    fn copilot_passthrough_prepare_host_settings_returns_none() {
+        assert!(CopilotPassthrough.prepare_host_settings().is_none());
+    }
+
+    #[test]
+    fn copilot_passthrough_prepare_host_settings_to_dir_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        assert!(CopilotPassthrough.prepare_host_settings_to_dir(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn passthrough_for_agent_returns_copilot_impl() {
+        let p = passthrough_for_agent("copilot");
+        assert!(p.keychain_credentials().env_vars.is_empty());
+        // COPILOT_OFFLINE=true must be present in extra_env_vars.
+        assert!(
+            p.extra_env_vars().contains(&("COPILOT_OFFLINE".to_string(), "true".to_string())),
+            "copilot passthrough must inject COPILOT_OFFLINE=true"
+        );
+        // Auth is via envPassthrough; no settings mounting needed.
+        assert!(p.prepare_host_settings().is_none());
+    }
+
+    // ─── CrushPassthrough ─────────────────────────────────────────────────────
+
+    #[test]
+    fn crush_passthrough_no_keychain_credentials() {
+        assert!(CrushPassthrough.keychain_credentials().env_vars.is_empty());
+    }
+
+    #[test]
+    fn crush_passthrough_no_extra_env_vars() {
+        assert!(CrushPassthrough.extra_env_vars().is_empty());
+    }
+
+    #[test]
+    fn crush_passthrough_prepare_host_settings_returns_none() {
+        assert!(CrushPassthrough.prepare_host_settings().is_none());
+    }
+
+    #[test]
+    fn crush_passthrough_prepare_host_settings_to_dir_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        assert!(CrushPassthrough.prepare_host_settings_to_dir(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn passthrough_for_agent_returns_crush_impl() {
+        let p = passthrough_for_agent("crush");
+        assert!(p.keychain_credentials().env_vars.is_empty());
+        assert!(p.extra_env_vars().is_empty());
+        // Auth is via envPassthrough (API keys); no settings mounting needed.
+        assert!(p.prepare_host_settings().is_none());
+    }
+
+    // ─── ClinePassthrough ─────────────────────────────────────────────────────
+
+    #[test]
+    fn cline_passthrough_always_returns_some() {
+        // ClinePassthrough must always return Some — even when ~/.cline/data/ does not exist
+        // it falls back to an empty temp dir so the container gets a clean cline state.
+        let settings = ClinePassthrough.prepare_host_settings();
+        assert!(settings.is_some(), "ClinePassthrough must always return Some");
+    }
+
+    #[test]
+    fn cline_passthrough_settings_contract_mount_claude_files_false() {
+        let settings = ClinePassthrough
+            .prepare_host_settings()
+            .expect("ClinePassthrough must always return Some");
+        assert!(
+            !settings.mount_claude_files,
+            "Cline settings must have mount_claude_files = false"
+        );
+    }
+
+    #[test]
+    fn cline_passthrough_settings_contract_agent_config_dir_path() {
+        // The initial container path uses /root/ prefix so apply_dockerfile_user can
+        // remap it to /home/amux/.cline/data when the Dockerfile sets USER amux.
+        let settings = ClinePassthrough
+            .prepare_host_settings()
+            .expect("ClinePassthrough must always return Some");
+        let (_, container_path) = settings
+            .agent_config_dir
+            .expect("Cline settings must set agent_config_dir");
+        assert_eq!(
+            container_path, "/root/.cline/data",
+            "Container path must use /root/ prefix for apply_dockerfile_user remapping"
+        );
+    }
+
+    #[test]
+    fn cline_passthrough_prepare_to_dir_always_returns_some() {
+        // Same contract as prepare_host_settings but with a caller-supplied stable dir.
+        let tmp = TempDir::new().unwrap();
+        let settings = ClinePassthrough.prepare_host_settings_to_dir(tmp.path());
+        assert!(settings.is_some(), "prepare_host_settings_to_dir must always return Some");
+    }
+
+    #[test]
+    fn cline_passthrough_prepare_to_dir_settings_contract() {
+        let tmp = TempDir::new().unwrap();
+        let settings = ClinePassthrough
+            .prepare_host_settings_to_dir(tmp.path())
+            .expect("prepare_host_settings_to_dir must always return Some");
+        assert!(!settings.mount_claude_files);
+        let (_, container_path) = settings
+            .agent_config_dir
+            .expect("Cline settings must set agent_config_dir");
+        assert_eq!(container_path, "/root/.cline/data");
+    }
+
+    #[test]
+    fn cline_passthrough_copy_excludes_tasks_and_workspace() {
+        use std::io::Write;
+
+        // Build a fake ~/.cline/data source directory with tasks, workspace, and secrets.json.
+        let fake_src = TempDir::new().unwrap();
+        let secrets_file = fake_src.path().join("secrets.json");
+        std::fs::File::create(&secrets_file)
+            .unwrap()
+            .write_all(b"{}")
+            .unwrap();
+        std::fs::create_dir(fake_src.path().join("tasks")).unwrap();
+        std::fs::create_dir(fake_src.path().join("workspace")).unwrap();
+
+        // Copy using the same denylist as ClinePassthrough.
+        let dst_tmp = TempDir::new().unwrap();
+        let dst = dst_tmp.path().join("cline-data");
+        crate::runtime::copy_dir_filtered(fake_src.path(), &dst, CLINE_DATA_DENYLIST).unwrap();
+
+        assert!(dst.join("secrets.json").exists(), "secrets.json must be copied");
+        assert!(!dst.join("tasks").exists(), "tasks must be excluded by denylist");
+        assert!(!dst.join("workspace").exists(), "workspace must be excluded by denylist");
+    }
+
+    #[test]
+    fn cline_data_denylist_contains_tasks_and_workspace() {
+        assert!(
+            CLINE_DATA_DENYLIST.contains(&"tasks"),
+            "denylist must include 'tasks'"
+        );
+        assert!(
+            CLINE_DATA_DENYLIST.contains(&"workspace"),
+            "denylist must include 'workspace'"
+        );
+    }
+
+    #[test]
+    fn passthrough_for_agent_returns_cline_impl() {
+        let p = passthrough_for_agent("cline");
+        assert!(p.keychain_credentials().env_vars.is_empty());
+        assert!(p.extra_env_vars().is_empty());
+        // ClinePassthrough always returns Some (even without ~/.cline/data/).
+        let settings = p.prepare_host_settings();
+        assert!(settings.is_some(), "cline passthrough must always return Some settings");
+        assert!(!settings.unwrap().mount_claude_files);
     }
 
     // ─── envPassthrough: GEMINI_API_KEY injection ─────────────────────────────

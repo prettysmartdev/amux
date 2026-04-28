@@ -27,7 +27,7 @@ This file is created by `amux init` and should be committed to source control. I
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `agent` | string | `"claude"` | Agent to use for this repository: `claude`, `codex`, `opencode`, `maki`, or `gemini` |
+| `agent` | string | `"claude"` | Agent to use for this repository: `claude`, `codex`, `opencode`, `maki`, `gemini`, `copilot`, `crush`, or `cline` |
 | `terminal_scrollback_lines` | integer | `10000` | Number of scrollback lines in the container terminal emulator. Overrides the global value |
 | `yoloDisallowedTools` | string array | `[]` | Tools the agent cannot use when `--yolo` is active. Overrides the global list entirely |
 | `envPassthrough` | string array | `[]` | Host environment variable names to inject into agent containers at launch. Overrides the global list entirely. See [`envPassthrough`](#envpassthrough) |
@@ -63,7 +63,7 @@ Applies to all projects on the machine unless overridden by a per-repo config.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `default_agent` | string | `"claude"` | Default agent when no per-repo agent is configured: `claude`, `codex`, `opencode`, `maki`, or `gemini` |
+| `default_agent` | string | `"claude"` | Default agent when no per-repo agent is configured: `claude`, `codex`, `opencode`, `maki`, `gemini`, `copilot`, `crush`, or `cline` |
 | `terminal_scrollback_lines` | integer | `10000` | Default scrollback lines for all repos unless overridden |
 | `runtime` | string | `"docker"` | Container runtime: `"docker"` or `"apple-containers"` (macOS 26+ only) |
 | `yoloDisallowedTools` | string array | `[]` | Global fallback list of tools forbidden when `--yolo` is active |
@@ -415,6 +415,81 @@ For Vertex AI, include the relevant variables:
 ```
 
 In addition to `envPassthrough`, amux automatically copies `~/.gemini/` (your OAuth token directory) into a temporary directory and mounts it at `/root/.gemini` inside the container. This means that if you've already authenticated gemini on the host (`gemini auth login`), the container picks up your session automatically with no extra config. See [Gemini authentication](02-agent-sessions.md#gemini-authentication) for the full auth details.
+
+### Using copilot with `envPassthrough`
+
+GitHub Copilot CLI authenticates via a GitHub token. There is no config directory to mount — auth is entirely token-based.
+
+**Global config** (`~/.amux/config.json`):
+```json
+{
+  "envPassthrough": ["COPILOT_GITHUB_TOKEN"]
+}
+```
+
+**Per-repo config** (`aspec/.amux.json`):
+```json
+{
+  "agent": "copilot"
+}
+```
+
+`COPILOT_GITHUB_TOKEN` takes highest precedence. Alternatively, `GH_TOKEN` (standard GitHub CLI token) or `GITHUB_TOKEN` (fallback) are also accepted by copilot. For GitHub Enterprise users, add `COPILOT_GH_HOST`:
+
+```json
+{
+  "envPassthrough": ["COPILOT_GITHUB_TOKEN", "COPILOT_GH_HOST"]
+}
+```
+
+The token must have the "Copilot Requests" fine-grained PAT permission, or be a standard GitHub OAuth token from `gh auth token`.
+
+### Using crush with `envPassthrough`
+
+Crush authenticates entirely via provider API keys. Add whichever key(s) match your chosen model provider:
+
+**Global config** (`~/.amux/config.json`):
+```json
+{
+  "envPassthrough": ["ANTHROPIC_API_KEY"]
+}
+```
+
+**Per-repo config** (`aspec/.amux.json`):
+```json
+{
+  "agent": "crush"
+}
+```
+
+Multiple providers can be listed simultaneously — crush selects the appropriate key based on the model chosen:
+
+```json
+{
+  "envPassthrough": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
+}
+```
+
+See [Crush authentication](02-agent-sessions.md#crush-authentication) for the full list of supported provider variables.
+
+### Using cline with `envPassthrough`
+
+Cline stores API keys in `~/.cline/data/secrets.json` (written by `cline auth`). amux automatically copies and mounts this directory into the container — no `envPassthrough` configuration is needed.
+
+**Per-repo config** (`aspec/.amux.json`):
+```json
+{
+  "agent": "cline"
+}
+```
+
+Set up credentials on the host before running amux sessions:
+
+```sh
+cline auth -p anthropic -k <your-api-key> -m claude-sonnet-4-6
+```
+
+amux copies `~/.cline/data/` (excluding task history and workspace state) into a temporary directory and mounts it at `/home/amux/.cline/data` inside the container. If the directory does not exist on the host, an empty directory is mounted and cline will prompt for authentication on first use. See [Cline authentication](02-agent-sessions.md#cline-authentication) for full details.
 
 ### Precedence and deduplication
 

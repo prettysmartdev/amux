@@ -790,6 +790,88 @@ Update the agent configuration section to document:
 - `dockerfile_matches_template` with crush content → returns `true` for `"crush"`, `false` for `"claude"`
 - `dockerfile_matches_template` with cline content → returns `true` for `"cline"`, `false` for `"crush"`
 
+### implement.rs entrypoint tests (`src/commands/implement.rs`)
+
+These tests cover the `amux implement` dispatch path, which is distinct from the chat path tested
+above. `agent_entrypoint` and `agent_entrypoint_non_interactive` are used by both CLI and TUI
+modes for the `amux implement` command; `workflow_step_entrypoint` is used for multi-step workflow
+execution; `append_plan_flags` in implement.rs is a separate function from the one in chat.rs.
+
+#### `agent_entrypoint` (interactive)
+
+- `agent_entrypoint("copilot", "fix bug in foo.rs", false)` → `["copilot", "-i", "fix bug in foo.rs"]`
+- `agent_entrypoint("copilot", "fix bug in foo.rs", true)` → `["copilot", "-i", "fix bug in foo.rs", "--plan"]`
+  (plan flag appended after the prompt)
+- `agent_entrypoint("crush", "fix bug in foo.rs", false)` → `["crush", "run", "fix bug in foo.rs"]`
+- `agent_entrypoint("crush", "fix bug in foo.rs", true)` → `["crush", "run", "fix bug in foo.rs"]`
+  (no plan flag for crush; silently skipped)
+- `agent_entrypoint("cline", "fix bug in foo.rs", false)` → `["cline", "task", "fix bug in foo.rs"]`
+- `agent_entrypoint("cline", "fix bug in foo.rs", true)` → `["cline", "task", "fix bug in foo.rs", "--plan"]`
+
+#### `agent_entrypoint_non_interactive`
+
+- `agent_entrypoint_non_interactive("copilot", "fix bug in foo.rs", false)` → `["copilot", "-p", "-i", "fix bug in foo.rs"]`
+- `agent_entrypoint_non_interactive("copilot", "fix bug in foo.rs", true)` → `["copilot", "-p", "-i", "fix bug in foo.rs", "--plan"]`
+- `agent_entrypoint_non_interactive("crush", "fix bug in foo.rs", false)` → `["crush", "run", "fix bug in foo.rs"]`
+- `agent_entrypoint_non_interactive("crush", "fix bug in foo.rs", true)` → `["crush", "run", "fix bug in foo.rs"]`
+  (no plan flag; crush has no plan mode)
+- `agent_entrypoint_non_interactive("cline", "fix bug in foo.rs", false)` → `["cline", "task", "--json", "fix bug in foo.rs"]`
+- `agent_entrypoint_non_interactive("cline", "fix bug in foo.rs", true)` → `["cline", "task", "--json", "fix bug in foo.rs", "--plan"]`
+
+#### `workflow_step_entrypoint`
+
+- `workflow_step_entrypoint("copilot", "step prompt", true)` (non-interactive) → `["copilot", "-p", "-i", "step prompt"]`
+- `workflow_step_entrypoint("copilot", "step prompt", false)` (interactive) → `["copilot", "-i", "step prompt"]`
+- `workflow_step_entrypoint("crush", "step prompt", true)` → `["crush", "run", "step prompt"]`
+- `workflow_step_entrypoint("crush", "step prompt", false)` → `["crush", "run", "step prompt"]`
+  (crush `run` is always non-interactive; both modes produce the same vector)
+- `workflow_step_entrypoint("cline", "step prompt", true)` → `["cline", "task", "--json", "step prompt"]`
+- `workflow_step_entrypoint("cline", "step prompt", false)` → `["cline", "task", "step prompt"]`
+
+#### `append_plan_flags` in `implement.rs`
+
+Note: `implement.rs` has its own `append_plan_flags` separate from the one in `chat.rs`.
+Both must be kept in sync for the new agents.
+
+- `append_plan_flags("copilot", &mut args)` → `args` gains `"--plan"` at end
+- `append_plan_flags("crush", &mut args)` → `args` unchanged (crush has no plan mode)
+- `append_plan_flags("cline", &mut args)` → `args` gains `"--plan"` at end
+- `append_plan_flags("maki", &mut args)` → `args` unchanged (maki has no plan mode; regression guard)
+
+#### ClinePassthrough mount path after `apply_dockerfile_user` remapping
+
+The passthrough spec says the container path uses `/root/.cline/data` as the key, which gets
+remapped by `apply_dockerfile_user` to `/home/amux/.cline/data` because `Dockerfile.cline` sets
+`USER amux`. Verify this remapping chain:
+
+- `ClinePassthrough::prepare_host_settings()` returns `HostSettings` where `agent_config_dir`
+  has destination path `/root/.cline/data`
+- After `apply_dockerfile_user(host_settings, "Dockerfile.cline content with USER amux")`,
+  the destination path becomes `/home/amux/.cline/data`
+- The final Docker `-v` mount maps the temp copy to `/home/amux/.cline/data` inside the container
+
+#### End-to-end entrypoint scenarios
+
+These describe integration-level tests that exercise the full command-building pipeline:
+
+- `amux implement 0001 --agent copilot` → Docker command contains `copilot -i <prompt text>`
+  (interactive, no plan, no yolo)
+- `amux implement 0001 --agent copilot --non-interactive` → Docker command contains
+  `copilot -p -i <prompt text>`
+- `amux implement 0001 --agent copilot --plan` → Docker command contains `copilot -i <prompt text> --plan`
+- `amux implement 0001 --agent crush` → Docker command contains `crush run <prompt text>`
+- `amux implement 0001 --agent crush --plan` → Docker command contains `crush run <prompt text>`
+  (no `--plan`; silently skipped for crush; no error or warning to user)
+- `amux implement 0001 --agent crush --yolo` → Docker command contains `crush --yolo run <prompt text>`
+  (`--yolo` inserted at index 1, before `run`)
+- `amux implement 0001 --agent cline` → Docker command contains `cline task <prompt text>`
+- `amux implement 0001 --agent cline --non-interactive` → Docker command contains
+  `cline task --json <prompt text>`
+- `amux implement 0001 --agent cline --plan` → Docker command contains
+  `cline task <prompt text> --plan`
+- `amux implement 0001 --agent cline --yolo` → Docker command contains
+  `cline task <prompt text> --yolo`
+
 ---
 
 ## Codebase Integration

@@ -15,6 +15,9 @@ static AGENT_DOCKERFILE_URLS: &[(&str, &str)] = &[
     ("opencode",  "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates/Dockerfile.opencode"),
     ("maki",      "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates/Dockerfile.maki"),
     ("gemini",    "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates/Dockerfile.gemini"),
+    ("copilot",   "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates/Dockerfile.copilot"),
+    ("crush",     "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates/Dockerfile.crush"),
+    ("cline",     "https://raw.githubusercontent.com/prettysmartdev/amux/main/templates/Dockerfile.cline"),
 ];
 
 /// Resolves which Docker image tag and Dockerfile path to use for a given agent.
@@ -420,9 +423,18 @@ pub async fn run_agent_with_sink(
 /// session proceeds without the flag rather than aborting.
 pub fn append_model_flag(args: &mut Vec<String>, agent: &str, model: &str) {
     match agent {
-        "claude" | "codex" | "gemini" => {
+        // These agents support --model <name> as a direct CLI flag.
+        // crush supports --model / -m on its `run` subcommand (same syntax).
+        "claude" | "codex" | "gemini" | "cline" | "crush" => {
             args.push("--model".to_string());
             args.push(model.to_string());
+        }
+        // copilot uses /model as an interactive slash command, not a CLI flag.
+        "copilot" => {
+            eprintln!(
+                "WARNING: --model: agent 'copilot' does not support --model as a CLI flag \
+                 (model selection is via the /model interactive command); proceeding without the flag."
+            );
         }
         "opencode" => {
             eprintln!(
@@ -455,15 +467,22 @@ pub fn append_model_flag(args: &mut Vec<String>, agent: &str, model: &str) {
 /// When `yolo` is true:
 /// - Claude: `--dangerously-skip-permissions`
 /// - Gemini: `--yolo` (gemini's own flag; skips all tool-call confirmations)
+/// - Copilot: `--autopilot` (only CLI autonomous mode; no standalone --yolo flag)
+/// - Crush: `--yolo` inserted at index 1 (persistent root flag, must precede `run` subcommand)
+/// - Cline: `--yolo` (skips all tool-call confirmations and implies non-interactive mode)
 /// When `auto` is true (and not yolo):
 /// - Claude: `--permission-mode auto`
 /// - Gemini: `--approval-mode=auto_edit` (auto-approves file edits/writes; prompts for shell tools)
+/// - Copilot: `--autopilot` (no finer-grained auto-edit mode)
+/// - Crush: `--yolo` (no intermediate mode; warning printed)
+/// - Cline: `--auto-approve-all` (keeps interactive mode but auto-approves actions)
 /// Both modes:
 /// - Claude: if disallowed_tools non-empty, `--disallowedTools <t1>,<t2>,...`
 /// - Codex: `--full-auto`; disallowed tools not supported (warning printed)
 /// - Opencode: no equivalent — a warning is printed; disallowed tools not supported
 /// - Maki: `--yolo` (maki's own flag to skip all permission prompts); disallowed tools not supported
 /// - Gemini: disallowed tools not supported (warning printed)
+/// - Copilot, Crush, Cline: disallowed tools not supported (warning printed)
 pub fn append_autonomous_flags(args: &mut Vec<String>, agent: &str, yolo: bool, auto: bool, disallowed_tools: &[String]) {
     if !yolo && !auto {
         return;
@@ -513,6 +532,57 @@ pub fn append_autonomous_flags(args: &mut Vec<String>, agent: &str, yolo: bool, 
             if !disallowed_tools.is_empty() {
                 eprintln!(
                     "WARNING: {}: gemini does not support --disallowedTools; yoloDisallowedTools config will be ignored.",
+                    flag_name
+                );
+            }
+        }
+        "copilot" => {
+            // copilot's only CLI autonomous mode is --autopilot (equivalent to yolo).
+            // There is no CLI-level --yolo flag for copilot; /yolo is an interactive slash command only.
+            // Both amux --yolo and --auto map to --autopilot (copilot has no finer-grained auto-edit mode).
+            args.push("--autopilot".to_string());
+            if !disallowed_tools.is_empty() {
+                eprintln!(
+                    "WARNING: {}: copilot does not support --disallowedTools via CLI flags; \
+                     yoloDisallowedTools config will be ignored.",
+                    flag_name
+                );
+            }
+        }
+        "crush" => {
+            // crush's --yolo is a persistent root flag that MUST precede the `run`
+            // subcommand: `crush --yolo run "prompt"`. Insert at index 1 (after "crush",
+            // before "run") rather than pushing to the end.
+            // Both --yolo and --auto map here because crush has no intermediate mode.
+            args.insert(1, "--yolo".to_string());
+            if !yolo {
+                // --auto was requested; crush has no intermediate mode, so map to --yolo.
+                eprintln!(
+                    "WARNING: {}: crush has no intermediate permission mode; \
+                     mapping --auto to --yolo (crush's only autonomous flag).",
+                    flag_name
+                );
+            }
+            if !disallowed_tools.is_empty() {
+                eprintln!(
+                    "WARNING: {}: crush does not support --disallowedTools; \
+                     yoloDisallowedTools config will be ignored.",
+                    flag_name
+                );
+            }
+        }
+        "cline" => {
+            if yolo {
+                // cline's --yolo skips all tool-call confirmations and implies non-interactive mode.
+                args.push("--yolo".to_string());
+            } else {
+                // --auto maps to --auto-approve-all (keeps interactive mode but auto-approves actions).
+                args.push("--auto-approve-all".to_string());
+            }
+            if !disallowed_tools.is_empty() {
+                eprintln!(
+                    "WARNING: {}: cline does not support --disallowedTools via CLI flags; \
+                     yoloDisallowedTools config will be ignored.",
                     flag_name
                 );
             }
@@ -1123,6 +1193,167 @@ mod tests {
         );
     }
 
+    // --- copilot autonomous flags ---
+
+    #[test]
+    fn append_autonomous_flags_copilot_yolo_adds_autopilot() {
+        let mut args = vec!["copilot".to_string()];
+        append_autonomous_flags(&mut args, "copilot", true, false, &[]);
+        assert!(
+            args.contains(&"--autopilot".to_string()),
+            "copilot must receive --autopilot in yolo mode"
+        );
+        assert!(
+            !args.contains(&"--yolo".to_string()),
+            "copilot must NOT receive --yolo (no such CLI flag for copilot)"
+        );
+    }
+
+    #[test]
+    fn append_autonomous_flags_copilot_auto_adds_autopilot() {
+        // Both --yolo and --auto map to --autopilot for copilot (no finer-grained mode).
+        let mut args = vec!["copilot".to_string()];
+        append_autonomous_flags(&mut args, "copilot", false, true, &[]);
+        assert!(
+            args.contains(&"--autopilot".to_string()),
+            "copilot must receive --autopilot in auto mode"
+        );
+    }
+
+    #[test]
+    fn append_autonomous_flags_copilot_never_adds_disallowed_tools_flag() {
+        // copilot does not support --disallowedTools via CLI flags; the flag must never appear.
+        let mut args = vec!["copilot".to_string()];
+        let tools = vec!["Bash".to_string(), "computer".to_string()];
+        append_autonomous_flags(&mut args, "copilot", true, false, &tools);
+        assert!(
+            !args.contains(&"--disallowedTools".to_string()),
+            "--disallowedTools must never appear for copilot"
+        );
+        assert!(
+            args.contains(&"--autopilot".to_string()),
+            "--autopilot must still be appended despite disallowed_tools warning"
+        );
+    }
+
+    #[test]
+    fn append_autonomous_flags_copilot_yolo_with_disallowed_tools_prints_warning_and_still_adds_autopilot() {
+        // Warning is emitted via eprintln! — verify the code path compiles and does not panic.
+        let mut args = vec!["copilot".to_string()];
+        let tools = vec!["bash".to_string()];
+        append_autonomous_flags(&mut args, "copilot", true, false, &tools);
+        // --autopilot must still be present despite the warning.
+        assert_eq!(args, vec!["copilot", "--autopilot"]);
+    }
+
+    // --- crush autonomous flags ---
+
+    #[test]
+    fn append_autonomous_flags_crush_yolo_inserts_at_index_1() {
+        // --yolo is a persistent root flag that must precede the `run` subcommand.
+        let mut args = vec!["crush".to_string(), "run".to_string()];
+        append_autonomous_flags(&mut args, "crush", true, false, &[]);
+        assert_eq!(args, vec!["crush", "--yolo", "run"]);
+    }
+
+    #[test]
+    fn append_autonomous_flags_crush_yolo_interactive_form() {
+        // Interactive base: just `["crush"]`.
+        let mut args = vec!["crush".to_string()];
+        append_autonomous_flags(&mut args, "crush", true, false, &[]);
+        assert_eq!(args, vec!["crush", "--yolo"]);
+    }
+
+    #[test]
+    fn append_autonomous_flags_crush_yolo_with_prompt_inserts_at_index_1() {
+        // With prompt: `["crush", "run", "prompt"]` → `["crush", "--yolo", "run", "prompt"]`.
+        let mut args = vec!["crush".to_string(), "run".to_string(), "fix bug".to_string()];
+        append_autonomous_flags(&mut args, "crush", true, false, &[]);
+        assert_eq!(args, vec!["crush", "--yolo", "run", "fix bug"]);
+    }
+
+    #[test]
+    fn append_autonomous_flags_crush_auto_inserts_yolo_at_index_1() {
+        // crush has no intermediate mode; --auto maps to --yolo (with a warning).
+        let mut args = vec!["crush".to_string(), "run".to_string()];
+        append_autonomous_flags(&mut args, "crush", false, true, &[]);
+        // --yolo must be inserted at index 1, not pushed to the end.
+        assert_eq!(args, vec!["crush", "--yolo", "run"]);
+    }
+
+    #[test]
+    fn append_autonomous_flags_crush_disallowed_tools_warning_yolo_still_inserted() {
+        // Warning is emitted; --yolo must still be inserted at index 1.
+        let mut args = vec!["crush".to_string(), "run".to_string()];
+        let tools = vec!["bash".to_string()];
+        append_autonomous_flags(&mut args, "crush", true, false, &tools);
+        assert_eq!(
+            args,
+            vec!["crush", "--yolo", "run"],
+            "--yolo must be inserted at index 1 even when disallowed_tools warning is present"
+        );
+        assert!(
+            !args.contains(&"--disallowedTools".to_string()),
+            "--disallowedTools must never appear for crush"
+        );
+    }
+
+    // --- cline autonomous flags ---
+
+    #[test]
+    fn append_autonomous_flags_cline_yolo_appends_yolo_flag() {
+        let mut args = vec!["cline".to_string(), "task".to_string(), "--json".to_string()];
+        append_autonomous_flags(&mut args, "cline", true, false, &[]);
+        assert!(
+            args.contains(&"--yolo".to_string()),
+            "cline must receive --yolo in yolo mode"
+        );
+        assert!(
+            !args.contains(&"--auto-approve-all".to_string()),
+            "--auto-approve-all must NOT appear in yolo mode"
+        );
+    }
+
+    #[test]
+    fn append_autonomous_flags_cline_auto_appends_auto_approve_all() {
+        // --auto maps to --auto-approve-all for cline (keeps interactive mode).
+        let mut args = vec!["cline".to_string(), "task".to_string()];
+        append_autonomous_flags(&mut args, "cline", false, true, &[]);
+        assert!(
+            args.contains(&"--auto-approve-all".to_string()),
+            "cline must receive --auto-approve-all in auto mode"
+        );
+        assert!(
+            !args.contains(&"--yolo".to_string()),
+            "--yolo must NOT appear in auto mode for cline"
+        );
+    }
+
+    #[test]
+    fn append_autonomous_flags_cline_yolo_wins_over_auto() {
+        // When both yolo and auto are true, yolo wins: --yolo appended, not --auto-approve-all.
+        let mut args = vec!["cline".to_string(), "task".to_string()];
+        append_autonomous_flags(&mut args, "cline", true, true, &[]);
+        assert!(args.contains(&"--yolo".to_string()), "--yolo must appear when yolo=true");
+        assert!(
+            !args.contains(&"--auto-approve-all".to_string()),
+            "--auto-approve-all must NOT appear when yolo=true"
+        );
+    }
+
+    #[test]
+    fn append_autonomous_flags_cline_disallowed_tools_no_flag_forwarded() {
+        // cline does not support --disallowedTools; warning emitted but flag never added.
+        let mut args = vec!["cline".to_string(), "task".to_string()];
+        let tools = vec!["Bash".to_string()];
+        append_autonomous_flags(&mut args, "cline", true, false, &tools);
+        assert!(
+            !args.contains(&"--disallowedTools".to_string()),
+            "--disallowedTools must never appear for cline"
+        );
+        assert!(args.contains(&"--yolo".to_string()), "--yolo must still be appended");
+    }
+
     // --- append_model_flag tests (work item 0055) ---
 
     #[test]
@@ -1186,6 +1417,35 @@ mod tests {
             vec!["unknown-bot"],
             "unknown agent must not receive --model"
         );
+    }
+
+    #[test]
+    fn append_model_flag_copilot_does_not_append_flag() {
+        // copilot selects models via the /model interactive slash command, not a CLI flag.
+        // append_model_flag must warn and leave args unchanged.
+        let mut args = vec!["copilot".to_string()];
+        append_model_flag(&mut args, "copilot", "gpt-4o");
+        assert_eq!(
+            args,
+            vec!["copilot"],
+            "copilot must not receive --model (model selection is via /model slash command)"
+        );
+    }
+
+    #[test]
+    fn append_model_flag_crush_appends_model_flag() {
+        // crush supports --model on its `run` subcommand.
+        let mut args = vec!["crush".to_string(), "run".to_string()];
+        append_model_flag(&mut args, "crush", "claude-opus-4-6");
+        assert_eq!(args, vec!["crush", "run", "--model", "claude-opus-4-6"]);
+    }
+
+    #[test]
+    fn append_model_flag_cline_appends_model_flag() {
+        // cline supports --model as a direct CLI flag.
+        let mut args = vec!["cline".to_string(), "task".to_string()];
+        append_model_flag(&mut args, "cline", "claude-opus-4-6");
+        assert_eq!(args, vec!["cline", "task", "--model", "claude-opus-4-6"]);
     }
 
     #[test]

@@ -1,0 +1,14 @@
+FROM {{AMUX_BASE_IMAGE}}
+
+# Install GitHub Copilot CLI via official install script.
+# The script detects platform (linux) and arch (x64/arm64) automatically.
+# Installs to /usr/local/bin/copilot for root users.
+RUN curl -fsSL https://gh.io/copilot-install | bash
+
+# Create non-root user for agent operations
+RUN useradd -m -s /bin/bash amux \
+    && mkdir -p /workspace \
+    && chown amux:amux /workspace
+
+USER amux
+WORKDIR /workspace

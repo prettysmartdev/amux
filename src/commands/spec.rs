@@ -17,7 +17,7 @@ pub struct CommandSpec {
 }
 
 pub static INIT_FLAGS: &[FlagSpec] = &[
-    FlagSpec { name: "agent", takes_value: true,  value_name: "NAME", hint: "agent to install (claude, codex, opencode, maki, gemini)" },
+    FlagSpec { name: "agent", takes_value: true,  value_name: "NAME", hint: "agent to install (claude, codex, opencode, maki, gemini, copilot, crush, cline)" },
     FlagSpec { name: "aspec", takes_value: false, value_name: "",     hint: "download aspec templates to the current project" },
 ];
 

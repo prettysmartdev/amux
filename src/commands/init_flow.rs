@@ -1137,6 +1137,9 @@ pub fn dockerfile_for_agent_embedded(agent: &Agent) -> String {
         Agent::Opencode => include_str!("../../templates/Dockerfile.opencode").to_string(),
         Agent::Maki => include_str!("../../templates/Dockerfile.maki").to_string(),
         Agent::Gemini => include_str!("../../templates/Dockerfile.gemini").to_string(),
+        Agent::Copilot => include_str!("../../templates/Dockerfile.copilot").to_string(),
+        Agent::Crush => include_str!("../../templates/Dockerfile.crush").to_string(),
+        Agent::Cline => include_str!("../../templates/Dockerfile.cline").to_string(),
     }
 }
 
@@ -1584,6 +1587,9 @@ mod tests {
             Agent::Opencode,
             Agent::Maki,
             Agent::Gemini,
+            Agent::Copilot,
+            Agent::Crush,
+            Agent::Cline,
         ] {
             let template = dockerfile_for_agent_embedded(agent);
             let content = template.replace("{{AMUX_BASE_IMAGE}}", &base_tag);
@@ -1614,7 +1620,7 @@ mod tests {
 
     #[test]
     fn dockerfile_for_agent_embedded_uses_base_image_placeholder() {
-        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki, Agent::Gemini] {
+        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki, Agent::Gemini, Agent::Copilot, Agent::Crush, Agent::Cline] {
             let content = dockerfile_for_agent_embedded(agent);
             assert!(
                 content.contains("{{AMUX_BASE_IMAGE}}"),
@@ -1626,7 +1632,11 @@ mod tests {
 
     #[test]
     fn dockerfile_for_agent_embedded_does_not_use_npm_install() {
-        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki] {
+        // Agents that do NOT use npm install as their distribution method.
+        // Agent::Gemini, Agent::Crush, and Agent::Cline are explicitly excluded:
+        // npm install -g is the official distribution method for those agents
+        // (gemini-cli, @charmland/crush, and cline respectively).
+        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki, Agent::Copilot] {
             let content = dockerfile_for_agent_embedded(agent);
             assert!(
                 !content.contains("npm install"),
@@ -1638,7 +1648,7 @@ mod tests {
 
     #[test]
     fn dockerfile_templates_install_via_apt_or_direct_download() {
-        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki, Agent::Gemini] {
+        for agent in &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki, Agent::Gemini, Agent::Copilot, Agent::Crush, Agent::Cline] {
             let content = dockerfile_for_agent_embedded(agent);
             assert!(
                 content.contains("apt-get") || content.contains("curl"),
@@ -1671,6 +1681,77 @@ mod tests {
         assert!(
             content.contains("@google/gemini-cli"),
             "Dockerfile.gemini must install @google/gemini-cli"
+        );
+    }
+
+    #[test]
+    fn dockerfile_for_agent_embedded_uses_debian_slim_base() {
+        // All agent Dockerfiles must use the {{AMUX_BASE_IMAGE}} placeholder, which is
+        // derived from the project base image (itself based on debian:bookworm-slim).
+        // The substitution is verified by agent_dockerfile_embedded_substitution_replaces_placeholder.
+        for agent in &[
+            Agent::Claude,
+            Agent::Codex,
+            Agent::Opencode,
+            Agent::Maki,
+            Agent::Gemini,
+            Agent::Copilot,
+            Agent::Crush,
+            Agent::Cline,
+        ] {
+            let content = dockerfile_for_agent_embedded(agent);
+            assert!(
+                content.contains("{{AMUX_BASE_IMAGE}}"),
+                "{:?} template must use {{AMUX_BASE_IMAGE}} placeholder (derived from debian:bookworm-slim)",
+                agent
+            );
+        }
+    }
+
+    #[test]
+    fn dockerfile_for_agent_embedded_copilot_contains_expected_strings() {
+        let content = dockerfile_for_agent_embedded(&Agent::Copilot);
+        assert!(
+            content.contains("{{AMUX_BASE_IMAGE}}"),
+            "Dockerfile.copilot must use {{AMUX_BASE_IMAGE}} placeholder"
+        );
+        assert!(
+            content.contains("gh.io/copilot-install"),
+            "Dockerfile.copilot must install copilot via the official gh.io/copilot-install script"
+        );
+    }
+
+    #[test]
+    fn dockerfile_for_agent_embedded_crush_contains_expected_strings() {
+        let content = dockerfile_for_agent_embedded(&Agent::Crush);
+        assert!(
+            content.contains("{{AMUX_BASE_IMAGE}}"),
+            "Dockerfile.crush must use {{AMUX_BASE_IMAGE}} placeholder"
+        );
+        assert!(
+            content.contains("nodesource"),
+            "Dockerfile.crush must install Node.js via NodeSource"
+        );
+        assert!(
+            content.contains("@charmland/crush"),
+            "Dockerfile.crush must install @charmland/crush"
+        );
+    }
+
+    #[test]
+    fn dockerfile_for_agent_embedded_cline_contains_expected_strings() {
+        let content = dockerfile_for_agent_embedded(&Agent::Cline);
+        assert!(
+            content.contains("{{AMUX_BASE_IMAGE}}"),
+            "Dockerfile.cline must use {{AMUX_BASE_IMAGE}} placeholder"
+        );
+        assert!(
+            content.contains("nodesource"),
+            "Dockerfile.cline must install Node.js via NodeSource"
+        );
+        assert!(
+            content.contains("npm install -g cline"),
+            "Dockerfile.cline must install cline via npm install -g"
         );
     }
 

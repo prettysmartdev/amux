@@ -141,6 +141,11 @@ pub fn chat_entrypoint(agent: &str, plan: bool) -> Vec<String> {
         "opencode" => vec!["opencode".to_string()],
         "maki" => vec!["maki".to_string()],
         "gemini" => vec!["gemini".to_string()],
+        "copilot" => vec!["copilot".to_string()],
+        "crush" => vec!["crush".to_string()],
+        // cline's interactive entry is via the `task` subcommand (bare `cline` may
+        // enter a different UI mode depending on version; `cline task` is stable).
+        "cline" => vec!["cline".to_string(), "task".to_string()],
         _ => vec![agent.to_string()],
     };
     append_plan_flags(&mut args, agent, plan);
@@ -156,6 +161,14 @@ pub fn chat_entrypoint_non_interactive(agent: &str, plan: bool) -> Vec<String> {
         "maki" => vec!["maki".to_string(), "--print".to_string()],
         // Gemini supports -p / --prompt for headless/non-interactive output.
         "gemini" => vec!["gemini".to_string(), "-p".to_string()],
+        // copilot: -p puts copilot into prompt/non-interactive mode (reads from stdin)
+        "copilot" => vec!["copilot".to_string(), "-p".to_string()],
+        // crush: `crush run` with no additional args; prompt supplied separately via stdin or args
+        "crush" => vec!["crush".to_string(), "run".to_string()],
+        // cline: `cline task --json` triggers non-interactive (structured) output mode
+        // without implying autonomous operation. `--yolo` is added separately by
+        // append_autonomous_flags when the user passes --yolo to amux.
+        "cline" => vec!["cline".to_string(), "task".to_string(), "--json".to_string()],
         _ => vec![agent.to_string()],
     };
     append_plan_flags(&mut args, agent, plan);
@@ -170,6 +183,12 @@ pub fn chat_entrypoint_with_prompt(agent: &str, prompt: &str, plan: bool) -> Vec
         "opencode" => vec!["opencode".to_string(), prompt.to_string()],
         "maki" => vec!["maki".to_string(), "--print".to_string(), prompt.to_string()],
         "gemini" => vec!["gemini".to_string(), "-p".to_string(), prompt.to_string()],
+        // copilot: -p (prompt mode) + -i <prompt> (initial prompt string)
+        "copilot" => vec!["copilot".to_string(), "-p".to_string(), "-i".to_string(), prompt.to_string()],
+        // crush: `crush run "<prompt>"` — prompt is positional argument
+        "crush" => vec!["crush".to_string(), "run".to_string(), prompt.to_string()],
+        // cline: `cline task "<prompt>"` — autonomous flags added separately by append_autonomous_flags
+        "cline" => vec!["cline".to_string(), "task".to_string(), prompt.to_string()],
         _ => vec![agent.to_string(), prompt.to_string()],
     };
     append_plan_flags(&mut args, agent, plan);
@@ -181,8 +200,11 @@ pub fn chat_entrypoint_with_prompt(agent: &str, prompt: &str, plan: bool) -> Vec
 /// - Claude: `--permission-mode plan`
 /// - Codex: `--approval-mode plan`
 /// - Gemini: `--approval-mode=plan`
+/// - Copilot: `--plan`
+/// - Cline: `--plan` (on the `task` subcommand)
 /// - Opencode: no plan mode available (flag is silently ignored)
 /// - Maki: no plan mode available (flag is silently ignored)
+/// - Crush: no plan mode available (flag is silently ignored)
 fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
     if !plan {
         return;
@@ -199,8 +221,18 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
         "gemini" => {
             args.push("--approval-mode=plan".to_string());
         }
+        // copilot: --plan flag starts directly in plan mode
+        "copilot" => {
+            args.push("--plan".to_string());
+        }
+        // cline: --plan flag on the task subcommand
+        "cline" => {
+            args.push("--plan".to_string());
+        }
         // Maki has no plan mode.
         "maki" => {}
+        // Crush has no dedicated plan/read-only mode; silently skip.
+        "crush" => {}
         // Opencode and unknown agents have no plan mode.
         _ => {}
     }
@@ -531,6 +563,124 @@ mod tests {
             entrypoint.contains(&"claude-opus-4-6".to_string()),
             "model name must appear in the constructed entrypoint"
         );
+    }
+
+    // --- copilot entrypoints ---
+
+    #[test]
+    fn chat_entrypoint_copilot() {
+        let args = chat_entrypoint("copilot", false);
+        assert_eq!(args, vec!["copilot"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_copilot_plan() {
+        let args = chat_entrypoint("copilot", true);
+        assert_eq!(args, vec!["copilot", "--plan"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_non_interactive_copilot() {
+        let args = chat_entrypoint_non_interactive("copilot", false);
+        assert_eq!(args, vec!["copilot", "-p"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_non_interactive_copilot_plan() {
+        let args = chat_entrypoint_non_interactive("copilot", true);
+        assert_eq!(args, vec!["copilot", "-p", "--plan"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_with_prompt_copilot() {
+        let args = chat_entrypoint_with_prompt("copilot", "fix bug", false);
+        assert_eq!(args, vec!["copilot", "-p", "-i", "fix bug"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_with_prompt_copilot_plan() {
+        let args = chat_entrypoint_with_prompt("copilot", "fix bug", true);
+        assert_eq!(args, vec!["copilot", "-p", "-i", "fix bug", "--plan"]);
+    }
+
+    // --- crush entrypoints ---
+
+    #[test]
+    fn chat_entrypoint_crush() {
+        let args = chat_entrypoint("crush", false);
+        assert_eq!(args, vec!["crush"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_crush_plan_silently_skipped() {
+        // Crush has no plan mode; the flag is silently ignored.
+        let args = chat_entrypoint("crush", true);
+        assert_eq!(args, vec!["crush"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_non_interactive_crush() {
+        let args = chat_entrypoint_non_interactive("crush", false);
+        assert_eq!(args, vec!["crush", "run"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_non_interactive_crush_plan_skipped() {
+        // Crush has no plan mode; --plan flag is silently ignored.
+        let args = chat_entrypoint_non_interactive("crush", true);
+        assert_eq!(args, vec!["crush", "run"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_with_prompt_crush() {
+        let args = chat_entrypoint_with_prompt("crush", "fix bug", false);
+        assert_eq!(args, vec!["crush", "run", "fix bug"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_with_prompt_crush_plan_skipped() {
+        // Crush has no plan mode; --plan flag is silently ignored.
+        let args = chat_entrypoint_with_prompt("crush", "fix bug", true);
+        assert_eq!(args, vec!["crush", "run", "fix bug"]);
+    }
+
+    // --- cline entrypoints ---
+
+    #[test]
+    fn chat_entrypoint_cline() {
+        let args = chat_entrypoint("cline", false);
+        assert_eq!(args, vec!["cline", "task"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_cline_plan() {
+        let args = chat_entrypoint("cline", true);
+        assert_eq!(args, vec!["cline", "task", "--plan"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_non_interactive_cline() {
+        let args = chat_entrypoint_non_interactive("cline", false);
+        assert_eq!(args, vec!["cline", "task", "--json"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_non_interactive_cline_plan() {
+        let args = chat_entrypoint_non_interactive("cline", true);
+        assert_eq!(args, vec!["cline", "task", "--json", "--plan"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_with_prompt_cline() {
+        // No --yolo for explicit-prompt path; autonomous flags appended separately.
+        let args = chat_entrypoint_with_prompt("cline", "fix bug", false);
+        assert_eq!(args, vec!["cline", "task", "fix bug"]);
+    }
+
+    #[test]
+    fn chat_entrypoint_with_prompt_cline_plan() {
+        let args = chat_entrypoint_with_prompt("cline", "fix bug", true);
+        assert_eq!(args, vec!["cline", "task", "fix bug", "--plan"]);
     }
 
     /// When no `--model` is given, the entrypoint contains no `--model` flag.

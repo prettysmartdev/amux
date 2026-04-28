@@ -1,6 +1,6 @@
 # Agent Sessions
 
-An agent session is a Docker container running your configured AI agent (Claude Code, Codex, OpenCode, Maki, or Gemini) against your project. amux handles starting the container, injecting your credentials, and connecting your terminal to the agent's input/output.
+An agent session is a Docker container running your configured AI agent (Claude Code, Codex, OpenCode, Maki, Gemini, GitHub Copilot CLI, Crush, or Cline) against your project. amux handles starting the container, injecting your credentials, and connecting your terminal to the agent's input/output.
 
 There are two session types: **freeform chat** and **work item implementation**.
 
@@ -44,17 +44,17 @@ After the agent launches, you can interact with it directly — add follow-up in
 
 ### `--agent <name>`
 
-Override the configured agent for this session. Available agents: `claude`, `codex`, `opencode`, `maki`, `gemini`.
+Override the configured agent for this session. Available agents: `claude`, `codex`, `opencode`, `maki`, `gemini`, `copilot`, `crush`, `cline`.
 
 ```sh
 # CLI
 amux chat --agent codex               # launch a Codex session for this project
 amux implement 0050 --agent gemini    # implement with Gemini instead of the configured agent
-amux chat --agent=codex               # --flag=value form is also accepted
+amux chat --agent=copilot             # --flag=value form is also accepted
 
 # TUI command box
-chat --agent codex
-implement 0042 --agent=opencode
+chat --agent crush
+implement 0042 --agent=cline
 ```
 
 Both `--agent NAME` and `--agent=NAME` forms are accepted in both the CLI and the TUI command box. The TUI command box honours the flag and passes the correct agent to the container — it is not silently ignored.
@@ -66,7 +66,7 @@ If the agent image does not yet exist, amux offers to download the template and 
 Passing an unknown agent name exits immediately with a list of valid options:
 
 ```
-error: unknown agent "foo"; available agents: claude, codex, opencode, maki, gemini
+error: unknown agent "foo"; available agents: claude, codex, opencode, maki, gemini, copilot, crush, cline
 ```
 
 ### `--model <NAME>`
@@ -97,8 +97,11 @@ Per-agent translation:
 | `gemini` | `--model <NAME>` |
 | `opencode` | `--model <NAME>` |
 | `maki` | `--model <NAME>` |
+| `copilot` | *(not supported — a `WARNING:` is printed, flag omitted)* |
+| `crush` | `--model <NAME>` (on the `run` subcommand) |
+| `cline` | `--model <NAME>` (on the `task` subcommand) |
 
-If an agent does not support `--model`, a `WARNING:` is printed to stderr and the session launches without the flag — it is not aborted.
+If an agent does not support `--model`, a `WARNING:` is printed to stderr and the session launches without the flag — it is not aborted. GitHub Copilot CLI selects models via the `/model` interactive slash command rather than a CLI flag, so `--model` is silently dropped for copilot sessions.
 
 `--model` can be combined freely with `--agent`, `--yolo`, `--auto`, and all other flags. When used with `--workflow` on `implement`, the flag value acts as the default model for every workflow step that does not define its own `Model:` field. See [Per-step model overrides](04-workflows.md#per-step-model-overrides).
 
@@ -113,6 +116,9 @@ Run the agent in print/batch mode — no interactivity required. The agent execu
 | OpenCode | `run` subcommand |
 | Maki | `--print` |
 | Gemini | `-p` (`--prompt`) |
+| Copilot | `-p` (prompt mode — reads from stdin, suppresses interactive prompts, exits when done) |
+| Crush | `run` subcommand (`crush run` streams output and exits) |
+| Cline | `--json` on the `task` subcommand (triggers non-interactive structured output) |
 
 Useful for CI pipelines, scripting, or when you want the output captured rather than live.
 
@@ -127,6 +133,9 @@ Run the agent in read-only mode — it can analyse the codebase and suggest chan
 | OpenCode | Not supported (flag is silently ignored) |
 | Maki | Not supported (flag is silently ignored) |
 | Gemini | `--approval-mode=plan` |
+| Copilot | `--plan` |
+| Crush | Not supported (flag is silently ignored) |
+| Cline | `--plan` (on the `task` subcommand) |
 
 `--plan` can be combined with `--non-interactive`.
 
@@ -153,6 +162,9 @@ Enable intermediate autonomous operation — the agent auto-approves file edits 
 | `opencode` | *(no equivalent — a warning is printed, flag omitted)* |
 | `maki` | `--yolo` (maki's own flag) |
 | `gemini` | `--approval-mode=auto_edit` |
+| `copilot` | `--autopilot` (copilot's only CLI autonomous mode — same flag as `--yolo`) |
+| `crush` | `--yolo` (crush's only autonomous flag — same as `--yolo`; a warning is printed that no intermediate mode exists) |
+| `cline` | `--auto-approve-all` (auto-approves actions while keeping interactive mode) |
 
 `--auto` applies `yoloDisallowedTools` config the same way `--yolo` does. Combined with `--workflow`, it implies `--worktree` but does **not** auto-advance stuck workflow steps.
 
@@ -235,15 +247,18 @@ amux automatically passes your agent's credentials into the container — you ne
 
 For Claude Code, amux reads the OAuth token from the macOS Keychain (service: `Claude Code-credentials`) and passes it into the container as the `CLAUDE_CODE_OAUTH_TOKEN` environment variable. Credentials are never mounted as files, and the token value is masked (`***`) in all displayed Docker commands.
 
-| Agent | Env var | Keychain service (macOS) |
-|-------|---------|--------------------------|
-| `claude` | `CLAUDE_CODE_OAUTH_TOKEN` | `Claude Code-credentials` |
-| `codex` | — | — |
-| `opencode` | — | — |
-| `maki` | via `envPassthrough` | — |
-| `gemini` | via `envPassthrough` or `~/.gemini/` mount | — |
+| Agent | Auth mechanism |
+|-------|---------------|
+| `claude` | OAuth token read from macOS Keychain (`Claude Code-credentials`), injected as `CLAUDE_CODE_OAUTH_TOKEN` |
+| `codex` | — |
+| `opencode` | — |
+| `maki` | API key via `envPassthrough` |
+| `gemini` | API key via `envPassthrough` and/or `~/.gemini/` OAuth directory mount |
+| `copilot` | GitHub token via `envPassthrough` (`COPILOT_GITHUB_TOKEN` or `GH_TOKEN`) |
+| `crush` | Provider API key(s) via `envPassthrough` |
+| `cline` | `~/.cline/data/` directory mount (contains `secrets.json` with API keys) |
 
-Maki and Gemini authenticate via API keys or OAuth tokens passed from your host environment. See [Configuration](07-configuration.md#envpassthrough) for details and [Gemini authentication](#gemini-authentication) below for the full Gemini auth options.
+Maki, Gemini, Copilot, and Crush authenticate via API keys passed from your host environment using `envPassthrough`. Cline uses a directory mount. See [Configuration](07-configuration.md#envpassthrough) for details, [Gemini authentication](#gemini-authentication) for the full Gemini auth options, and [Copilot authentication](#copilot-authentication), [Crush authentication](#crush-authentication), and [Cline authentication](#cline-authentication) below for the new agents.
 
 ### Host settings injection
 
@@ -298,6 +313,82 @@ When both an API key env var and OAuth tokens are present, Gemini uses the API k
 
 ---
 
+## Copilot authentication
+
+GitHub Copilot CLI authenticates entirely via a GitHub token — there is no OAuth config directory to mount. Set your token in `envPassthrough`:
+
+```json
+{ "envPassthrough": ["COPILOT_GITHUB_TOKEN"] }
+```
+
+Copilot reads the following environment variables in precedence order:
+
+| Variable | Description |
+|----------|-------------|
+| `COPILOT_GITHUB_TOKEN` | Dedicated Copilot token (highest precedence) |
+| `GH_TOKEN` | Standard GitHub CLI token |
+| `GITHUB_TOKEN` | Fallback GitHub token |
+| `COPILOT_GH_HOST` | GitHub Enterprise hostname override |
+
+The token must have the "Copilot Requests" fine-grained PAT permission, or be a standard GitHub OAuth token obtained via `gh auth token`. Values are masked (`***`) in all displayed Docker commands.
+
+For GitHub Enterprise users, add `COPILOT_GH_HOST` alongside the token:
+
+```json
+{ "envPassthrough": ["COPILOT_GITHUB_TOKEN", "COPILOT_GH_HOST"] }
+```
+
+---
+
+## Crush authentication
+
+Crush authenticates entirely via provider API keys passed as environment variables — there is no config directory to mount. Add whichever API key(s) match your chosen provider to `envPassthrough`:
+
+```json
+{ "envPassthrough": ["ANTHROPIC_API_KEY"] }
+```
+
+Supported Crush auth environment variables:
+
+| Variable | Provider |
+|----------|---------|
+| `ANTHROPIC_API_KEY` | Anthropic Claude |
+| `OPENAI_API_KEY` | OpenAI |
+| `GEMINI_API_KEY`, `GOOGLE_API_KEY` | Google Gemini |
+| `GROQ_API_KEY` | Groq |
+| `OPENROUTER_API_KEY` | OpenRouter |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | AWS Bedrock |
+| `AZURE_OPENAI_API_ENDPOINT`, `AZURE_OPENAI_API_KEY` | Azure OpenAI |
+| `VERTEXAI_PROJECT`, `VERTEXAI_LOCATION` | Google Vertex AI |
+
+Only variables present in your host shell are injected — unlisted or unset variables are silently skipped. Values are masked (`***`) in all displayed Docker commands.
+
+Crush's project-local config file (`.crush.json` at the repo root) is automatically available inside the container since the working directory is mounted as `/workspace`. No additional mounts are needed.
+
+---
+
+## Cline authentication
+
+Cline stores API keys in `~/.cline/data/secrets.json` on your host, written there by `cline auth`. amux automatically copies `~/.cline/data/` into a temporary directory and mounts it into the container at `/home/amux/.cline/data`, so the agent picks up your existing credentials without re-running `cline auth` inside every container.
+
+No `envPassthrough` configuration is needed — credentials travel with the directory mount.
+
+If `~/.cline/data/` does not exist on the host (you've never run `cline auth`), amux creates an empty temporary directory and mounts that instead. Cline will prompt for authentication inside the container on first interactive use.
+
+The mount is a copy, not a bind mount — changes the agent makes to its credentials inside the container do not affect the live `~/.cline/data/` on your host. Task history (`tasks/`) and workspace state (`workspace/`) are excluded from the copy; only the config and secrets files are included.
+
+To set up credentials on the host before running amux:
+
+```sh
+# Authenticate with Anthropic (example)
+cline auth -p anthropic -k <your-api-key> -m claude-sonnet-4-6
+
+# Verify credentials were written
+cat ~/.cline/data/secrets.json
+```
+
+---
+
 ## Reference: `amux init`
 
 ```sh
@@ -308,7 +399,7 @@ Initialises the current Git repository for use with amux. See [Getting Started](
 
 | Flag | Values | Default |
 |------|--------|---------|
-| `--agent` | `claude`, `codex`, `opencode`, `maki`, `gemini` | `claude` |
+| `--agent` | `claude`, `codex`, `opencode`, `maki`, `gemini`, `copilot`, `crush`, `cline` | `claude` |
 | `--aspec` | (flag) | off |
 
 `--aspec` downloads the `aspec/` folder from `github.com/prettysmartdev/aspec`, providing spec templates and work item scaffolding. Skipped without the flag.

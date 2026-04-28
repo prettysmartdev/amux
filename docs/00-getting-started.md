@@ -22,7 +22,7 @@ amux uses a two-layer image system that separates your project's build environme
 
 **`Dockerfile.dev`** (at the Git root) is the _project base image_. It defines the OS, language runtimes, build tools, and test dependencies specific to your project — nothing agent-specific. It produces the image `amux-{project}:latest`.
 
-**`.amux/Dockerfile.{agent}`** (in the `.amux/` directory) is the _agent image_. It extends the project base (`FROM amux-{project}:latest`) and installs the AI agent tooling for whichever agent you are using (Claude Code, Codex, OpenCode, Maki, or Gemini). It produces `amux-{project}-{agent}:latest` — the image that actually runs your agent sessions.
+**`.amux/Dockerfile.{agent}`** (in the `.amux/` directory) is the _agent image_. It extends the project base (`FROM amux-{project}:latest`) and installs the AI agent tooling for whichever agent you are using (Claude Code, Codex, OpenCode, Maki, Gemini, GitHub Copilot CLI, Crush, or Cline). It produces `amux-{project}-{agent}:latest` — the image that actually runs your agent sessions.
 
 amux ships templates for both files. The **agent audit** (run via `amux ready --refresh` or during `amux init`) launches an agent to inspect your codebase and updates `Dockerfile.dev` with the exact tools your project needs. Agent dockerfiles are generated from templates maintained by amux and rarely need manual edits.
 
@@ -67,7 +67,7 @@ When you run `amux implement 0001`, amux finds the matching file in the configur
 - **A container runtime** — one of:
   - **Docker** (default, all platforms) — a running Docker daemon ([install Docker](https://docs.docker.com/get-docker/))
   - **Apple Containers** (macOS 26+ only) — Apple's native `container` CLI; no Docker Desktop required
-- **A supported agent** — one of: Claude Code, OpenAI Codex, OpenCode, Maki, or Google Gemini CLI installed and authenticated on your machine
+- **A supported agent** — one of: Claude Code, OpenAI Codex, OpenCode, Maki, Google Gemini CLI, GitHub Copilot CLI, Crush, or Cline installed and authenticated on your machine
 
 ---
 

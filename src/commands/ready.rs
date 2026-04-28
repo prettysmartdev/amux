@@ -236,6 +236,9 @@ pub async fn check_local_agent(agent_name: &str) -> (StepStatus, String, String)
         "opencode" => ("opencode", vec!["run", greeting]),
         "maki" => ("maki", vec!["--print", greeting]),
         "gemini" => ("gemini", vec!["-p", greeting]),
+        "copilot" => ("copilot", vec!["-p", "-i", greeting]),
+        "crush" => ("crush", vec!["run", greeting]),
+        "cline" => ("cline", vec!["task", greeting]),
         _ => (agent_name, vec!["--print", greeting]),
     };
 
@@ -841,6 +844,9 @@ pub fn audit_entrypoint(agent: &str) -> Vec<String> {
         "opencode" => vec!["opencode".into(), "run".into(), AUDIT_PROMPT.into()],
         "maki" => vec!["maki".into(), AUDIT_PROMPT.into()],
         "gemini" => vec!["gemini".into(), AUDIT_PROMPT.into()],
+        "copilot" => vec!["copilot".into(), "-i".into(), AUDIT_PROMPT.into()],
+        "crush" => vec!["crush".into(), "run".into(), AUDIT_PROMPT.into()],
+        "cline" => vec!["cline".into(), "task".into(), AUDIT_PROMPT.into()],
         _ => vec![agent.into(), AUDIT_PROMPT.into()],
     }
 }
@@ -858,6 +864,9 @@ pub fn audit_entrypoint_non_interactive(agent: &str) -> Vec<String> {
         "opencode" => vec!["opencode".into(), "run".into(), AUDIT_PROMPT.into()],
         "maki" => vec!["maki".into(), "--print".into(), AUDIT_PROMPT.into()],
         "gemini" => vec!["gemini".into(), "-p".into(), AUDIT_PROMPT.into()],
+        "copilot" => vec!["copilot".into(), "-p".into(), "-i".into(), AUDIT_PROMPT.into()],
+        "crush" => vec!["crush".into(), "run".into(), AUDIT_PROMPT.into()],
+        "cline" => vec!["cline".into(), "task".into(), "--json".into(), AUDIT_PROMPT.into()],
         _ => vec![agent.into(), AUDIT_PROMPT.into()],
     }
 }
@@ -869,6 +878,9 @@ fn agent_from_str(name: &str) -> Option<Agent> {
         "opencode" => Some(Agent::Opencode),
         "maki" => Some(Agent::Maki),
         "gemini" => Some(Agent::Gemini),
+        "copilot" => Some(Agent::Copilot),
+        "crush" => Some(Agent::Crush),
+        "cline" => Some(Agent::Cline),
         _ => None,
     }
 }
@@ -927,6 +939,9 @@ mod tests {
         assert!(matches!(agent_from_str("opencode"), Some(Agent::Opencode)));
         assert!(matches!(agent_from_str("maki"), Some(Agent::Maki)));
         assert!(matches!(agent_from_str("gemini"), Some(Agent::Gemini)));
+        assert!(matches!(agent_from_str("copilot"), Some(Agent::Copilot)));
+        assert!(matches!(agent_from_str("crush"), Some(Agent::Crush)));
+        assert!(matches!(agent_from_str("cline"), Some(Agent::Cline)));
     }
 
     #[test]
@@ -1117,6 +1132,36 @@ mod tests {
         assert!(
             !dockerfile_matches_template(&content),
             "Codex agent template should not match the project template"
+        );
+    }
+
+    #[test]
+    fn dockerfile_matches_template_copilot_agent_returns_false() {
+        use crate::commands::init_flow::dockerfile_for_agent_embedded;
+        let content = dockerfile_for_agent_embedded(&Agent::Copilot);
+        assert!(
+            !dockerfile_matches_template(&content),
+            "copilot agent Dockerfile must not match the project template"
+        );
+    }
+
+    #[test]
+    fn dockerfile_matches_template_crush_agent_returns_false() {
+        use crate::commands::init_flow::dockerfile_for_agent_embedded;
+        let content = dockerfile_for_agent_embedded(&Agent::Crush);
+        assert!(
+            !dockerfile_matches_template(&content),
+            "crush agent Dockerfile must not match the project template"
+        );
+    }
+
+    #[test]
+    fn dockerfile_matches_template_cline_agent_returns_false() {
+        use crate::commands::init_flow::dockerfile_for_agent_embedded;
+        let content = dockerfile_for_agent_embedded(&Agent::Cline);
+        assert!(
+            !dockerfile_matches_template(&content),
+            "cline agent Dockerfile must not match the project template"
         );
     }
 

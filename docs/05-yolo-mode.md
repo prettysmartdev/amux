@@ -53,6 +53,9 @@ The agent-specific skip-permissions flag is appended to the container entrypoint
 | `opencode` | *(no equivalent — a warning is printed, flag omitted)* |
 | `maki` | `--yolo` |
 | `gemini` | `--yolo` |
+| `copilot` | `--autopilot` (copilot's only CLI autonomous mode) |
+| `crush` | `--yolo` (inserted before the `run` subcommand: `crush --yolo run`) |
+| `cline` | `--yolo` (on the `task` subcommand) |
 
 ### 2. Applies `yoloDisallowedTools`
 
@@ -65,6 +68,9 @@ Any tools listed in `yoloDisallowedTools` in your config are passed to the agent
 | `opencode` | *(no equivalent — a warning is printed)* |
 | `maki` | *(no equivalent — a warning is printed)* |
 | `gemini` | *(no equivalent — a warning is printed)* |
+| `copilot` | *(no equivalent — a warning is printed)* |
+| `crush` | *(no equivalent — a warning is printed)* |
+| `cline` | *(no equivalent — a warning is printed)* |
 
 ### 3. Implies `--worktree` when combined with `--workflow`
 
@@ -185,6 +191,9 @@ See [Configuration](07-configuration.md) for the full config reference.
 | `opencode` | *(no equivalent — warning printed)* |
 | `maki` | `--yolo` (maki's own flag) |
 | `gemini` | `--approval-mode=auto_edit` |
+| `copilot` | `--autopilot` (copilot has no intermediate mode; same flag as `--yolo`) |
+| `crush` | `--yolo` (crush has no intermediate mode; same flag as `--yolo`; a warning is printed) |
+| `cline` | `--auto-approve-all` (auto-approves actions while keeping interactive mode) |
 
 `--auto` applies `yoloDisallowedTools` config identically to `--yolo`. Combined with `--workflow`, it implies `--worktree` but does **not** auto-advance stuck steps (the countdown is `--yolo`-only).
 
@@ -199,6 +208,9 @@ When both `--yolo` and `--auto` are passed, `--yolo` wins.
 - Combine `--yolo` with `--workflow` to get automatic `--worktree` isolation, making it easy to review the full diff before merging into your main branch.
 - `--yolo --workflow` is the recommended pattern for long-running autonomous tasks: isolated branch, structured phases, auto-advancing, easy to discard if the output isn't right.
 - Gemini's `--yolo` flag skips all tool confirmations including shell commands. Gemini's `--approval-mode=auto_edit` (amux `--auto`) is the more conservative choice — file writes are approved automatically but shell operations are not.
+- Copilot maps both `--yolo` and `--auto` to `--autopilot` — there is no intermediate CLI mode. Use `yoloDisallowedTools` config to restrict specific operations if needed (though copilot does not support the flag directly; a warning is printed and the session launches unrestricted).
+- Crush maps both `--yolo` and `--auto` to its `--yolo` flag, which auto-approves all permissions. A warning is printed when `--auto` is used, since crush has no intermediate mode.
+- Cline's `--auto-approve-all` (amux `--auto`) keeps interactive mode while auto-approving actions. Cline's `--yolo` (amux `--yolo`) fully skips confirmations and implies non-interactive operation.
 
 ---
 

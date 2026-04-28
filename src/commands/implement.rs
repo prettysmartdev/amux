@@ -387,6 +387,24 @@ pub fn agent_entrypoint(agent: &str, work_item: u32, plan: bool) -> Vec<String> 
             "gemini".to_string(),
             prompt,
         ],
+        // copilot: -i starts an interactive session with the initial prompt.
+        "copilot" => vec![
+            "copilot".to_string(),
+            "-i".to_string(),
+            prompt,
+        ],
+        // crush: `crush run "<prompt>"` — prompt as positional arg; run is always non-interactive.
+        "crush" => vec![
+            "crush".to_string(),
+            "run".to_string(),
+            prompt,
+        ],
+        // cline: `cline task "<prompt>"` — interactive task with the work-item prompt.
+        "cline" => vec![
+            "cline".to_string(),
+            "task".to_string(),
+            prompt,
+        ],
         _ => vec![
             agent.to_string(),
             prompt,
@@ -426,6 +444,26 @@ pub fn agent_entrypoint_non_interactive(agent: &str, work_item: u32, plan: bool)
             "-p".to_string(),
             prompt,
         ],
+        // copilot: -p (prompt/non-interactive mode) + -i <prompt> (initial prompt string).
+        "copilot" => vec![
+            "copilot".to_string(),
+            "-p".to_string(),
+            "-i".to_string(),
+            prompt,
+        ],
+        // crush: `crush run "<prompt>"` — run is inherently non-interactive; no extra flag needed.
+        "crush" => vec![
+            "crush".to_string(),
+            "run".to_string(),
+            prompt,
+        ],
+        // cline: `cline task --json "<prompt>"` — --json triggers structured/non-interactive output.
+        "cline" => vec![
+            "cline".to_string(),
+            "task".to_string(),
+            "--json".to_string(),
+            prompt,
+        ],
         _ => vec![
             agent.to_string(),
             prompt,
@@ -447,6 +485,16 @@ pub fn workflow_step_entrypoint(agent: &str, prompt: &str, non_interactive: bool
         ("maki", false) => vec!["maki".to_string(), prompt.to_string()],
         ("gemini", true) => vec!["gemini".to_string(), "-p".to_string(), prompt.to_string()],
         ("gemini", false) => vec!["gemini".to_string(), prompt.to_string()],
+        // copilot: -p (prompt/non-interactive mode) + -i <prompt> for non-interactive;
+        //          -i <prompt> only for interactive (user can continue conversation in PTY).
+        ("copilot", true) => vec!["copilot".to_string(), "-p".to_string(), "-i".to_string(), prompt.to_string()],
+        ("copilot", false) => vec!["copilot".to_string(), "-i".to_string(), prompt.to_string()],
+        // crush: `crush run "<prompt>"` for both modes — run is always prompt-driven and non-interactive.
+        ("crush", _) => vec!["crush".to_string(), "run".to_string(), prompt.to_string()],
+        // cline: `cline task --json "<prompt>"` for non-interactive (--json triggers structured output);
+        //        `cline task "<prompt>"` for interactive (cline detects TTY presence automatically).
+        ("cline", true) => vec!["cline".to_string(), "task".to_string(), "--json".to_string(), prompt.to_string()],
+        ("cline", false) => vec!["cline".to_string(), "task".to_string(), prompt.to_string()],
         (a, _) => vec![a.to_string(), prompt.to_string()],
     };
     append_plan_flags(&mut args, agent, plan);
@@ -458,8 +506,11 @@ pub fn workflow_step_entrypoint(agent: &str, prompt: &str, non_interactive: bool
 /// - Claude: `--permission-mode plan`
 /// - Codex: `--approval-mode plan`
 /// - Gemini: `--approval-mode=plan`
+/// - Copilot: `--plan`
+/// - Cline: `--plan` (on the `task` subcommand)
 /// - Opencode: no plan mode available (flag is silently ignored)
 /// - Maki: no plan mode available (flag is silently ignored)
+/// - Crush: no plan mode available (flag is silently ignored)
 fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
     if !plan {
         return;
@@ -476,8 +527,18 @@ fn append_plan_flags(args: &mut Vec<String>, agent: &str, plan: bool) {
         "gemini" => {
             args.push("--approval-mode=plan".to_string());
         }
+        // copilot: --plan flag starts directly in plan mode.
+        "copilot" => {
+            args.push("--plan".to_string());
+        }
+        // cline: --plan flag on the task subcommand enables read-only planning mode.
+        "cline" => {
+            args.push("--plan".to_string());
+        }
         // Maki has no plan mode.
         "maki" => {}
+        // Crush has no dedicated plan/read-only mode; silently skip.
+        "crush" => {}
         // Opencode and unknown agents have no plan mode.
         _ => {}
     }
@@ -1110,6 +1171,197 @@ mod tests {
         assert_eq!(args[0], "gemini");
         assert_eq!(args[1], "-p");
         assert_eq!(args[2], "my prompt");
+    }
+
+    // --- copilot entrypoints ---
+
+    #[test]
+    fn agent_entrypoint_copilot() {
+        let args = agent_entrypoint("copilot", 1, false);
+        assert_eq!(args[0], "copilot");
+        assert_eq!(args[1], "-i");
+        assert!(args[2].contains("work item 0001"));
+    }
+
+    #[test]
+    fn agent_entrypoint_copilot_plan() {
+        // --plan is appended after the prompt for copilot.
+        let args = agent_entrypoint("copilot", 1, true);
+        assert_eq!(args[0], "copilot");
+        assert_eq!(args[1], "-i");
+        assert!(args[2].contains("work item 0001"));
+        assert_eq!(args[3], "--plan");
+    }
+
+    #[test]
+    fn agent_entrypoint_non_interactive_copilot() {
+        let args = agent_entrypoint_non_interactive("copilot", 1, false);
+        assert_eq!(args[0], "copilot");
+        assert_eq!(args[1], "-p");
+        assert_eq!(args[2], "-i");
+        assert!(args[3].contains("work item 0001"));
+    }
+
+    #[test]
+    fn agent_entrypoint_non_interactive_copilot_plan() {
+        let args = agent_entrypoint_non_interactive("copilot", 1, true);
+        assert_eq!(args[0], "copilot");
+        assert_eq!(args[1], "-p");
+        assert_eq!(args[2], "-i");
+        assert!(args[3].contains("work item 0001"));
+        assert_eq!(args[4], "--plan");
+    }
+
+    #[test]
+    fn workflow_step_entrypoint_copilot_non_interactive() {
+        let args = workflow_step_entrypoint("copilot", "step prompt", true, false);
+        assert_eq!(args, vec!["copilot", "-p", "-i", "step prompt"]);
+    }
+
+    #[test]
+    fn workflow_step_entrypoint_copilot_interactive() {
+        let args = workflow_step_entrypoint("copilot", "step prompt", false, false);
+        assert_eq!(args, vec!["copilot", "-i", "step prompt"]);
+    }
+
+    // --- crush entrypoints ---
+
+    #[test]
+    fn agent_entrypoint_crush() {
+        let args = agent_entrypoint("crush", 1, false);
+        assert_eq!(args[0], "crush");
+        assert_eq!(args[1], "run");
+        assert!(args[2].contains("work item 0001"));
+    }
+
+    #[test]
+    fn agent_entrypoint_crush_plan_skipped() {
+        // Crush has no plan mode; flag is silently ignored.
+        let args = agent_entrypoint("crush", 1, true);
+        assert_eq!(args[0], "crush");
+        assert_eq!(args[1], "run");
+        assert!(args[2].contains("work item 0001"));
+        assert_eq!(args.len(), 3, "no --plan flag must be appended for crush");
+    }
+
+    #[test]
+    fn agent_entrypoint_non_interactive_crush() {
+        // crush run is inherently non-interactive; no extra flag needed.
+        let args = agent_entrypoint_non_interactive("crush", 1, false);
+        assert_eq!(args[0], "crush");
+        assert_eq!(args[1], "run");
+        assert!(args[2].contains("work item 0001"));
+    }
+
+    #[test]
+    fn agent_entrypoint_non_interactive_crush_plan_skipped() {
+        // Crush has no plan mode; flag is silently ignored in non-interactive mode too.
+        let args = agent_entrypoint_non_interactive("crush", 1, true);
+        assert_eq!(args[0], "crush");
+        assert_eq!(args[1], "run");
+        assert!(args[2].contains("work item 0001"));
+        assert_eq!(args.len(), 3, "no --plan flag must be appended for crush");
+    }
+
+    #[test]
+    fn workflow_step_entrypoint_crush_non_interactive() {
+        // crush run is always prompt-driven and non-interactive; same for both modes.
+        let args = workflow_step_entrypoint("crush", "step prompt", true, false);
+        assert_eq!(args, vec!["crush", "run", "step prompt"]);
+    }
+
+    #[test]
+    fn workflow_step_entrypoint_crush_interactive() {
+        // crush run is always prompt-driven; interactive mode produces same vector.
+        let args = workflow_step_entrypoint("crush", "step prompt", false, false);
+        assert_eq!(args, vec!["crush", "run", "step prompt"]);
+    }
+
+    // --- cline entrypoints ---
+
+    #[test]
+    fn agent_entrypoint_cline() {
+        let args = agent_entrypoint("cline", 1, false);
+        assert_eq!(args[0], "cline");
+        assert_eq!(args[1], "task");
+        assert!(args[2].contains("work item 0001"));
+    }
+
+    #[test]
+    fn agent_entrypoint_cline_plan() {
+        let args = agent_entrypoint("cline", 1, true);
+        assert_eq!(args[0], "cline");
+        assert_eq!(args[1], "task");
+        assert!(args[2].contains("work item 0001"));
+        assert_eq!(args[3], "--plan");
+    }
+
+    #[test]
+    fn agent_entrypoint_non_interactive_cline() {
+        // --json triggers structured/non-interactive output mode.
+        let args = agent_entrypoint_non_interactive("cline", 1, false);
+        assert_eq!(args[0], "cline");
+        assert_eq!(args[1], "task");
+        assert_eq!(args[2], "--json");
+        assert!(args[3].contains("work item 0001"));
+    }
+
+    #[test]
+    fn agent_entrypoint_non_interactive_cline_plan() {
+        let args = agent_entrypoint_non_interactive("cline", 1, true);
+        assert_eq!(args[0], "cline");
+        assert_eq!(args[1], "task");
+        assert_eq!(args[2], "--json");
+        assert!(args[3].contains("work item 0001"));
+        assert_eq!(args[4], "--plan");
+    }
+
+    #[test]
+    fn workflow_step_entrypoint_cline_non_interactive() {
+        // --json triggers structured output; non-interactive for headless use.
+        let args = workflow_step_entrypoint("cline", "step prompt", true, false);
+        assert_eq!(args, vec!["cline", "task", "--json", "step prompt"]);
+    }
+
+    #[test]
+    fn workflow_step_entrypoint_cline_interactive() {
+        // Interactive: cline detects TTY presence; no --json needed.
+        let args = workflow_step_entrypoint("cline", "step prompt", false, false);
+        assert_eq!(args, vec!["cline", "task", "step prompt"]);
+    }
+
+    // --- append_plan_flags for new agents (regression guards) ---
+
+    #[test]
+    fn append_plan_flags_copilot_appends_plan() {
+        let mut args = vec!["copilot".to_string(), "prompt".to_string()];
+        append_plan_flags(&mut args, "copilot", true);
+        assert!(args.contains(&"--plan".to_string()), "copilot must receive --plan");
+    }
+
+    #[test]
+    fn append_plan_flags_crush_skipped() {
+        // Crush has no plan mode; args must be unchanged.
+        let mut args = vec!["crush".to_string(), "run".to_string(), "prompt".to_string()];
+        let original_len = args.len();
+        append_plan_flags(&mut args, "crush", true);
+        assert_eq!(args.len(), original_len, "no flag must be appended for crush");
+    }
+
+    #[test]
+    fn append_plan_flags_cline_appends_plan() {
+        let mut args = vec!["cline".to_string(), "task".to_string(), "prompt".to_string()];
+        append_plan_flags(&mut args, "cline", true);
+        assert!(args.contains(&"--plan".to_string()), "cline must receive --plan");
+    }
+
+    #[test]
+    fn append_plan_flags_maki_no_plan_regression() {
+        // Maki has no plan mode; regression guard to ensure it remains unchanged.
+        let mut args = vec!["maki".to_string(), "prompt".to_string()];
+        let original_len = args.len();
+        append_plan_flags(&mut args, "maki", true);
+        assert_eq!(args.len(), original_len, "no flag must be appended for maki");
     }
 
     // --- Plan mode tests ---

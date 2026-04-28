@@ -103,7 +103,7 @@ pub enum Command {
 
         /// Agent to use (overrides .amux/config.json). If the agent image does not exist,
         /// amux will offer to download and build it.
-        /// Available agents: claude, codex, opencode, maki, gemini.
+        /// Available agents: claude, codex, opencode, maki, gemini, copilot, crush, cline.
         #[arg(long, value_name = "NAME")]
         agent: Option<String>,
 
@@ -142,7 +142,7 @@ pub enum Command {
 
         /// Agent to use (overrides .amux/config.json). If the agent image does not exist,
         /// amux will offer to download and build it.
-        /// Available agents: claude, codex, opencode, maki, gemini.
+        /// Available agents: claude, codex, opencode, maki, gemini, copilot, crush, cline.
         #[arg(long, value_name = "NAME")]
         agent: Option<String>,
 
@@ -479,6 +479,9 @@ pub enum Agent {
     Opencode,
     Maki,
     Gemini,
+    Copilot,
+    Crush,
+    Cline,
 }
 
 impl Agent {
@@ -489,13 +492,19 @@ impl Agent {
             Agent::Opencode => "opencode",
             Agent::Maki => "maki",
             Agent::Gemini => "gemini",
+            Agent::Copilot => "copilot",
+            Agent::Crush => "crush",
+            Agent::Cline => "cline",
         }
     }
 
     /// All supported agents, in the canonical order used by CLI and TUI alike.
     /// This is the single source of truth — add new agents here only.
     pub fn all() -> &'static [Agent] {
-        &[Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki, Agent::Gemini]
+        &[
+            Agent::Claude, Agent::Codex, Agent::Opencode, Agent::Maki, Agent::Gemini,
+            Agent::Copilot, Agent::Crush, Agent::Cline,
+        ]
     }
 
     pub fn display_name(&self) -> &'static str {
@@ -505,12 +514,15 @@ impl Agent {
             Agent::Opencode => "Opencode",
             Agent::Maki => "Maki",
             Agent::Gemini => "Gemini",
+            Agent::Copilot => "Copilot",
+            Agent::Crush => "Crush",
+            Agent::Cline => "Cline",
         }
     }
 }
 
 /// The canonical list of agent names accepted by `--agent`.
-pub const KNOWN_AGENT_NAMES: &[&str] = &["claude", "codex", "opencode", "maki", "gemini"];
+pub const KNOWN_AGENT_NAMES: &[&str] = &["claude", "codex", "opencode", "maki", "gemini", "copilot", "crush", "cline"];
 
 /// Validate an agent name from `--agent`. Returns `Ok(name)` for known names,
 /// or an error with the list of available agents for unknown names.
