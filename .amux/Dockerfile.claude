@@ -1,0 +1,13 @@
+FROM amux-amux:latest
+
+# Install Claude Code via official standalone installer
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && cp /root/.local/bin/claude /usr/local/bin/claude
+
+# Create non-root user for agent operations
+RUN useradd -m -s /bin/bash amux \
+    && mkdir -p /workspace \
+    && chown amux:amux /workspace
+
+USER amux
+WORKDIR /workspace

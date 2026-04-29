@@ -22,4 +22,4 @@ target
 
 .DS_Store
 .claude/worktrees
-.amux/
+.amux/workflows

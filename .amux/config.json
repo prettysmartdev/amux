@@ -1,0 +1,6 @@
+{
+  "agent": "claude",
+  "envPassthrough": [
+    "GH_TOKEN"
+  ]
+}
