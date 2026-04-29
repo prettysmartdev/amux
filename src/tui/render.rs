@@ -849,6 +849,14 @@ fn draw_dialog(frame: &mut Frame, tab: &TabState, area: Rect) {
         draw_remote_picker(frame, area, " Select Session to Kill ", items, *selected);
         return;
     }
+    if let Dialog::NewWorkflow(state) = &tab.dialog {
+        draw_new_workflow_dialog(frame, area, state);
+        return;
+    }
+    if let Dialog::NewSkill(state) = &tab.dialog {
+        draw_new_skill_dialog(frame, area, state);
+        return;
+    }
 
     let (title, body) = match &tab.dialog {
         Dialog::CloseTabConfirm => (
@@ -1256,6 +1264,9 @@ or n or 2 (or Esc) to cancel.  ".to_string(),
                 dir
             ),
         ),
+        // NewWorkflow and NewSkill have dedicated draw functions handled by the early returns above.
+        Dialog::NewWorkflow(_) => return,
+        Dialog::NewSkill(_) => return,
     };
 
     let popup_width = 72u16.min(area.width.saturating_sub(4));
@@ -1425,6 +1436,214 @@ fn draw_interview_summary_dialog(
         Span::styled("Esc to cancel", Style::default().fg(Color::DarkGray)),
     ]));
     frame.render_widget(footer, footer_area);
+}
+
+fn draw_new_workflow_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    state: &crate::tui::state::NewWorkflowDialogState,
+) {
+    use crate::tui::state::WorkflowField;
+
+    let popup_width = ((area.width as u32 * 80 / 100) as u16).min(90).max(50);
+    let popup_height = ((area.height as u32 * 80 / 100) as u16)
+        .max(20)
+        .min(area.height.saturating_sub(4));
+    let popup = centered_rect(popup_width, popup_height, area);
+    frame.render_widget(Clear, popup);
+
+    let title = if state.interview {
+        " New Workflow — Interview "
+    } else {
+        " New Workflow "
+    };
+    let outer_block = Block::default()
+        .title(title)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = outer_block.inner(popup);
+    frame.render_widget(outer_block, popup);
+
+    if inner.height < 8 {
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    let label = |text: &str, focused: bool| -> Line<'static> {
+        let span = if focused {
+            Span::styled(
+                format!("> {}", text),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!("  {}", text), Style::default().fg(Color::Gray))
+        };
+        Line::from(span)
+    };
+
+    let format_label = match state.format {
+        crate::cli::WorkflowFormat::Toml => "toml",
+        crate::cli::WorkflowFormat::Yaml => "yaml",
+        crate::cli::WorkflowFormat::Md => "md",
+    };
+    let scope_label = if state.global { "global" } else { "repo" };
+    lines.push(Line::from(format!("  {} workflow ({})", scope_label, format_label)));
+    lines.push(Line::from(""));
+
+    // Name field — always shown first in both interview and non-interview modes.
+    lines.push(label(
+        &format!("Name: {}", state.name),
+        state.focused_field == WorkflowField::Name,
+    ));
+
+    if state.interview {
+        lines.push(Line::from(""));
+        lines.push(label("Summary:", state.focused_field == WorkflowField::Summary));
+        lines.push(Line::from(format!("    {}", state.summary)));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  [Tab] next field  [Ctrl-Enter] start interview  [Esc] cancel",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(label(
+            &format!("Title: {}", state.title),
+            state.focused_field == WorkflowField::Title,
+        ));
+        lines.push(Line::from(""));
+        if !state.steps.is_empty() {
+            let names: Vec<String> = state.steps.iter().map(|s| s.name.clone()).collect();
+            lines.push(Line::from(format!("  Steps: {}", names.join(" → "))));
+            lines.push(Line::from(""));
+        }
+        lines.push(label(
+            &format!("Step name: {}", state.step_name),
+            state.focused_field == WorkflowField::StepName,
+        ));
+        lines.push(label(
+            &format!("Agent (optional): {}", state.step_agent),
+            state.focused_field == WorkflowField::StepAgent,
+        ));
+        lines.push(label(
+            &format!("Model (optional): {}", state.step_model),
+            state.focused_field == WorkflowField::StepModel,
+        ));
+        lines.push(label(
+            &format!("Depends-on (csv): {}", state.step_depends_on),
+            state.focused_field == WorkflowField::StepDependsOn,
+        ));
+        lines.push(label(
+            "Prompt:",
+            state.focused_field == WorkflowField::StepPrompt,
+        ));
+        for line in state.step_prompt.split('\n') {
+            lines.push(Line::from(format!("    {}", line)));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  [Tab] next field  [Ctrl-N] add step  [Ctrl-Enter] finish  [Esc] cancel",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    if let Some(err) = &state.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  ⚠ {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(para, inner);
+}
+
+fn draw_new_skill_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    state: &crate::tui::state::NewSkillDialogState,
+) {
+    use crate::tui::state::SkillField;
+
+    let popup_width = ((area.width as u32 * 80 / 100) as u16).min(90).max(50);
+    let popup_height = ((area.height as u32 * 70 / 100) as u16)
+        .max(16)
+        .min(area.height.saturating_sub(4));
+    let popup = centered_rect(popup_width, popup_height, area);
+    frame.render_widget(Clear, popup);
+
+    let title = if state.interview {
+        " New Skill — Interview "
+    } else {
+        " New Skill "
+    };
+    let outer_block = Block::default()
+        .title(title)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = outer_block.inner(popup);
+    frame.render_widget(outer_block, popup);
+
+    if inner.height < 6 {
+        return;
+    }
+
+    let label = |text: &str, focused: bool| -> Line<'static> {
+        let span = if focused {
+            Span::styled(
+                format!("> {}", text),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!("  {}", text), Style::default().fg(Color::Gray))
+        };
+        Line::from(span)
+    };
+
+    let scope_label = if state.global { "global" } else { "repo" };
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(format!("  {} skill", scope_label)));
+    lines.push(Line::from(""));
+    lines.push(label(
+        &format!("Name: {}", state.name),
+        state.focused_field == SkillField::Name,
+    ));
+    lines.push(label(
+        &format!("Description: {}", state.description),
+        state.focused_field == SkillField::Description,
+    ));
+    lines.push(Line::from(""));
+    if state.interview {
+        lines.push(label("Summary:", state.focused_field == SkillField::Summary));
+        for line in state.summary.split('\n') {
+            lines.push(Line::from(format!("    {}", line)));
+        }
+    } else {
+        lines.push(label("Body:", state.focused_field == SkillField::Body));
+        for line in state.body.split('\n') {
+            lines.push(Line::from(format!("    {}", line)));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  [Tab] next field  [Ctrl-Enter] finish  [Esc] cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    if let Some(err) = &state.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  ⚠ {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(para, inner);
 }
 
 fn draw_worktree_commit_prompt(

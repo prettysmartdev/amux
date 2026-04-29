@@ -40,6 +40,12 @@ pub enum CommandId {
     RemoteRun,
     RemoteSessionStart,
     RemoteSessionKill,
+    /// `amux new spec` — alias for `specs new`.
+    NewSpec,
+    /// `amux new workflow` — interactive workflow file creation.
+    NewWorkflow,
+    /// `amux new skill` — interactive skill file creation.
+    NewSkill,
 }
 
 impl CommandId {
@@ -65,6 +71,9 @@ impl CommandId {
         CommandId::RemoteRun,
         CommandId::RemoteSessionStart,
         CommandId::RemoteSessionKill,
+        CommandId::NewSpec,
+        CommandId::NewWorkflow,
+        CommandId::NewSkill,
     ];
 }
 
@@ -130,6 +139,9 @@ impl ModeParity for CliMode {
             CommandId::RemoteRun => ModeSupport::Implemented,
             CommandId::RemoteSessionStart => ModeSupport::Implemented,
             CommandId::RemoteSessionKill => ModeSupport::Implemented,
+            CommandId::NewSpec => ModeSupport::Implemented,
+            CommandId::NewWorkflow => ModeSupport::Implemented,
+            CommandId::NewSkill => ModeSupport::Implemented,
         }
     }
 }
@@ -159,6 +171,10 @@ impl ModeParity for TuiMode {
             CommandId::RemoteRun => ModeSupport::Implemented,
             CommandId::RemoteSessionStart => ModeSupport::Implemented,
             CommandId::RemoteSessionKill => ModeSupport::Implemented,
+            // New artefact creation uses TUI dialogs.
+            CommandId::NewSpec => ModeSupport::Implemented,
+            CommandId::NewWorkflow => ModeSupport::Implemented,
+            CommandId::NewSkill => ModeSupport::Implemented,
         }
     }
 }
@@ -189,6 +205,10 @@ impl ModeParity for HeadlessMode {
             CommandId::RemoteRun => ModeSupport::DelegatesToCli,
             CommandId::RemoteSessionStart => ModeSupport::DelegatesToCli,
             CommandId::RemoteSessionKill => ModeSupport::DelegatesToCli,
+            // New artefact creation is delegated to CLI (requires stdin or PTY).
+            CommandId::NewSpec => ModeSupport::DelegatesToCli,
+            CommandId::NewWorkflow => ModeSupport::DelegatesToCli,
+            CommandId::NewSkill => ModeSupport::DelegatesToCli,
         }
     }
 }
@@ -594,6 +614,71 @@ mod tests {
         }
     }
 
+    // ── New artefact commands (work item 0064) ──────────────────────────────
+
+    #[test]
+    fn command_id_all_includes_new_spec() {
+        assert!(
+            CommandId::ALL.contains(&CommandId::NewSpec),
+            "CommandId::ALL must contain NewSpec; current list: {:?}",
+            CommandId::ALL
+        );
+    }
+
+    #[test]
+    fn command_id_all_includes_new_workflow() {
+        assert!(
+            CommandId::ALL.contains(&CommandId::NewWorkflow),
+            "CommandId::ALL must contain NewWorkflow; current list: {:?}",
+            CommandId::ALL
+        );
+    }
+
+    #[test]
+    fn command_id_all_includes_new_skill() {
+        assert!(
+            CommandId::ALL.contains(&CommandId::NewSkill),
+            "CommandId::ALL must contain NewSkill; current list: {:?}",
+            CommandId::ALL
+        );
+    }
+
+    #[test]
+    fn cli_implements_new_commands() {
+        for cmd in [CommandId::NewSpec, CommandId::NewWorkflow, CommandId::NewSkill] {
+            assert_eq!(
+                CliMode::command_support(cmd),
+                ModeSupport::Implemented,
+                "CLI mode must implement {:?} directly",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn tui_implements_new_commands() {
+        for cmd in [CommandId::NewSpec, CommandId::NewWorkflow, CommandId::NewSkill] {
+            assert_eq!(
+                TuiMode::command_support(cmd),
+                ModeSupport::Implemented,
+                "TUI mode must implement {:?} (dialog-based)",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn headless_delegates_new_commands_to_cli() {
+        for cmd in [CommandId::NewSpec, CommandId::NewWorkflow, CommandId::NewSkill] {
+            assert_eq!(
+                HeadlessMode::command_support(cmd),
+                ModeSupport::DelegatesToCli,
+                "Headless mode must delegate {:?} to CLI subprocess",
+                cmd
+            );
+        }
+    }
+
     /// Cross-check: commands the TUI marks as Implemented must also appear in
     /// the TUI's execute_command match arms. We verify this indirectly through
     /// the spec::ALL_COMMANDS table — every TUI-implemented command must have
@@ -619,6 +704,10 @@ mod tests {
             (CommandId::RemoteRun, &["remote run"]),
             (CommandId::RemoteSessionStart, &["remote session start"]),
             (CommandId::RemoteSessionKill, &["remote session kill"]),
+            // New artefact commands (work item 0064).
+            (CommandId::NewSpec, &["new spec"]),
+            (CommandId::NewWorkflow, &["new workflow"]),
+            (CommandId::NewSkill, &["new skill"]),
         ];
 
         for (cmd, names) in expected_spec_names {

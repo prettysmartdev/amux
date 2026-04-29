@@ -36,6 +36,92 @@ The TUI shows a **workflow status strip** between the execution window and the c
 
 ---
 
+## Creating a workflow file
+
+Use `amux new workflow` to create a workflow file interactively without having to remember the schema by hand.
+
+### Interactive step entry
+
+```sh
+# CLI
+amux new workflow
+
+# TUI command box
+new workflow
+```
+
+Both modes prompt for:
+
+1. **Workflow name** — used as the filename slug (e.g. `my-workflow`). Must contain only letters, digits, hyphens, and underscores.
+2. **Workflow title** — a human-readable label that appears at the top of the file (may differ from the name).
+3. **Steps** — repeat for each step:
+   - Step name (required)
+   - Agent (optional — press Enter to skip)
+   - Model (optional — press Enter to skip)
+   - Depends-on (optional — comma-separated step names, press Enter to skip)
+   - Prompt text — enter multiple lines and end with a line containing only `.`
+
+After each step you are asked whether to add another. When finished, amux writes the file and prints its path.
+
+**TUI key bindings** (workflow dialog):
+
+| Key | Action |
+|-----|--------|
+| **Tab** / **Shift-Tab** | Cycle through fields |
+| **Ctrl-N** | Commit the current step and start a new one |
+| **Ctrl-Enter** | Finish — write the file and close the dialog |
+| **Esc** | Cancel without writing |
+
+By default amux writes to `aspec/workflows/<name>.toml` inside the current repo. Pass `--format` to choose a different format:
+
+```sh
+amux new workflow --format yaml   # writes aspec/workflows/<name>.yaml
+amux new workflow --format md     # writes aspec/workflows/<name>.md
+```
+
+### Interview mode
+
+```sh
+amux new workflow --interview
+```
+
+Enter a one-paragraph summary of what the workflow should accomplish. A code agent writes the complete workflow file for you — filling in step names, dependencies, agents, models, and detailed prompts — the same way `specs new --interview` writes a work item.
+
+In the TUI, the dialog switches to a two-field layout: workflow name and summary. Press **Ctrl-Enter** to start the interview agent.
+
+### Global workflows
+
+```sh
+amux new workflow --global
+```
+
+Writes to `~/.amux/workflows/<name>.<ext>` instead of the current repo. Use this to build a personal library of reusable workflows that travel with you across projects.
+
+`--global` and `--interview` can be combined. When combined, the agent is given access only to the `~/.amux/workflows/` directory — not the whole repo or home directory — so your other files stay safe. This still requires being inside a git repository (for agent image lookup).
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--interview` | Let a code agent complete the workflow from a short summary |
+| `--global` | Write to `~/.amux/workflows/` instead of the current repo |
+| `--format <fmt>` | Output format: `toml` (default), `yaml`, or `md` |
+
+### Edge cases
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Name contains spaces or path separators | Rejected immediately with a descriptive error |
+| Workflow file already exists | Error with the existing path; amux does not overwrite silently |
+| Not inside a git repo (non-global) | Error: run with `--global` to write to `~/.amux/` |
+| `--global --interview` outside a git repo | Error: agent image lookup requires a git repo |
+| Empty step name in TUI | Inline error; dialog stays open |
+| No steps added before Ctrl-Enter (TUI) | Inline error: "At least one step is required" |
+| Step prompt is empty (CLI) | Warning logged; empty prompt written to file |
+| `depends_on` names non-existent steps | Warning logged; file is still written (steps may be added later) |
+
+---
+
 ## Workflow file formats
 
 amux supports three workflow file formats: **Markdown** (`.md`), **TOML** (`.toml`), and **YAML** (`.yml` / `.yaml`). The format is detected automatically from the file extension. All three formats produce identical execution behaviour — you can pass any of them to `--workflow` interchangeably.

@@ -273,6 +273,38 @@ pub fn global_config_path() -> Result<PathBuf> {
     Ok(home.join(".amux").join("config.json"))
 }
 
+/// Resolve the global workflows directory (`~/.amux/workflows/`).
+/// The directory is created with `create_dir_all` if it does not yet exist.
+pub fn global_workflows_dir() -> Result<PathBuf> {
+    let base = if let Ok(home) = std::env::var("AMUX_CONFIG_HOME") {
+        PathBuf::from(home)
+    } else {
+        dirs::home_dir()
+            .context("Cannot determine home directory")?
+            .join(".amux")
+    };
+    let dir = base.join("workflows");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create directory {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Resolve the global skills directory (`~/.amux/skills/`).
+/// The directory is created with `create_dir_all` if it does not yet exist.
+pub fn global_skills_dir() -> Result<PathBuf> {
+    let base = if let Ok(home) = std::env::var("AMUX_CONFIG_HOME") {
+        PathBuf::from(home)
+    } else {
+        dirs::home_dir()
+            .context("Cannot determine home directory")?
+            .join(".amux")
+    };
+    let dir = base.join("skills");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create directory {}", dir.display()))?;
+    Ok(dir)
+}
+
 pub fn load_repo_config(git_root: &Path) -> Result<RepoConfig> {
     let path = repo_config_path(git_root);
     if !path.exists() {

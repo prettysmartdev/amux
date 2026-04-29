@@ -10,6 +10,9 @@ pub mod implement;
 pub mod init;
 pub mod init_flow;
 pub mod new;
+pub mod new_cmd;
+pub mod new_skill;
+pub mod new_workflow;
 pub mod output;
 pub mod parity;
 pub mod ready;
@@ -123,5 +126,6 @@ pub async fn run(mut command: Command, runtime: Arc<dyn crate::runtime::AgentRun
         Command::Config { action } => config::run(action, runtime).await,
         Command::Headless { action } => headless::run(action, runtime).await,
         Command::Remote { action } => remote::run(action).await,
+        Command::New { action } => new_cmd::run(action).await,
     }
 }

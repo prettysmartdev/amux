@@ -64,6 +64,21 @@ pub static SPECS_NEW_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "interview", takes_value: false, value_name: "", hint: "use interview mode" },
 ];
 
+pub static NEW_SPEC_FLAGS: &[FlagSpec] = &[
+    FlagSpec { name: "interview", takes_value: false, value_name: "", hint: "use interview mode" },
+];
+
+pub static NEW_WORKFLOW_FLAGS: &[FlagSpec] = &[
+    FlagSpec { name: "interview", takes_value: false, value_name: "",     hint: "use interview mode" },
+    FlagSpec { name: "global",    takes_value: false, value_name: "",     hint: "write to ~/.amux/workflows/" },
+    FlagSpec { name: "format",    takes_value: true,  value_name: "FMT",  hint: "output format: toml | yaml | md (default: toml)" },
+];
+
+pub static NEW_SKILL_FLAGS: &[FlagSpec] = &[
+    FlagSpec { name: "interview", takes_value: false, value_name: "", hint: "use interview mode" },
+    FlagSpec { name: "global",    takes_value: false, value_name: "", hint: "write to ~/.amux/skills/" },
+];
+
 pub static SPECS_AMEND_FLAGS: &[FlagSpec] = &[
     FlagSpec { name: "non-interactive", takes_value: false, value_name: "", hint: "run without interactive prompt" },
     FlagSpec { name: "allow-docker",    takes_value: false, value_name: "", hint: "allow Docker access" },
@@ -136,6 +151,9 @@ pub static ALL_COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "exec workflow",flags: EXEC_WORKFLOW_FLAGS },
     CommandSpec { name: "specs new",  flags: SPECS_NEW_FLAGS   },
     CommandSpec { name: "specs amend",flags: SPECS_AMEND_FLAGS },
+    CommandSpec { name: "new spec",       flags: NEW_SPEC_FLAGS     },
+    CommandSpec { name: "new workflow",   flags: NEW_WORKFLOW_FLAGS },
+    CommandSpec { name: "new skill",      flags: NEW_SKILL_FLAGS    },
     CommandSpec { name: "headless start", flags: HEADLESS_START_FLAGS },
     CommandSpec { name: "remote run",           flags: REMOTE_RUN_FLAGS           },
     CommandSpec { name: "remote session start", flags: REMOTE_SESSION_START_FLAGS },

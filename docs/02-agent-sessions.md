@@ -211,9 +211,13 @@ Enable fully autonomous operation — the agent skips all permission prompts. Se
 amux specs new
 # or in TUI:
 specs new
+# or using the unified new subcommand:
+amux new spec
 ```
 
 Prompts for a type (Feature, Bug, Task, or Enhancement) and a title, then creates a numbered work item file in the configured work items directory using the project's template.
+
+`amux new spec` is an alias for `amux specs new` — they are identical in behaviour. Use whichever fits your muscle memory.
 
 By default, amux writes to `aspec/work-items/` and uses `aspec/work-items/0000-template.md`. If neither exists, amux auto-discovers any `*template.md` file in the work items directory and prompts you to confirm it. You can also configure the paths explicitly:
 
@@ -226,6 +230,8 @@ If no template is found or confirmed, the new file is created with a minimal stu
 
 ```sh
 amux specs new --interview
+# or:
+amux new spec --interview
 ```
 
 After creating the file, prompts for a brief summary of the work, then launches an agent session to complete the spec — filling in user stories, implementation plan, edge cases, and test plan based on your summary. More thorough specs lead to better implementations.
@@ -239,6 +245,91 @@ amux specs amend 0001
 ```
 
 After implementing a work item, the actual implementation sometimes differs from the original spec. `specs amend` launches the agent to review the code that was written and update the spec to match — adding an "Agent implementation notes" section describing what changed and why. Useful for keeping specs accurate as a long-term reference.
+
+---
+
+## Creating skills
+
+Claude Code skills are reusable instruction files (YAML frontmatter + Markdown) that teach an agent how to perform a specific task when invoked with `/skill-name`. Use `amux new skill` to create one interactively without copying and editing an existing file by hand.
+
+```sh
+# CLI
+amux new skill
+
+# TUI command box
+new skill
+```
+
+Both modes prompt for:
+
+1. **Skill name** — a kebab-case slug used as the filename and as the slash-command trigger (e.g. `run-tests`). Must contain only letters, digits, hyphens, and underscores.
+2. **Description** — a one-line summary shown in the skill picker and in `/help` output.
+3. **Body** — the skill's instruction text. Enter multiple lines and end with a line containing only `.`.
+
+The resulting file is written to `.claude/skills/<name>/SKILL.md` inside the current repo.
+
+### Skill file format
+
+```markdown
+---
+name: run-tests
+description: Run the full test suite and report failures
+---
+
+# Run Tests
+
+Run `make test` and wait for output.
+If tests fail, show the failing test names and exit codes.
+If all tests pass, confirm success and stop.
+```
+
+The `name` field is the skill's slug; the `description` is a single sentence; the body is free-form Markdown written in second-person imperative ("Run …", "Check …", "If … then …").
+
+### Interview mode
+
+```sh
+amux new skill --interview
+```
+
+Enter a brief summary of what the skill should do. A code agent writes the complete skill body for you, following the second-person imperative style and adding any necessary commands, code examples, or decision trees.
+
+In the TUI, the dialog replaces the Body field with a Summary field. Press **Ctrl-Enter** to start the interview agent.
+
+**TUI key bindings** (skill dialog):
+
+| Key | Action |
+|-----|--------|
+| **Tab** / **Shift-Tab** | Cycle through fields |
+| **Ctrl-Enter** | Finish — write the file (or start the interview agent) and close |
+| **Esc** | Cancel without writing |
+
+### Global skills
+
+```sh
+amux new skill --global
+```
+
+Writes to `~/.amux/skills/<name>/SKILL.md` instead of the current repo. Use this to maintain a personal library of skills that travel with you across projects.
+
+`--global` and `--interview` can be combined. When combined, the agent is given access only to the `~/.amux/skills/<name>/` directory — not the whole repo or home directory. This still requires being inside a git repository (for agent image lookup).
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--interview` | Let a code agent complete the skill body from a short summary |
+| `--global` | Write to `~/.amux/skills/<name>/` instead of the current repo |
+
+### Edge cases
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Name contains spaces or path separators | Rejected immediately with a descriptive error |
+| Skill already exists at the destination | Error with the existing path; amux does not overwrite silently |
+| Empty description | Error before any file is written |
+| Not inside a git repo (non-global) | Error: run with `--global` to write to `~/.amux/` |
+| `--global --interview` outside a git repo | Error: agent image lookup requires a git repo |
+| Skill body is empty (CLI) | Warning logged; empty body written to file |
 
 ---
 

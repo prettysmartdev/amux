@@ -32,6 +32,12 @@ pub enum Action {
         work_item_number: u32,
         summary: String,
     },
+    /// `new workflow` dialog: user submitted (Ctrl-Enter). Triggers file write
+    /// and (when `interview`) launches the agent.
+    NewWorkflowSubmitted(crate::tui::state::NewWorkflowDialogState),
+    /// `new skill` dialog: user submitted (Ctrl-Enter). Triggers file write
+    /// and (when `interview`) launches the agent.
+    NewSkillSubmitted(crate::tui::state::NewSkillDialogState),
     /// Claws first-run wizard completed: proceed with launch.
     ClawsReadyProceed,
     /// Claws subsequent run: start the stopped container.
@@ -307,6 +313,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         Dialog::RemoteSessionKillPicker { sessions, selected, remote_addr } => {
             return handle_remote_session_kill_picker(app.active_tab_mut(), key, sessions, selected, remote_addr)
+        }
+        Dialog::NewWorkflow(state) => {
+            return handle_new_workflow(app.active_tab_mut(), key, state);
+        }
+        Dialog::NewSkill(state) => {
+            return handle_new_skill(app.active_tab_mut(), key, state);
         }
         Dialog::None => {}
     }
@@ -2490,6 +2502,420 @@ fn handle_init_work_items_template_input(
     }
 }
 
+// ─── new workflow / new skill dialog handlers ────────────────────────────────
+
+use crate::commands::new_workflow::{validate_artefact_name, WorkflowStepInput};
+use crate::tui::state::{NewSkillDialogState, NewWorkflowDialogState, SkillField, WorkflowField};
+
+/// Insert a character into a single-line text buffer at the cursor position.
+fn insert_char_single(text: &mut String, cursor: &mut usize, c: char) {
+    text.insert(*cursor, c);
+    *cursor += c.len_utf8();
+}
+
+/// Backspace from a single-line text buffer at the cursor position.
+fn backspace_single(text: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let mut start = *cursor - 1;
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    text.remove(start);
+    *cursor = start;
+}
+
+/// Insert a character into a multi-line text buffer at the cursor position.
+fn insert_char_multi(text: &mut String, cursor: &mut usize, c: char) {
+    text.insert(*cursor, c);
+    *cursor += c.len_utf8();
+}
+
+fn backspace_multi(text: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let mut start = *cursor - 1;
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    text.remove(start);
+    *cursor = start;
+}
+
+fn move_cursor_left(text: &str, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    *cursor -= 1;
+    while *cursor > 0 && !text.is_char_boundary(*cursor) {
+        *cursor -= 1;
+    }
+}
+
+fn move_cursor_right(text: &str, cursor: &mut usize) {
+    if *cursor >= text.len() {
+        return;
+    }
+    *cursor += 1;
+    while *cursor < text.len() && !text.is_char_boundary(*cursor) {
+        *cursor += 1;
+    }
+}
+
+fn move_cursor_up_multi(text: &str, cursor: &mut usize) {
+    let before = &text[..*cursor];
+    if let Some(prev_newline) = before.rfind('\n') {
+        let col = *cursor - prev_newline - 1;
+        let line_start = before[..prev_newline].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_len = prev_newline - line_start;
+        *cursor = line_start + col.min(line_len);
+    } else {
+        *cursor = 0;
+    }
+}
+
+fn move_cursor_down_multi(text: &str, cursor: &mut usize) {
+    let before = &text[..*cursor];
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = *cursor - line_start;
+    if let Some(next_newline) = text[*cursor..].find('\n') {
+        let next_line_start = *cursor + next_newline + 1;
+        let next_line_end = text[next_line_start..]
+            .find('\n')
+            .map(|i| next_line_start + i)
+            .unwrap_or(text.len());
+        let next_line_len = next_line_end - next_line_start;
+        *cursor = next_line_start + col.min(next_line_len);
+    } else {
+        *cursor = text.len();
+    }
+}
+
+fn parse_depends_on(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Commit the in-progress step to `state.steps`. Returns false (with `state.error`
+/// populated) when validation fails.
+fn commit_workflow_step(state: &mut NewWorkflowDialogState) -> bool {
+    let name = state.step_name.trim().to_string();
+    if name.is_empty() {
+        state.error = Some("Step name cannot be empty".to_string());
+        return false;
+    }
+    let agent = {
+        let s = state.step_agent.trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    };
+    let model = {
+        let s = state.step_model.trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    };
+    let depends_on = parse_depends_on(&state.step_depends_on);
+    let prompt = state.step_prompt.trim().to_string();
+
+    state.steps.push(WorkflowStepInput {
+        name,
+        agent,
+        model,
+        depends_on,
+        prompt,
+    });
+
+    // Reset step fields, keep title & accumulated steps.
+    state.step_name.clear();
+    state.step_name_cursor = 0;
+    state.step_agent.clear();
+    state.step_agent_cursor = 0;
+    state.step_model.clear();
+    state.step_model_cursor = 0;
+    state.step_depends_on.clear();
+    state.step_depends_on_cursor = 0;
+    state.step_prompt.clear();
+    state.step_prompt_cursor = 0;
+    state.focused_field = WorkflowField::StepName;
+    state.error = None;
+    true
+}
+
+fn handle_new_workflow(
+    tab: &mut TabState,
+    key: KeyEvent,
+    mut state: NewWorkflowDialogState,
+) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    // Esc cancels.
+    if key.code == KeyCode::Esc {
+        tab.dialog = Dialog::None;
+        tab.input_error = Some("Command cancelled.".into());
+        return Action::None;
+    }
+
+    // Ctrl-Enter / Ctrl-S submits the dialog.
+    let is_submit = (key.code == KeyCode::Enter && ctrl)
+        || (key.code == KeyCode::Char('s') && ctrl);
+    if is_submit {
+        if state.name.trim().is_empty() {
+            state.error = Some("Workflow name cannot be empty".to_string());
+            tab.dialog = Dialog::NewWorkflow(state);
+            return Action::None;
+        }
+        if let Err(e) = validate_artefact_name(state.name.trim()) {
+            state.error = Some(e.to_string());
+            tab.dialog = Dialog::NewWorkflow(state);
+            return Action::None;
+        }
+        if state.interview {
+            if state.summary.trim().is_empty() {
+                state.error = Some("Summary cannot be empty".to_string());
+                tab.dialog = Dialog::NewWorkflow(state);
+                return Action::None;
+            }
+            tab.dialog = Dialog::None;
+            return Action::NewWorkflowSubmitted(state);
+        }
+        // Regular: title required, at least one step, attempt to commit current step.
+        if state.title.trim().is_empty() {
+            state.error = Some("Workflow title cannot be empty".to_string());
+            tab.dialog = Dialog::NewWorkflow(state);
+            return Action::None;
+        }
+        if !state.step_name.trim().is_empty() && !commit_workflow_step(&mut state) {
+            tab.dialog = Dialog::NewWorkflow(state);
+            return Action::None;
+        }
+        if state.steps.is_empty() {
+            state.error = Some("At least one step is required".to_string());
+            tab.dialog = Dialog::NewWorkflow(state);
+            return Action::None;
+        }
+        tab.dialog = Dialog::None;
+        return Action::NewWorkflowSubmitted(state);
+    }
+
+    // Ctrl-N commits the current step.
+    if ctrl && key.code == KeyCode::Char('n') {
+        if !state.interview {
+            commit_workflow_step(&mut state);
+        }
+        tab.dialog = Dialog::NewWorkflow(state);
+        return Action::None;
+    }
+
+    // Tab / Shift-Tab cycles fields.
+    if key.code == KeyCode::Tab {
+        if state.interview {
+            // Interview mode: cycle only between Name and Summary.
+            state.focused_field = match state.focused_field {
+                WorkflowField::Name => WorkflowField::Summary,
+                _ => WorkflowField::Name,
+            };
+        } else if shift {
+            state.focused_field = state.focused_field.prev_step();
+        } else {
+            state.focused_field = state.focused_field.next_step();
+        }
+        tab.dialog = Dialog::NewWorkflow(state);
+        return Action::None;
+    }
+    if key.code == KeyCode::BackTab {
+        if state.interview {
+            // Interview mode: cycle backward between Name and Summary.
+            state.focused_field = match state.focused_field {
+                WorkflowField::Summary => WorkflowField::Name,
+                _ => WorkflowField::Summary,
+            };
+        } else {
+            state.focused_field = state.focused_field.prev_step();
+        }
+        tab.dialog = Dialog::NewWorkflow(state);
+        return Action::None;
+    }
+
+    // Field-specific input.
+    match state.focused_field {
+        WorkflowField::Name => match key.code {
+            KeyCode::Char(c) if !ctrl => insert_char_single(&mut state.name, &mut state.name_cursor, c),
+            KeyCode::Backspace => backspace_single(&mut state.name, &mut state.name_cursor),
+            KeyCode::Left => move_cursor_left(&state.name, &mut state.name_cursor),
+            KeyCode::Right => move_cursor_right(&state.name, &mut state.name_cursor),
+            _ => {}
+        },
+        WorkflowField::Title => match key.code {
+            KeyCode::Char(c) if !ctrl => insert_char_single(&mut state.title, &mut state.title_cursor, c),
+            KeyCode::Backspace => backspace_single(&mut state.title, &mut state.title_cursor),
+            KeyCode::Left => move_cursor_left(&state.title, &mut state.title_cursor),
+            KeyCode::Right => move_cursor_right(&state.title, &mut state.title_cursor),
+            _ => {}
+        },
+        WorkflowField::StepName => match key.code {
+            KeyCode::Char(c) if !ctrl => insert_char_single(&mut state.step_name, &mut state.step_name_cursor, c),
+            KeyCode::Backspace => backspace_single(&mut state.step_name, &mut state.step_name_cursor),
+            KeyCode::Left => move_cursor_left(&state.step_name, &mut state.step_name_cursor),
+            KeyCode::Right => move_cursor_right(&state.step_name, &mut state.step_name_cursor),
+            _ => {}
+        },
+        WorkflowField::StepAgent => match key.code {
+            KeyCode::Char(c) if !ctrl => insert_char_single(&mut state.step_agent, &mut state.step_agent_cursor, c),
+            KeyCode::Backspace => backspace_single(&mut state.step_agent, &mut state.step_agent_cursor),
+            KeyCode::Left => move_cursor_left(&state.step_agent, &mut state.step_agent_cursor),
+            KeyCode::Right => move_cursor_right(&state.step_agent, &mut state.step_agent_cursor),
+            _ => {}
+        },
+        WorkflowField::StepModel => match key.code {
+            KeyCode::Char(c) if !ctrl => insert_char_single(&mut state.step_model, &mut state.step_model_cursor, c),
+            KeyCode::Backspace => backspace_single(&mut state.step_model, &mut state.step_model_cursor),
+            KeyCode::Left => move_cursor_left(&state.step_model, &mut state.step_model_cursor),
+            KeyCode::Right => move_cursor_right(&state.step_model, &mut state.step_model_cursor),
+            _ => {}
+        },
+        WorkflowField::StepDependsOn => match key.code {
+            KeyCode::Char(c) if !ctrl => insert_char_single(&mut state.step_depends_on, &mut state.step_depends_on_cursor, c),
+            KeyCode::Backspace => backspace_single(&mut state.step_depends_on, &mut state.step_depends_on_cursor),
+            KeyCode::Left => move_cursor_left(&state.step_depends_on, &mut state.step_depends_on_cursor),
+            KeyCode::Right => move_cursor_right(&state.step_depends_on, &mut state.step_depends_on_cursor),
+            _ => {}
+        },
+        WorkflowField::StepPrompt => match key.code {
+            KeyCode::Enter => insert_char_multi(&mut state.step_prompt, &mut state.step_prompt_cursor, '\n'),
+            KeyCode::Char(c) if !ctrl => insert_char_multi(&mut state.step_prompt, &mut state.step_prompt_cursor, c),
+            KeyCode::Backspace => backspace_multi(&mut state.step_prompt, &mut state.step_prompt_cursor),
+            KeyCode::Left => move_cursor_left(&state.step_prompt, &mut state.step_prompt_cursor),
+            KeyCode::Right => move_cursor_right(&state.step_prompt, &mut state.step_prompt_cursor),
+            KeyCode::Up => move_cursor_up_multi(&state.step_prompt, &mut state.step_prompt_cursor),
+            KeyCode::Down => move_cursor_down_multi(&state.step_prompt, &mut state.step_prompt_cursor),
+            _ => {}
+        },
+        WorkflowField::Summary => match key.code {
+            KeyCode::Enter => insert_char_multi(&mut state.summary, &mut state.summary_cursor, '\n'),
+            KeyCode::Char(c) if !ctrl => insert_char_multi(&mut state.summary, &mut state.summary_cursor, c),
+            KeyCode::Backspace => backspace_multi(&mut state.summary, &mut state.summary_cursor),
+            KeyCode::Left => move_cursor_left(&state.summary, &mut state.summary_cursor),
+            KeyCode::Right => move_cursor_right(&state.summary, &mut state.summary_cursor),
+            KeyCode::Up => move_cursor_up_multi(&state.summary, &mut state.summary_cursor),
+            KeyCode::Down => move_cursor_down_multi(&state.summary, &mut state.summary_cursor),
+            _ => {}
+        },
+    }
+
+    tab.dialog = Dialog::NewWorkflow(state);
+    Action::None
+}
+
+fn handle_new_skill(
+    tab: &mut TabState,
+    key: KeyEvent,
+    mut state: NewSkillDialogState,
+) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    if key.code == KeyCode::Esc {
+        tab.dialog = Dialog::None;
+        tab.input_error = Some("Command cancelled.".into());
+        return Action::None;
+    }
+
+    let is_submit = (key.code == KeyCode::Enter && ctrl)
+        || (key.code == KeyCode::Char('s') && ctrl);
+    if is_submit {
+        if state.name.trim().is_empty() {
+            state.error = Some("Skill name cannot be empty".to_string());
+            tab.dialog = Dialog::NewSkill(state);
+            return Action::None;
+        }
+        if let Err(e) = validate_artefact_name(state.name.trim()) {
+            state.error = Some(e.to_string());
+            tab.dialog = Dialog::NewSkill(state);
+            return Action::None;
+        }
+        if state.description.trim().is_empty() {
+            state.error = Some("Description cannot be empty".to_string());
+            tab.dialog = Dialog::NewSkill(state);
+            return Action::None;
+        }
+        if state.interview && state.summary.trim().is_empty() {
+            state.error = Some("Summary cannot be empty".to_string());
+            tab.dialog = Dialog::NewSkill(state);
+            return Action::None;
+        }
+        tab.dialog = Dialog::None;
+        return Action::NewSkillSubmitted(state);
+    }
+
+    // Tab cycles forward; Shift-Tab / BackTab cycles backward.
+    // Both are fully explicit to handle interview mode correctly.
+    if key.code == KeyCode::Tab && !shift {
+        state.focused_field = match (state.focused_field, state.interview) {
+            (SkillField::Name, _) => SkillField::Description,
+            (SkillField::Description, true) => SkillField::Summary,
+            (SkillField::Description, false) => SkillField::Body,
+            (SkillField::Body, _) => SkillField::Name,
+            (SkillField::Summary, _) => SkillField::Name,
+        };
+        tab.dialog = Dialog::NewSkill(state);
+        return Action::None;
+    }
+    if (key.code == KeyCode::Tab && shift) || key.code == KeyCode::BackTab {
+        state.focused_field = match (state.focused_field, state.interview) {
+            (SkillField::Description, _) => SkillField::Name,
+            (SkillField::Body, _) => SkillField::Description,
+            (SkillField::Summary, _) => SkillField::Description,
+            (SkillField::Name, true) => SkillField::Summary,
+            (SkillField::Name, false) => SkillField::Body,
+        };
+        tab.dialog = Dialog::NewSkill(state);
+        return Action::None;
+    }
+
+    match state.focused_field {
+        SkillField::Name => match key.code {
+            KeyCode::Char(c) if !ctrl => insert_char_single(&mut state.name, &mut state.name_cursor, c),
+            KeyCode::Backspace => backspace_single(&mut state.name, &mut state.name_cursor),
+            KeyCode::Left => move_cursor_left(&state.name, &mut state.name_cursor),
+            KeyCode::Right => move_cursor_right(&state.name, &mut state.name_cursor),
+            _ => {}
+        },
+        SkillField::Description => match key.code {
+            KeyCode::Char(c) if !ctrl => insert_char_single(&mut state.description, &mut state.description_cursor, c),
+            KeyCode::Backspace => backspace_single(&mut state.description, &mut state.description_cursor),
+            KeyCode::Left => move_cursor_left(&state.description, &mut state.description_cursor),
+            KeyCode::Right => move_cursor_right(&state.description, &mut state.description_cursor),
+            _ => {}
+        },
+        SkillField::Body => match key.code {
+            KeyCode::Enter => insert_char_multi(&mut state.body, &mut state.body_cursor, '\n'),
+            KeyCode::Char(c) if !ctrl => insert_char_multi(&mut state.body, &mut state.body_cursor, c),
+            KeyCode::Backspace => backspace_multi(&mut state.body, &mut state.body_cursor),
+            KeyCode::Left => move_cursor_left(&state.body, &mut state.body_cursor),
+            KeyCode::Right => move_cursor_right(&state.body, &mut state.body_cursor),
+            KeyCode::Up => move_cursor_up_multi(&state.body, &mut state.body_cursor),
+            KeyCode::Down => move_cursor_down_multi(&state.body, &mut state.body_cursor),
+            _ => {}
+        },
+        SkillField::Summary => match key.code {
+            KeyCode::Enter => insert_char_multi(&mut state.summary, &mut state.summary_cursor, '\n'),
+            KeyCode::Char(c) if !ctrl => insert_char_multi(&mut state.summary, &mut state.summary_cursor, c),
+            KeyCode::Backspace => backspace_multi(&mut state.summary, &mut state.summary_cursor),
+            KeyCode::Left => move_cursor_left(&state.summary, &mut state.summary_cursor),
+            KeyCode::Right => move_cursor_right(&state.summary, &mut state.summary_cursor),
+            KeyCode::Up => move_cursor_up_multi(&state.summary, &mut state.summary_cursor),
+            KeyCode::Down => move_cursor_down_multi(&state.summary, &mut state.summary_cursor),
+            _ => {}
+        },
+    }
+
+    tab.dialog = Dialog::NewSkill(state);
+    Action::None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3513,5 +3939,393 @@ mod tests {
             matches!(tab.pending_command, PendingCommand::None),
             "Esc must clear pending_command to abort the session start"
         );
+    }
+
+    // ── NewWorkflowDialogState TUI tests ──────────────────────────────────────
+
+    fn new_workflow_state(interview: bool) -> NewWorkflowDialogState {
+        NewWorkflowDialogState::new(
+            String::new(),
+            String::new(),
+            false,
+            crate::cli::WorkflowFormat::Toml,
+            interview,
+        )
+    }
+
+    #[test]
+    fn new_workflow_tab_advances_name_to_title_in_normal_mode() {
+        let mut app = new_app();
+        let state = new_workflow_state(false);
+        assert_eq!(state.focused_field, WorkflowField::Name);
+        app.active_tab_mut().dialog = Dialog::NewWorkflow(state);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+
+        let Dialog::NewWorkflow(s) = &app.active_tab().dialog else {
+            panic!("expected NewWorkflow dialog");
+        };
+        assert_eq!(s.focused_field, WorkflowField::Title);
+    }
+
+    #[test]
+    fn new_workflow_tab_cycles_all_fields_in_order() {
+        let cycle = [
+            WorkflowField::Name,
+            WorkflowField::Title,
+            WorkflowField::StepName,
+            WorkflowField::StepAgent,
+            WorkflowField::StepModel,
+            WorkflowField::StepDependsOn,
+            WorkflowField::StepPrompt,
+            WorkflowField::StepName, // wraps back to StepName
+        ];
+        let mut app = new_app();
+        let state = new_workflow_state(false);
+        app.active_tab_mut().dialog = Dialog::NewWorkflow(state);
+
+        for expected in &cycle[1..] {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+            let Dialog::NewWorkflow(s) = &app.active_tab().dialog else {
+                panic!("expected NewWorkflow dialog");
+            };
+            assert_eq!(
+                &s.focused_field, expected,
+                "after Tab, focused_field should be {:?}",
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn new_workflow_interview_tab_toggles_name_and_summary() {
+        let mut app = new_app();
+        let state = new_workflow_state(true);
+        app.active_tab_mut().dialog = Dialog::NewWorkflow(state);
+
+        // Name → Summary
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        let Dialog::NewWorkflow(s) = &app.active_tab().dialog else {
+            panic!("expected NewWorkflow dialog");
+        };
+        assert_eq!(s.focused_field, WorkflowField::Summary, "interview Tab: Name→Summary");
+
+        // Summary → Name
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        let Dialog::NewWorkflow(s) = &app.active_tab().dialog else {
+            panic!("expected NewWorkflow dialog");
+        };
+        assert_eq!(s.focused_field, WorkflowField::Name, "interview Tab: Summary→Name");
+    }
+
+    #[test]
+    fn new_workflow_ctrl_n_with_nonempty_step_name_appends_step_and_resets_fields() {
+        let mut app = new_app();
+        let mut state = new_workflow_state(false);
+        state.name = "my-workflow".to_string();
+        state.title = "My Workflow".to_string();
+        state.step_name = "step-one".to_string();
+        state.step_prompt = "Do the thing.".to_string();
+        state.step_agent = "codex".to_string();
+        app.active_tab_mut().dialog = Dialog::NewWorkflow(state);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+
+        let Dialog::NewWorkflow(s) = &app.active_tab().dialog else {
+            panic!("expected NewWorkflow dialog");
+        };
+        assert_eq!(s.steps.len(), 1, "step should be appended");
+        assert_eq!(s.steps[0].name, "step-one");
+        assert_eq!(s.steps[0].agent.as_deref(), Some("codex"));
+        assert!(s.step_name.is_empty(), "step_name must be reset after commit");
+        assert!(s.step_prompt.is_empty(), "step_prompt must be reset after commit");
+        assert!(s.step_agent.is_empty(), "step_agent must be reset after commit");
+        assert!(s.error.is_none(), "no error on successful commit");
+    }
+
+    #[test]
+    fn new_workflow_ctrl_n_with_empty_step_name_sets_error() {
+        let mut app = new_app();
+        let mut state = new_workflow_state(false);
+        state.step_name = String::new();
+        app.active_tab_mut().dialog = Dialog::NewWorkflow(state);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+
+        let Dialog::NewWorkflow(s) = &app.active_tab().dialog else {
+            panic!("expected NewWorkflow dialog");
+        };
+        assert!(
+            s.error.is_some(),
+            "error must be set when step name is empty"
+        );
+        assert_eq!(s.steps.len(), 0, "no step must be appended on validation failure");
+    }
+
+    #[test]
+    fn new_workflow_ctrl_enter_with_at_least_one_step_submits() {
+        let mut app = new_app();
+        let mut state = new_workflow_state(false);
+        state.name = "my-workflow".to_string();
+        state.title = "My Workflow Title".to_string();
+        state.steps.push(crate::commands::new_workflow::WorkflowStepInput {
+            name: "step-one".to_string(),
+            agent: None,
+            model: None,
+            depends_on: vec![],
+            prompt: "Do it.".to_string(),
+        });
+        app.active_tab_mut().dialog = Dialog::NewWorkflow(state);
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        );
+
+        assert!(
+            matches!(action, Action::NewWorkflowSubmitted(_)),
+            "Ctrl-Enter must return NewWorkflowSubmitted when steps exist"
+        );
+        assert_eq!(
+            app.active_tab().dialog,
+            Dialog::None,
+            "dialog must be closed after submit"
+        );
+    }
+
+    #[test]
+    fn new_workflow_ctrl_enter_with_zero_steps_sets_error() {
+        let mut app = new_app();
+        let mut state = new_workflow_state(false);
+        state.name = "my-workflow".to_string();
+        state.title = "My Workflow Title".to_string();
+        // No steps added.
+        app.active_tab_mut().dialog = Dialog::NewWorkflow(state);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        );
+
+        let Dialog::NewWorkflow(s) = &app.active_tab().dialog else {
+            panic!("dialog must remain open when no steps");
+        };
+        assert!(
+            s.error.is_some(),
+            "error must be set when submitting with zero steps"
+        );
+    }
+
+    #[test]
+    fn new_workflow_ctrl_enter_with_empty_name_sets_error() {
+        let mut app = new_app();
+        let state = new_workflow_state(false); // name is empty
+        app.active_tab_mut().dialog = Dialog::NewWorkflow(state);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        );
+
+        let Dialog::NewWorkflow(s) = &app.active_tab().dialog else {
+            panic!("dialog must remain open on validation failure");
+        };
+        assert!(s.error.is_some(), "error must be set for empty name");
+    }
+
+    // ── NewSkillDialogState TUI tests ─────────────────────────────────────────
+
+    fn new_skill_state(interview: bool) -> NewSkillDialogState {
+        NewSkillDialogState::new(false, interview)
+    }
+
+    #[test]
+    fn new_skill_tab_cycles_name_description_body_in_normal_mode() {
+        let cycle = [
+            SkillField::Name,
+            SkillField::Description,
+            SkillField::Body,
+            SkillField::Name, // wraps back
+        ];
+        let mut app = new_app();
+        let state = new_skill_state(false);
+        app.active_tab_mut().dialog = Dialog::NewSkill(state);
+
+        for expected in &cycle[1..] {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+            let Dialog::NewSkill(s) = &app.active_tab().dialog else {
+                panic!("expected NewSkill dialog");
+            };
+            assert_eq!(
+                &s.focused_field, expected,
+                "after Tab, focused_field should be {:?}",
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn new_skill_interview_tab_cycles_name_description_summary() {
+        let mut app = new_app();
+        let state = new_skill_state(true);
+        app.active_tab_mut().dialog = Dialog::NewSkill(state);
+
+        // Name → Description
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        let Dialog::NewSkill(s) = &app.active_tab().dialog else { panic!() };
+        assert_eq!(s.focused_field, SkillField::Description);
+
+        // Description → Summary (interview mode)
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        let Dialog::NewSkill(s) = &app.active_tab().dialog else { panic!() };
+        assert_eq!(s.focused_field, SkillField::Summary, "interview: Description→Summary");
+
+        // Summary → Name
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        let Dialog::NewSkill(s) = &app.active_tab().dialog else { panic!() };
+        assert_eq!(s.focused_field, SkillField::Name, "interview: Summary→Name");
+    }
+
+    #[test]
+    fn new_skill_ctrl_enter_with_name_and_description_submits() {
+        let mut app = new_app();
+        let mut state = new_skill_state(false);
+        state.name = "my-skill".to_string();
+        state.description = "Does something useful.".to_string();
+        state.body = "Run things.".to_string();
+        app.active_tab_mut().dialog = Dialog::NewSkill(state);
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        );
+
+        assert!(
+            matches!(action, Action::NewSkillSubmitted(_)),
+            "Ctrl-Enter must return NewSkillSubmitted when name and description are set"
+        );
+        assert_eq!(app.active_tab().dialog, Dialog::None, "dialog must close on submit");
+    }
+
+    #[test]
+    fn new_skill_ctrl_enter_with_empty_name_sets_error() {
+        let mut app = new_app();
+        let mut state = new_skill_state(false);
+        state.name = String::new();
+        state.description = "A description.".to_string();
+        app.active_tab_mut().dialog = Dialog::NewSkill(state);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        );
+
+        let Dialog::NewSkill(s) = &app.active_tab().dialog else {
+            panic!("dialog must remain open on validation failure");
+        };
+        assert!(s.error.is_some(), "error must be set for empty name");
+    }
+
+    #[test]
+    fn new_skill_ctrl_enter_with_empty_description_sets_error() {
+        let mut app = new_app();
+        let mut state = new_skill_state(false);
+        state.name = "my-skill".to_string();
+        state.description = String::new();
+        app.active_tab_mut().dialog = Dialog::NewSkill(state);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        );
+
+        let Dialog::NewSkill(s) = &app.active_tab().dialog else {
+            panic!("dialog must remain open on validation failure");
+        };
+        assert!(s.error.is_some(), "error must be set for empty description");
+    }
+
+    // ── Workflow BackTab tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn new_workflow_interview_backtab_from_summary_goes_to_name() {
+        let mut app = new_app();
+        let mut state = new_workflow_state(true);
+        state.focused_field = WorkflowField::Summary;
+        app.active_tab_mut().dialog = Dialog::NewWorkflow(state);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()));
+
+        let Dialog::NewWorkflow(s) = &app.active_tab().dialog else {
+            panic!("expected NewWorkflow dialog");
+        };
+        assert_eq!(s.focused_field, WorkflowField::Name, "interview BackTab: Summary→Name");
+    }
+
+    #[test]
+    fn new_workflow_interview_backtab_from_name_goes_to_summary() {
+        let mut app = new_app();
+        let mut state = new_workflow_state(true);
+        state.focused_field = WorkflowField::Name;
+        app.active_tab_mut().dialog = Dialog::NewWorkflow(state);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()));
+
+        let Dialog::NewWorkflow(s) = &app.active_tab().dialog else {
+            panic!("expected NewWorkflow dialog");
+        };
+        assert_eq!(s.focused_field, WorkflowField::Summary, "interview BackTab: Name→Summary");
+    }
+
+    // ── Skill BackTab + interview-summary tests ───────────────────────────────
+
+    #[test]
+    fn new_skill_interview_backtab_from_name_goes_to_summary_not_body() {
+        let mut app = new_app();
+        let state = new_skill_state(true); // starts at Name
+        app.active_tab_mut().dialog = Dialog::NewSkill(state);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()));
+
+        let Dialog::NewSkill(s) = &app.active_tab().dialog else {
+            panic!("expected NewSkill dialog");
+        };
+        assert_eq!(
+            s.focused_field,
+            SkillField::Summary,
+            "interview BackTab from Name must go to Summary, not Body"
+        );
+    }
+
+    #[test]
+    fn new_skill_interview_backtab_from_summary_goes_to_description() {
+        let mut app = new_app();
+        let mut state = new_skill_state(true);
+        state.focused_field = SkillField::Summary;
+        app.active_tab_mut().dialog = Dialog::NewSkill(state);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::BackTab, KeyModifiers::empty()));
+
+        let Dialog::NewSkill(s) = &app.active_tab().dialog else {
+            panic!("expected NewSkill dialog");
+        };
+        assert_eq!(s.focused_field, SkillField::Description, "interview BackTab: Summary→Description");
+    }
+
+    #[test]
+    fn new_skill_interview_ctrl_enter_with_empty_summary_sets_error() {
+        let mut app = new_app();
+        let mut state = new_skill_state(true);
+        state.name = "my-skill".to_string();
+        state.description = "A useful skill.".to_string();
+        // summary intentionally left empty
+        app.active_tab_mut().dialog = Dialog::NewSkill(state);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+
+        let Dialog::NewSkill(s) = &app.active_tab().dialog else {
+            panic!("dialog must remain open when interview summary is empty");
+        };
+        assert!(s.error.is_some(), "error must be set when interview summary is empty");
     }
 }

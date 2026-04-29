@@ -855,3 +855,494 @@ fn config_get_headless_work_dirs_works() {
         "headless.workDirs must show empty/not-set when unconfigured; stdout: {stdout}"
     );
 }
+
+// ── `amux new` subcommand integration tests (work item 0064) ─────────────────
+
+use std::io::Write;
+use std::process::Stdio;
+
+/// Helper: spawn amux with piped stdin and write the given bytes, then collect output.
+fn run_amux_with_stdin(
+    cmd: &mut std::process::Command,
+    stdin_bytes: &[u8],
+) -> std::process::Output {
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn amux");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(stdin_bytes).ok();
+    }
+    child.wait_with_output().expect("failed to wait for amux")
+}
+
+// 1. `amux new --help` lists spec, workflow, and skill subcommands.
+#[test]
+fn new_help_lists_workflow_and_skill_subcommands() {
+    let output = amux()
+        .args(["new", "--help"])
+        .output()
+        .expect("failed to run amux new --help");
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("workflow"), "`new --help` must mention 'workflow'; got: {stdout}");
+    assert!(stdout.contains("skill"), "`new --help` must mention 'skill'; got: {stdout}");
+    assert!(stdout.contains("spec"), "`new --help` must mention 'spec'; got: {stdout}");
+}
+
+// 2. `amux new spec --help` and `amux specs new --help` both show --interview.
+#[test]
+fn new_spec_and_specs_new_help_both_mention_interview() {
+    let out1 = amux()
+        .args(["new", "spec", "--help"])
+        .output()
+        .expect("failed to run amux new spec --help");
+    let out2 = amux()
+        .args(["specs", "new", "--help"])
+        .output()
+        .expect("failed to run amux specs new --help");
+    assert!(out1.status.success());
+    assert!(out2.status.success());
+    let stdout1 = String::from_utf8_lossy(&out1.stdout);
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        stdout1.contains("--interview"),
+        "`new spec --help` must mention --interview; got: {stdout1}"
+    );
+    assert!(
+        stdout2.contains("--interview"),
+        "`specs new --help` must mention --interview; got: {stdout2}"
+    );
+}
+
+// 3. `amux new workflow --help` shows --interview, --global, --format.
+#[test]
+fn new_workflow_help_shows_flags() {
+    let output = amux()
+        .args(["new", "workflow", "--help"])
+        .output()
+        .expect("failed to run amux new workflow --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in &["--interview", "--global", "--format"] {
+        assert!(
+            stdout.contains(flag),
+            "`new workflow --help` must mention {flag}; got: {stdout}"
+        );
+    }
+}
+
+// 4. `amux new skill --help` shows --interview, --global.
+#[test]
+fn new_skill_help_shows_flags() {
+    let output = amux()
+        .args(["new", "skill", "--help"])
+        .output()
+        .expect("failed to run amux new skill --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for flag in &["--interview", "--global"] {
+        assert!(
+            stdout.contains(flag),
+            "`new skill --help` must mention {flag}; got: {stdout}"
+        );
+    }
+}
+
+// 5. `amux new workflow` with stdin writes a TOML file to aspec/workflows/.
+#[test]
+fn new_workflow_stdin_writes_toml_to_aspec_workflows() {
+    let home = TempDir::new().unwrap();
+    let repo = make_git_repo();
+
+    // Stdin sequence for non-interview, non-global workflow with one step.
+    // Prompts in order:
+    //   "Workflow name: "
+    //   "Workflow title (human-readable): "
+    //   "Step name: "
+    //   "Agent (optional, ...): "
+    //   "Model (optional, ...): "
+    //   "Depends-on (optional, ...): "
+    //   "Enter prompt text. End with a line containing only '.':"\n<prompt>\n.\n
+    //   "Add another step? [y/N]: "
+    let stdin = b"my-wf\nMy Workflow\nstep-one\n\n\n\nDo the thing.\n.\nn\n";
+
+    let output = run_amux_with_stdin(
+        amux_with_home(home.path())
+            .current_dir(repo.path())
+            .args(["new", "workflow"]),
+        stdin,
+    );
+
+    assert!(
+        output.status.success(),
+        "amux new workflow must succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dest = repo.path().join("aspec").join("workflows").join("my-wf.toml");
+    assert!(dest.exists(), "TOML workflow file must be created at {}", dest.display());
+
+    let content = std::fs::read_to_string(&dest).unwrap();
+    assert!(content.contains("My Workflow"), "title must appear in file");
+    assert!(content.contains("step-one"), "step name must appear in file");
+}
+
+// 6. `amux new workflow --format yaml` writes a .yaml file.
+#[test]
+fn new_workflow_format_yaml_writes_yaml_file() {
+    let home = TempDir::new().unwrap();
+    let repo = make_git_repo();
+
+    let stdin = b"yaml-wf\nYAML Workflow\nstep-a\n\n\n\nDo it.\n.\nn\n";
+
+    let output = run_amux_with_stdin(
+        amux_with_home(home.path())
+            .current_dir(repo.path())
+            .args(["new", "workflow", "--format", "yaml"]),
+        stdin,
+    );
+
+    assert!(
+        output.status.success(),
+        "amux new workflow --format yaml must succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dest = repo.path().join("aspec").join("workflows").join("yaml-wf.yaml");
+    assert!(dest.exists(), ".yaml file must be created");
+    let content = std::fs::read_to_string(&dest).unwrap();
+    assert!(content.contains("YAML Workflow"));
+}
+
+// 7. `amux new workflow --format md` writes a .md file.
+#[test]
+fn new_workflow_format_md_writes_md_file() {
+    let home = TempDir::new().unwrap();
+    let repo = make_git_repo();
+
+    let stdin = b"md-wf\nMD Workflow\nstep-b\n\n\n\nDo it.\n.\nn\n";
+
+    let output = run_amux_with_stdin(
+        amux_with_home(home.path())
+            .current_dir(repo.path())
+            .args(["new", "workflow", "--format", "md"]),
+        stdin,
+    );
+
+    assert!(
+        output.status.success(),
+        "amux new workflow --format md must succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dest = repo.path().join("aspec").join("workflows").join("md-wf.md");
+    assert!(dest.exists(), ".md file must be created");
+    let content = std::fs::read_to_string(&dest).unwrap();
+    assert!(content.starts_with("# MD Workflow"), "MD file must start with title heading");
+}
+
+// 8. `amux new workflow --global` writes to ~/.amux/workflows/.
+#[test]
+fn new_workflow_global_writes_to_global_workflows_dir() {
+    let home = TempDir::new().unwrap();
+    // AMUX_CONFIG_HOME redirects global_workflows_dir() to home/.amux.
+    // The integration binary uses this env var for the global dir.
+    // We run outside a git repo to confirm --global works without one.
+    let not_a_repo = TempDir::new().unwrap();
+
+    let stdin = b"global-wf\nGlobal Workflow\nstep-g\n\n\n\nDo globally.\n.\nn\n";
+
+    let output = run_amux_with_stdin(
+        amux_with_home(home.path())
+            .env("AMUX_CONFIG_HOME", home.path().join(".amux"))
+            .current_dir(not_a_repo.path())
+            .args(["new", "workflow", "--global"]),
+        stdin,
+    );
+
+    assert!(
+        output.status.success(),
+        "amux new workflow --global must succeed outside a git repo; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dest = home.path().join(".amux").join("workflows").join("global-wf.toml");
+    assert!(dest.exists(), "global TOML file must be created at {}", dest.display());
+    let content = std::fs::read_to_string(&dest).unwrap();
+    assert!(content.contains("Global Workflow"));
+}
+
+// 9. `amux new workflow --interview --global` writes a skeleton file before failing on agent lookup.
+#[test]
+fn new_workflow_interview_global_writes_skeleton_before_agent_lookup_fails() {
+    let home = TempDir::new().unwrap();
+    let not_a_repo = TempDir::new().unwrap();
+
+    // Stdin: name + summary (interview mode only prompts these two).
+    let stdin = b"interview-wf\nSome brief summary.\n";
+
+    let output = run_amux_with_stdin(
+        amux_with_home(home.path())
+            .env("AMUX_CONFIG_HOME", home.path().join(".amux"))
+            .current_dir(not_a_repo.path())
+            .args(["new", "workflow", "--interview", "--global"]),
+        stdin,
+    );
+
+    // Command exits non-zero because interview requires a git repo for agent image lookup.
+    assert!(
+        !output.status.success(),
+        "amux new workflow --interview --global must fail without a git repo"
+    );
+    // But the skeleton file should have been written before the failure.
+    let dest = home.path().join(".amux").join("workflows").join("interview-wf.toml");
+    assert!(
+        dest.exists(),
+        "skeleton file must be created before agent lookup fails; path: {}",
+        dest.display()
+    );
+}
+
+// 10. `amux new skill` writes SKILL.md to .claude/skills/<name>/.
+#[test]
+fn new_skill_stdin_writes_skill_md_to_claude_skills() {
+    let home = TempDir::new().unwrap();
+    let repo = make_git_repo();
+
+    // Stdin: name, description, body (period-terminated), then EOF.
+    let stdin = b"my-skill\nDoes something useful.\nRun the tests.\n.\n";
+
+    let output = run_amux_with_stdin(
+        amux_with_home(home.path())
+            .current_dir(repo.path())
+            .args(["new", "skill"]),
+        stdin,
+    );
+
+    assert!(
+        output.status.success(),
+        "amux new skill must succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dest = repo
+        .path()
+        .join(".claude")
+        .join("skills")
+        .join("my-skill")
+        .join("SKILL.md");
+    assert!(dest.exists(), "SKILL.md must be created at {}", dest.display());
+
+    let content = std::fs::read_to_string(&dest).unwrap();
+    assert!(content.starts_with("---\n"), "SKILL.md must start with YAML frontmatter");
+    assert!(content.contains("name: my-skill"), "frontmatter must contain name");
+    assert!(content.contains("Does something useful."), "frontmatter must contain description");
+    assert!(content.contains("Run the tests."), "body must be written");
+}
+
+// 11. `amux new skill --global` writes to ~/.amux/skills/<name>/SKILL.md.
+#[test]
+fn new_skill_global_writes_to_global_skills_dir() {
+    let home = TempDir::new().unwrap();
+    let not_a_repo = TempDir::new().unwrap();
+
+    let stdin = b"global-skill\nA global skill.\nDo things globally.\n.\n";
+
+    let output = run_amux_with_stdin(
+        amux_with_home(home.path())
+            .env("AMUX_CONFIG_HOME", home.path().join(".amux"))
+            .current_dir(not_a_repo.path())
+            .args(["new", "skill", "--global"]),
+        stdin,
+    );
+
+    assert!(
+        output.status.success(),
+        "amux new skill --global must succeed outside a git repo; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dest = home
+        .path()
+        .join(".amux")
+        .join("skills")
+        .join("global-skill")
+        .join("SKILL.md");
+    assert!(dest.exists(), "global SKILL.md must be created at {}", dest.display());
+    let content = std::fs::read_to_string(&dest).unwrap();
+    assert!(content.contains("name: global-skill"));
+    assert!(content.contains("A global skill."));
+}
+
+// 12. `amux new skill --interview --global` writes skeleton before agent lookup fails.
+#[test]
+fn new_skill_interview_global_writes_skeleton_before_agent_lookup_fails() {
+    let home = TempDir::new().unwrap();
+    let not_a_repo = TempDir::new().unwrap();
+
+    // Stdin: name, description, summary.
+    let stdin = b"interview-skill\nDoes interview things.\nBrief summary here.\n";
+
+    let output = run_amux_with_stdin(
+        amux_with_home(home.path())
+            .env("AMUX_CONFIG_HOME", home.path().join(".amux"))
+            .current_dir(not_a_repo.path())
+            .args(["new", "skill", "--interview", "--global"]),
+        stdin,
+    );
+
+    // Must fail because interview mode requires a git repo for agent image lookup.
+    assert!(
+        !output.status.success(),
+        "amux new skill --interview --global must fail without a git repo"
+    );
+    // Skeleton must be written before the failure.
+    let dest = home
+        .path()
+        .join(".amux")
+        .join("skills")
+        .join("interview-skill")
+        .join("SKILL.md");
+    assert!(
+        dest.exists(),
+        "skeleton SKILL.md must be created before agent lookup fails; path: {}",
+        dest.display()
+    );
+    let content = std::fs::read_to_string(&dest).unwrap();
+    assert!(content.contains("Agent will complete"), "skeleton must contain placeholder");
+}
+
+// 13. End-to-end: `amux new workflow` output file parses without error via `amux exec workflow`.
+#[test]
+fn new_workflow_roundtrip_exec_workflow_parses_output() {
+    let home = TempDir::new().unwrap();
+    let repo = make_git_repo();
+
+    let stdin = b"e2e-wf\nE2E Workflow\nstep-x\n\n\n\nRun the check.\n.\nn\n";
+    let create_out = run_amux_with_stdin(
+        amux_with_home(home.path())
+            .current_dir(repo.path())
+            .args(["new", "workflow"]),
+        stdin,
+    );
+    assert!(
+        create_out.status.success(),
+        "workflow creation must succeed; stderr: {}",
+        String::from_utf8_lossy(&create_out.stderr)
+    );
+
+    let wf_path = repo.path().join("aspec").join("workflows").join("e2e-wf.toml");
+    assert!(wf_path.exists(), "workflow file must exist");
+
+    // `exec workflow` will fail (no Docker), but must not fail at parse time.
+    // A parse failure would report something like "invalid TOML" or "missing title".
+    let exec_out = amux_with_home(home.path())
+        .current_dir(repo.path())
+        .args(["exec", "workflow", wf_path.to_str().unwrap()])
+        .output()
+        .expect("failed to run amux exec workflow");
+
+    // exec workflow will fail (no git repo agent config / Docker), but must not
+    // emit a TOML parse error.
+    let stderr = String::from_utf8_lossy(&exec_out.stderr);
+    assert!(
+        !stderr.to_lowercase().contains("parse") && !stderr.to_lowercase().contains("invalid toml"),
+        "exec workflow must not report a parse error on a freshly-created file; stderr: {stderr}"
+    );
+}
+
+// 14. End-to-end: `amux new skill` output has valid YAML frontmatter.
+#[test]
+fn new_skill_output_has_parseable_yaml_frontmatter() {
+    let home = TempDir::new().unwrap();
+    let repo = make_git_repo();
+
+    let stdin = b"yaml-skill\nParses correctly.\nStep one.\n.\n";
+    let output = run_amux_with_stdin(
+        amux_with_home(home.path())
+            .current_dir(repo.path())
+            .args(["new", "skill"]),
+        stdin,
+    );
+    assert!(
+        output.status.success(),
+        "skill creation must succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dest = repo
+        .path()
+        .join(".claude")
+        .join("skills")
+        .join("yaml-skill")
+        .join("SKILL.md");
+    let content = std::fs::read_to_string(&dest).unwrap();
+
+    // Extract YAML frontmatter between the first two "---" delimiters.
+    let parts: Vec<&str> = content.splitn(3, "---").collect();
+    assert!(parts.len() >= 3, "SKILL.md must contain opening and closing --- delimiters");
+    let frontmatter = parts[1];
+    // A minimal YAML parse: verify it's not empty and contains name/description keys.
+    assert!(
+        frontmatter.contains("name:"),
+        "YAML frontmatter must contain 'name:'; frontmatter:\n{frontmatter}"
+    );
+    assert!(
+        frontmatter.contains("description:"),
+        "YAML frontmatter must contain 'description:'; frontmatter:\n{frontmatter}"
+    );
+}
+
+// 15. `amux specs new` and `amux new spec` produce identical skeleton files.
+#[test]
+fn specs_new_and_new_spec_produce_identical_skeleton_files() {
+    // Stdin: kind=1 (Feature), title="Equiv Test".
+    let stdin = b"1\nEquiv Test\n";
+
+    let home1 = TempDir::new().unwrap();
+    let repo1 = make_git_repo();
+    let out1 = run_amux_with_stdin(
+        amux_with_home(home1.path())
+            .current_dir(repo1.path())
+            .args(["specs", "new"]),
+        stdin,
+    );
+    assert!(
+        out1.status.success(),
+        "amux specs new must succeed; stderr: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+
+    let home2 = TempDir::new().unwrap();
+    let repo2 = make_git_repo();
+    let out2 = run_amux_with_stdin(
+        amux_with_home(home2.path())
+            .current_dir(repo2.path())
+            .args(["new", "spec"]),
+        stdin,
+    );
+    assert!(
+        out2.status.success(),
+        "amux new spec must succeed; stderr: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+
+    // Both repos start empty, so both commands must produce 0001-equiv-test.md.
+    let expected_name = "0001-equiv-test.md";
+    let path1 = repo1.path().join("aspec").join(expected_name);
+    let path2 = repo2.path().join("aspec").join(expected_name);
+
+    assert!(path1.exists(), "specs new must create {expected_name}; repo: {}", repo1.path().display());
+    assert!(path2.exists(), "new spec must create {expected_name}; repo: {}", repo2.path().display());
+
+    let content1 = std::fs::read_to_string(&path1).unwrap();
+    let content2 = std::fs::read_to_string(&path2).unwrap();
+    assert_eq!(
+        content1, content2,
+        "`amux specs new` and `amux new spec` must produce identical skeleton files"
+    );
+}

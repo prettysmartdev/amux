@@ -240,6 +240,8 @@ specs new               # prompts for type and title, creates the file
 specs new --interview   # creates the skeleton, then opens an agent to help fill it out
 ```
 
+`new spec` is an alias for `specs new` — they are identical.
+
 Four work item types are available: Feature, Bug, Task, and Enhancement.
 
 Work items are created in the configured work items directory (defaulting to `aspec/work-items/`). If you haven't run `amux init --aspec` and haven't configured `work_items.dir`, amux will prompt you to auto-discover a template or create the file with a minimal stub. You can configure a custom directory at any time:
@@ -255,6 +257,20 @@ After implementing a work item, you can have the agent update the spec to match 
 ```sh
 specs amend 0001
 ```
+
+## Creating workflows and skills
+
+The `new` subcommand is a unified entry point for creating amux artefacts:
+
+```sh
+new spec                # alias for specs new
+new workflow            # interactively build a workflow file step by step
+new workflow --interview  # let an agent write the workflow from a summary
+new skill               # interactively create a Claude Code skill file
+new skill --interview   # let an agent write the skill body from a summary
+```
+
+Both `new workflow` and `new skill` accept `--global` to write to `~/.amux/` instead of the current repo, building a personal library that travels across projects. See [Workflows](04-workflows.md#creating-a-workflow-file) and [Creating skills](02-agent-sessions.md#creating-skills) for full details.
 
 ---
 

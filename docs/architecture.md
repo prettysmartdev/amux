@@ -61,10 +61,23 @@ src/
     init.rs                Thin CLI shim: constructs CliInitQa (stdin-backed) and
                            CliContainerLauncher (synchronous blocking), then delegates to
                            init_flow::execute(). Contains no business logic.
-    new.rs                 `amux new` — run() + run_with_sink()
+    new.rs                 `amux new` (work item creation) — run() + run_with_sink()
                            WorkItemKind, slugify, apply_template,
                            find_template, next_work_item_number
                            Auto-downloads aspec/ if template is missing
+    new_cmd.rs             `amux new` top-level dispatcher (spec/workflow/skill)
+                           Routes NewAction variants to the appropriate module;
+                           new spec delegates to specs::run_new()
+    new_workflow.rs        `amux new workflow` — run_new_workflow() + run_new_workflow_with_sink()
+                           WorkflowInput, WorkflowStepInput, WorkflowFormat
+                           validate_artefact_name(), resolve_workflow_dest()
+                           write_workflow_file(), serialize_workflow() (TOML / YAML / Markdown)
+                           skeleton_workflow() for --interview mode
+                           workflow_interview_agent_entrypoint() + non-interactive variant
+    new_skill.rs           `amux new skill` — run_new_skill() + run_new_skill_with_sink()
+                           SkillInput, resolve_skill_dest()
+                           render_skill_file(), render_skill_skeleton(), write_skill_file()
+                           skill_interview_agent_entrypoint() + non-interactive variant
     ready.rs               `amux ready` — run() + run_with_sink()
                            ReadyOptions, ReadyContext, ReadySummary, AuditSetup
                            StepStatus, print_summary, print_interactive_notice,

@@ -104,6 +104,192 @@ pub struct ConfigDialogState {
     pub error_msg: Option<String>,
 }
 
+/// Field focus within the `new workflow` dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowField {
+    /// The workflow filename slug (e.g. `my-workflow`). Always shown first.
+    Name,
+    Title,
+    StepName,
+    StepAgent,
+    StepModel,
+    StepDependsOn,
+    StepPrompt,
+    /// Used only in interview mode.
+    Summary,
+}
+
+impl WorkflowField {
+    /// Cycle to the next field in the regular (non-interview) interactive flow.
+    ///
+    /// Full forward cycle: Name → Title → StepName → StepAgent → StepModel →
+    /// StepDependsOn → StepPrompt → StepName (per-step loop).
+    pub fn next_step(self) -> Self {
+        match self {
+            WorkflowField::Name => WorkflowField::Title,
+            WorkflowField::Title => WorkflowField::StepName,
+            WorkflowField::StepName => WorkflowField::StepAgent,
+            WorkflowField::StepAgent => WorkflowField::StepModel,
+            WorkflowField::StepModel => WorkflowField::StepDependsOn,
+            WorkflowField::StepDependsOn => WorkflowField::StepPrompt,
+            WorkflowField::StepPrompt => WorkflowField::StepName,
+            // Summary is interview-only; fall back to Name if reached unexpectedly.
+            WorkflowField::Summary => WorkflowField::Name,
+        }
+    }
+
+    pub fn prev_step(self) -> Self {
+        match self {
+            WorkflowField::Name => WorkflowField::StepPrompt,
+            WorkflowField::Title => WorkflowField::Name,
+            WorkflowField::StepName => WorkflowField::Title,
+            WorkflowField::StepAgent => WorkflowField::StepName,
+            WorkflowField::StepModel => WorkflowField::StepAgent,
+            WorkflowField::StepDependsOn => WorkflowField::StepModel,
+            WorkflowField::StepPrompt => WorkflowField::StepDependsOn,
+            // Summary is interview-only; fall back to Name if reached unexpectedly.
+            WorkflowField::Summary => WorkflowField::Name,
+        }
+    }
+}
+
+/// State for the `new workflow` dialog.
+///
+/// In `interview` mode only `title` and `summary` are used; in normal mode
+/// the user iterates through `step_*` fields and commits steps via Ctrl-N.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewWorkflowDialogState {
+    pub name: String,
+    pub name_cursor: usize,
+    pub title: String,
+    pub title_cursor: usize,
+    pub steps: Vec<crate::commands::new_workflow::WorkflowStepInput>,
+    pub step_name: String,
+    pub step_name_cursor: usize,
+    pub step_agent: String,
+    pub step_agent_cursor: usize,
+    pub step_model: String,
+    pub step_model_cursor: usize,
+    pub step_depends_on: String,
+    pub step_depends_on_cursor: usize,
+    pub step_prompt: String,
+    pub step_prompt_cursor: usize,
+    pub summary: String,
+    pub summary_cursor: usize,
+    pub focused_field: WorkflowField,
+    pub global: bool,
+    pub format: crate::cli::WorkflowFormat,
+    pub interview: bool,
+    pub error: Option<String>,
+}
+
+impl NewWorkflowDialogState {
+    pub fn new(
+        name: String,
+        title: String,
+        global: bool,
+        format: crate::cli::WorkflowFormat,
+        interview: bool,
+    ) -> Self {
+        // Always start at the Name field so the user can enter the filename slug first.
+        let focused_field = WorkflowField::Name;
+        Self {
+            name_cursor: name.len(),
+            name,
+            title_cursor: title.len(),
+            title,
+            steps: Vec::new(),
+            step_name: String::new(),
+            step_name_cursor: 0,
+            step_agent: String::new(),
+            step_agent_cursor: 0,
+            step_model: String::new(),
+            step_model_cursor: 0,
+            step_depends_on: String::new(),
+            step_depends_on_cursor: 0,
+            step_prompt: String::new(),
+            step_prompt_cursor: 0,
+            summary: String::new(),
+            summary_cursor: 0,
+            focused_field,
+            global,
+            format,
+            interview,
+            error: None,
+        }
+    }
+}
+
+/// Field focus within the `new skill` dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillField {
+    Name,
+    Description,
+    Body,
+    Summary,
+}
+
+impl SkillField {
+    pub fn next(self) -> Self {
+        match self {
+            SkillField::Name => SkillField::Description,
+            SkillField::Description => {
+                // The dialog state knows whether we're in interview mode and picks
+                // Body or Summary accordingly; here we cycle to Body and let the
+                // handler swap to Summary if needed.
+                SkillField::Body
+            }
+            SkillField::Body => SkillField::Name,
+            SkillField::Summary => SkillField::Name,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            SkillField::Name => SkillField::Body,
+            SkillField::Description => SkillField::Name,
+            SkillField::Body => SkillField::Description,
+            SkillField::Summary => SkillField::Description,
+        }
+    }
+}
+
+/// State for the `new skill` dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewSkillDialogState {
+    pub name: String,
+    pub name_cursor: usize,
+    pub description: String,
+    pub description_cursor: usize,
+    pub body: String,
+    pub body_cursor: usize,
+    pub summary: String,
+    pub summary_cursor: usize,
+    pub focused_field: SkillField,
+    pub global: bool,
+    pub interview: bool,
+    pub error: Option<String>,
+}
+
+impl NewSkillDialogState {
+    pub fn new(global: bool, interview: bool) -> Self {
+        Self {
+            name: String::new(),
+            name_cursor: 0,
+            description: String::new(),
+            description_cursor: 0,
+            body: String::new(),
+            body_cursor: 0,
+            summary: String::new(),
+            summary_cursor: 0,
+            focused_field: SkillField::Name,
+            global,
+            interview,
+            error: None,
+        }
+    }
+}
+
 /// An overlay modal dialog, if any.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Dialog {
@@ -164,6 +350,10 @@ pub enum Dialog {
         /// Byte offset of the cursor in `summary`.
         cursor_pos: usize,
     },
+    /// Multi-field dialog for `new workflow` (interactive step entry or interview).
+    NewWorkflow(NewWorkflowDialogState),
+    /// Multi-field dialog for `new skill`.
+    NewSkill(NewSkillDialogState),
     /// Claws wizard: ask if user has already forked nanoclaw.
     ClawsReadyHasForked,
     /// Claws wizard: enter GitHub username (if already forked).
@@ -3578,5 +3768,48 @@ mod tests {
             tab.workflow.is_some(),
             "workflow field must still hold the terminal state"
         );
+    }
+
+    // ── WorkflowField navigation ──────────────────────────────────────────────
+
+    #[test]
+    fn workflow_field_next_step_name_returns_title() {
+        assert_eq!(WorkflowField::Name.next_step(), WorkflowField::Title);
+    }
+
+    #[test]
+    fn workflow_field_prev_step_title_returns_name() {
+        assert_eq!(WorkflowField::Title.prev_step(), WorkflowField::Name);
+    }
+
+    #[test]
+    fn workflow_field_prev_step_name_wraps_to_step_prompt() {
+        // Full-cycle backward wrap: pressing Shift-Tab from the first field
+        // should land on the last step field.
+        assert_eq!(WorkflowField::Name.prev_step(), WorkflowField::StepPrompt);
+    }
+
+    #[test]
+    fn new_workflow_dialog_state_starts_at_name_field_in_normal_mode() {
+        let s = NewWorkflowDialogState::new(
+            String::new(),
+            String::new(),
+            false,
+            crate::cli::WorkflowFormat::Toml,
+            false,
+        );
+        assert_eq!(s.focused_field, WorkflowField::Name);
+    }
+
+    #[test]
+    fn new_workflow_dialog_state_starts_at_name_field_in_interview_mode() {
+        let s = NewWorkflowDialogState::new(
+            String::new(),
+            String::new(),
+            false,
+            crate::cli::WorkflowFormat::Toml,
+            true,
+        );
+        assert_eq!(s.focused_field, WorkflowField::Name);
     }
 }

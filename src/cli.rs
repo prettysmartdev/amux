@@ -203,6 +203,67 @@ pub enum Command {
         #[command(subcommand)]
         action: RemoteAction,
     },
+
+    /// Create a new amux artefact (spec, workflow, or skill).
+    New {
+        #[command(subcommand)]
+        action: NewAction,
+    },
+}
+
+/// Subcommands for `amux new`.
+#[derive(Subcommand)]
+pub enum NewAction {
+    /// Create a new work item spec (alias for `specs new`).
+    Spec {
+        /// Use interview mode: have the agent complete the work item based on a summary you provide.
+        #[arg(long)]
+        interview: bool,
+    },
+
+    /// Interactively create a new workflow file.
+    Workflow {
+        /// Let a code agent complete the workflow from a short summary.
+        #[arg(long)]
+        interview: bool,
+
+        /// Write to ~/.amux/workflows/<name> instead of the current repo.
+        #[arg(long)]
+        global: bool,
+
+        /// Output file format.
+        #[arg(long, value_enum, default_value = "toml")]
+        format: WorkflowFormat,
+    },
+
+    /// Interactively create a new skill file.
+    Skill {
+        /// Let a code agent complete the skill body from a short summary.
+        #[arg(long)]
+        interview: bool,
+
+        /// Write to ~/.amux/skills/<name>/ instead of the current repo.
+        #[arg(long)]
+        global: bool,
+    },
+}
+
+/// Output formats supported by `amux new workflow`.
+#[derive(Clone, Debug, PartialEq, ValueEnum)]
+pub enum WorkflowFormat {
+    Toml,
+    Yaml,
+    Md,
+}
+
+impl WorkflowFormat {
+    pub fn extension(&self) -> &'static str {
+        match self {
+            WorkflowFormat::Toml => "toml",
+            WorkflowFormat::Yaml => "yaml",
+            WorkflowFormat::Md => "md",
+        }
+    }
 }
 
 /// Subcommands for `amux config`.

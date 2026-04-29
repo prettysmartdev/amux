@@ -1,0 +1,14 @@
+[package]
+name = "ioctl-rs"
+version = "0.1.6"
+authors = ["David Cuddeback <david.cuddeback@gmail.com>"]
+description = "Rust bindings for system ioctls."
+license = "MIT"
+homepage = "https://github.com/dcuddeback/ioctl-rs"
+repository = "https://github.com/dcuddeback/ioctl-rs"
+readme = "README.md"
+keywords = ["ioctl"]
+exclude = ["ioctl_list/*"]
+
+[dependencies]
+libc = "0.2"

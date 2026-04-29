@@ -356,6 +356,14 @@ async fn handle_action(app: &mut App, action: Action) {
             show_pre_command_dialogs(app).await;
         }
 
+        Action::NewWorkflowSubmitted(state) => {
+            launch_new_workflow_action(app, state).await;
+        }
+
+        Action::NewSkillSubmitted(state) => {
+            launch_new_skill_action(app, state).await;
+        }
+
         Action::ClawsReadyProceed => {
             launch_claws_ready(app).await;
         }
@@ -1510,6 +1518,50 @@ async fn execute_command(app: &mut App, cmd: &str) {
             show_pre_command_dialogs(app).await;
         }
 
+
+        "new" => {
+            match parts.get(1) {
+                Some(&"spec") => {
+                    let specs_new_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "specs new").unwrap();
+                    let flags = flag_parser::parse_flags(&parts, specs_new_spec);
+                    let interview = flag_parser::flag_bool(&flags, "interview");
+                    app.active_tab_mut().dialog = state::Dialog::NewKindSelect { interview };
+                }
+                Some(&"workflow") => {
+                    let new_workflow_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "new workflow").unwrap();
+                    let flags = flag_parser::parse_flags(&parts, new_workflow_spec);
+                    let interview = flag_parser::flag_bool(&flags, "interview");
+                    let global = flag_parser::flag_bool(&flags, "global");
+                    let format = match flag_parser::flag_string(&flags, "format") {
+                        Some("yaml") | Some("yml") => crate::cli::WorkflowFormat::Yaml,
+                        Some("md") => crate::cli::WorkflowFormat::Md,
+                        _ => crate::cli::WorkflowFormat::Toml,
+                    };
+                    app.active_tab_mut().dialog = state::Dialog::NewWorkflow(
+                        state::NewWorkflowDialogState::new(
+                            String::new(),
+                            String::new(),
+                            global,
+                            format,
+                            interview,
+                        ),
+                    );
+                }
+                Some(&"skill") => {
+                    let new_skill_spec = crate::commands::spec::ALL_COMMANDS.iter().find(|c| c.name == "new skill").unwrap();
+                    let flags = flag_parser::parse_flags(&parts, new_skill_spec);
+                    let interview = flag_parser::flag_bool(&flags, "interview");
+                    let global = flag_parser::flag_bool(&flags, "global");
+                    app.active_tab_mut().dialog = state::Dialog::NewSkill(
+                        state::NewSkillDialogState::new(global, interview),
+                    );
+                }
+                _ => {
+                    app.active_tab_mut().input_error =
+                        Some("Usage: new <spec|workflow|skill>  e.g. new spec --interview, new workflow --global".into());
+                }
+            }
+        }
 
         "specs" => {
             match parts.get(1) {
@@ -6234,6 +6286,289 @@ fn extract_selection_text(tab: &state::TabState) -> Option<String> {
         }
     }
     Some(result)
+}
+
+/// Handle a `new workflow` dialog submission: write the file (and launch the
+/// agent if `interview`).
+async fn launch_new_workflow_action(
+    app: &mut App,
+    state: state::NewWorkflowDialogState,
+) {
+    use crate::commands::new_workflow::{
+        resolve_workflow_dest, skeleton_workflow, write_workflow_file, WorkflowInput,
+        CONTAINER_WORKSPACE,
+    };
+
+    let tab_cwd = app.active_tab().cwd.clone();
+    let git_root = find_git_root_from(&tab_cwd);
+    if !state.global && git_root.is_none() {
+        app.active_tab_mut().input_error =
+            Some("Not inside a Git repository. Use --global to write to ~/.amux/.".into());
+        return;
+    }
+
+    let dest = match resolve_workflow_dest(
+        state.name.trim(),
+        state.global,
+        &state.format,
+        git_root.as_deref(),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            app.active_tab_mut().input_error = Some(e.to_string());
+            return;
+        }
+    };
+
+    let filename = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    if state.interview {
+        // Write skeleton + launch agent.
+        let title_value = if state.title.trim().is_empty() {
+            state.name.trim().to_string()
+        } else {
+            state.title.trim().to_string()
+        };
+        let skeleton = skeleton_workflow(&title_value, &state.format);
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                app.active_tab_mut().input_error =
+                    Some(format!("Failed to create directory: {}", e));
+                return;
+            }
+        }
+        if let Err(e) = std::fs::write(&dest, &skeleton) {
+            app.active_tab_mut().input_error = Some(format!("Failed to write file: {}", e));
+            return;
+        }
+        let git_root = match git_root {
+            Some(r) => r,
+            None => {
+                app.active_tab_mut().input_error = Some(
+                    "Not inside a git repository. The agent image requires a git repo. Use --global without --interview to create without an agent.".into(),
+                );
+                return;
+            }
+        };
+
+        let (mount_path, container_path) = if state.global {
+            let wf_dir = match crate::config::global_workflows_dir() {
+                Ok(d) => d,
+                Err(e) => {
+                    app.active_tab_mut().input_error = Some(e.to_string());
+                    return;
+                }
+            };
+            (
+                wf_dir,
+                format!("{}/{}", CONTAINER_WORKSPACE, filename),
+            )
+        } else {
+            (git_root.clone(), dest.to_string_lossy().to_string())
+        };
+
+        let agent_name = load_repo_config(&git_root)
+            .unwrap_or_default()
+            .agent
+            .as_deref()
+            .unwrap_or("claude")
+            .to_string();
+        let entrypoint = crate::commands::new_workflow::workflow_interview_agent_entrypoint(
+            &agent_name,
+            &container_path,
+            &filename,
+            state.summary.trim(),
+        );
+        let status = format!(
+            "Running interview agent for workflow '{}' with agent '{}'",
+            state.name.trim(), agent_name
+        );
+        let out = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+        out.println(format!("Created skeleton workflow: {}", dest.display()));
+        let runtime = app.runtime.clone();
+        let cmd_label = format!("new workflow --interview {}", state.name.trim());
+        app.active_tab_mut().start_command(cmd_label);
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        app.active_tab_mut().exit_rx = Some(exit_rx);
+        let tx = app.active_tab().output_tx.clone();
+        let credentials = match crate::commands::auth::resolve_auth(&git_root, &agent_name) {
+            Ok(c) => c,
+            Err(e) => {
+                app.active_tab_mut().input_error = Some(e.to_string());
+                app.active_tab_mut().finish_command(1);
+                return;
+            }
+        };
+        let host_settings =
+            crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
+        spawn_text_command(tx, exit_tx, move |sink| async move {
+            crate::commands::agent::run_agent_with_sink(
+                entrypoint,
+                &status,
+                &sink,
+                Some(mount_path),
+                credentials.env_vars,
+                false,
+                host_settings.as_ref(),
+                false,
+                false,
+                None,
+                None,
+                None,
+                &*runtime,
+            )
+            .await
+        });
+        return;
+    }
+
+    // Non-interview: build the WorkflowInput and write.
+    let title = state.title.trim().to_string();
+    let input = WorkflowInput {
+        title,
+        steps: state.steps,
+    };
+    match write_workflow_file(&input, &dest, &state.format) {
+        Ok(()) => {
+            let out = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+            out.println(format!("Created workflow: {}", dest.display()));
+        }
+        Err(e) => {
+            app.active_tab_mut().input_error = Some(format!("Failed to write workflow: {}", e));
+        }
+    }
+}
+
+/// Handle a `new skill` dialog submission.
+async fn launch_new_skill_action(app: &mut App, state: state::NewSkillDialogState) {
+    use crate::commands::new_skill::{
+        resolve_skill_dest, write_skill_file, write_skill_skeleton, SkillInput,
+    };
+    use crate::commands::new_workflow::CONTAINER_WORKSPACE;
+
+    let tab_cwd = app.active_tab().cwd.clone();
+    let git_root = find_git_root_from(&tab_cwd);
+    if !state.global && git_root.is_none() {
+        app.active_tab_mut().input_error =
+            Some("Not inside a Git repository. Use --global to write to ~/.amux/.".into());
+        return;
+    }
+
+    let dest_dir = match resolve_skill_dest(state.name.trim(), state.global, git_root.as_deref()) {
+        Ok(d) => d,
+        Err(e) => {
+            app.active_tab_mut().input_error = Some(e.to_string());
+            return;
+        }
+    };
+
+    if state.interview {
+        let path = match write_skill_skeleton(state.name.trim(), state.description.trim(), &dest_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                app.active_tab_mut().input_error = Some(format!("Failed to write skeleton: {}", e));
+                return;
+            }
+        };
+        let git_root = match git_root {
+            Some(r) => r,
+            None => {
+                app.active_tab_mut().input_error = Some(
+                    "Not inside a git repository. The agent image requires a git repo. Use --global without --interview to create without an agent.".into(),
+                );
+                return;
+            }
+        };
+        let (mount_path, container_path) = if state.global {
+            let skill_dir = match crate::config::global_skills_dir() {
+                Ok(d) => d.join(state.name.trim()),
+                Err(e) => {
+                    app.active_tab_mut().input_error = Some(e.to_string());
+                    return;
+                }
+            };
+            if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+                app.active_tab_mut().input_error =
+                    Some(format!("Failed to create directory: {}", e));
+                return;
+            }
+            (skill_dir, format!("{}/SKILL.md", CONTAINER_WORKSPACE))
+        } else {
+            (git_root.clone(), path.to_string_lossy().to_string())
+        };
+
+        let agent_name = load_repo_config(&git_root)
+            .unwrap_or_default()
+            .agent
+            .as_deref()
+            .unwrap_or("claude")
+            .to_string();
+        let entrypoint = crate::commands::new_skill::skill_interview_agent_entrypoint(
+            &agent_name,
+            &container_path,
+            state.summary.trim(),
+        );
+        let status = format!(
+            "Running interview agent for skill '{}' with agent '{}'",
+            state.name.trim(), agent_name
+        );
+        let out = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+        out.println(format!("Created skeleton skill: {}", path.display()));
+        let runtime = app.runtime.clone();
+        let cmd_label = format!("new skill --interview {}", state.name.trim());
+        app.active_tab_mut().start_command(cmd_label);
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        app.active_tab_mut().exit_rx = Some(exit_rx);
+        let tx = app.active_tab().output_tx.clone();
+        let credentials = match crate::commands::auth::resolve_auth(&git_root, &agent_name) {
+            Ok(c) => c,
+            Err(e) => {
+                app.active_tab_mut().input_error = Some(e.to_string());
+                app.active_tab_mut().finish_command(1);
+                return;
+            }
+        };
+        let host_settings =
+            crate::passthrough::passthrough_for_agent(&agent_name).prepare_host_settings();
+        spawn_text_command(tx, exit_tx, move |sink| async move {
+            crate::commands::agent::run_agent_with_sink(
+                entrypoint,
+                &status,
+                &sink,
+                Some(mount_path),
+                credentials.env_vars,
+                false,
+                host_settings.as_ref(),
+                false,
+                false,
+                None,
+                None,
+                None,
+                &*runtime,
+            )
+            .await
+        });
+        return;
+    }
+
+    let input = SkillInput {
+        name: state.name.trim().to_string(),
+        description: state.description.trim().to_string(),
+        body: state.body.trim().to_string(),
+    };
+    match write_skill_file(&input, &dest_dir) {
+        Ok(path) => {
+            let out = crate::commands::output::OutputSink::Channel(app.active_tab().output_tx.clone());
+            out.println(format!("Created skill: {}", path.display()));
+        }
+        Err(e) => {
+            app.active_tab_mut().input_error = Some(format!("Failed to write skill: {}", e));
+        }
+    }
 }
 
 #[cfg(test)]

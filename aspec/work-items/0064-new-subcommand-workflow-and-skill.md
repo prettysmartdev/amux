@@ -477,10 +477,26 @@ In `src/tui/render.rs`, add rendering for `Dialog::NewWorkflow` and `Dialog::New
 - `amux new skill --global` writes to `~/.amux/skills/<name>/SKILL.md`.
 - `amux new skill --interview --global` writes skeleton and calls `run_agent_with_sink` with `mount_override` set to `~/.amux/skills/<name>/`.
 
-### TUI dialog tests (`src/tui/`)
+### TUI dialog state unit tests (`src/tui/state.rs`, `src/tui/input.rs`)
 
-- `NewWorkflowDialogState`: Tab cycles fields in order. `Ctrl-N` with non-empty step name appends to `steps` and resets step fields. `Ctrl-N` with empty step name sets `error`. `Ctrl-Enter` with at least one step closes dialog and triggers write. `Ctrl-Enter` with zero steps sets `error`.
-- `NewSkillDialogState`: Tab cycles Name → Description → Body. `Ctrl-Enter` with non-empty name and description closes dialog.
+- `WorkflowField::next_step(Name)` returns `Title`.
+- `WorkflowField::prev_step(Title)` returns `Name`.
+- `WorkflowField::prev_step(Name)` returns `StepPrompt` (full-cycle wrap).
+- `NewWorkflowDialogState::new(...)` always initialises `focused_field = WorkflowField::Name` regardless of `interview` flag.
+- **Interview mode Tab** from `Name` moves to `Summary`; Tab from `Summary` moves back to `Name`.
+- **Interview mode BackTab** from `Summary` moves to `Name`; BackTab from `Name` moves to `Summary`.
+- **Non-interview Tab** cycles `Name → Title → StepName → StepAgent → StepModel → StepDependsOn → StepPrompt → StepName`.
+- Submitting with empty `Name` sets `error = Some("Workflow name cannot be empty")`.
+- Submitting with non-empty `Name` and `Title` but zero steps sets `error = Some("At least one step is required")`.
+- `Ctrl-N` with non-empty `step_name` appends to `steps` and resets step fields.
+- `Ctrl-N` with empty `step_name` sets `error = Some("Step name cannot be empty")`.
+- `Ctrl-Enter` with at least one step closes dialog and triggers write.
+- **Skill — interview mode Tab**: `Name → Description → Summary → Name`.
+- **Skill — interview mode BackTab** from `Name` goes to `Summary` (not `Body`).
+- **Skill — interview mode BackTab** from `Summary` goes to `Description`.
+- **Skill — non-interview Tab**: `Name → Description → Body → Name`.
+- `NewSkillDialogState`: `Ctrl-Enter` with non-empty name and description closes dialog.
+- Skill submit with empty `name` sets `error`; empty `description` sets `error`; interview mode with empty `summary` sets `error`.
 
 ### End-to-end
 
