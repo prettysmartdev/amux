@@ -48,6 +48,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "flate2",
+ "libc",
  "nix 0.29.0",
  "portable-pty",
  "ratatui",

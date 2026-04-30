@@ -25,6 +25,29 @@ impl Default for DockerRuntime {
 
 // ─── Private helpers ────────────────────────────────────────────────────────
 
+/// Clear O_NONBLOCK from stdin/stdout/stderr after an interactive Docker run.
+///
+/// Docker's `-it` flag sets O_NONBLOCK on the inherited stdio fds and does not
+/// reliably restore them on exit. Without this, the next read/write returns
+/// EAGAIN ("Resource temporarily unavailable", os error 35 on macOS / 11 on Linux).
+#[cfg(unix)]
+fn clear_stdio_nonblocking() {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: these are valid fds for the lifetime of the process.
+    unsafe {
+        for fd in [
+            std::io::stdin().as_raw_fd(),
+            std::io::stdout().as_raw_fd(),
+            std::io::stderr().as_raw_fd(),
+        ] {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags >= 0 && (flags & libc::O_NONBLOCK) != 0 {
+                libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+            }
+        }
+    }
+}
+
 pub fn docker_socket_path() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -281,6 +304,9 @@ impl AgentRuntime for DockerRuntime {
             .status()
             .context("Failed to invoke `docker run`")?;
 
+        #[cfg(unix)]
+        clear_stdio_nonblocking();
+
         if !status.success() {
             bail!("Container exited with status: {}", status);
         }
@@ -402,6 +428,9 @@ impl AgentRuntime for DockerRuntime {
             .stderr(Stdio::inherit())
             .status()
             .context("Failed to invoke `docker run`")?;
+
+        #[cfg(unix)]
+        clear_stdio_nonblocking();
 
         if !status.success() {
             bail!("Container exited with status: {}", status);

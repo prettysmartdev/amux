@@ -107,8 +107,9 @@ pub async fn run(
     let config = load_repo_config(&git_root)?;
     let config_agent = config.agent.as_deref().unwrap_or("claude").to_string();
     let agent = agent_override.as_deref().unwrap_or(&config_agent).to_string();
+    let agent_passthrough = crate::passthrough::passthrough_for_agent(&agent);
     let credentials = resolve_auth(&git_root, &agent)?;
-    let mut host_settings = crate::passthrough::passthrough_for_agent(&agent).prepare_host_settings();
+    let mut host_settings = agent_passthrough.prepare_host_settings();
 
     // Suppress the dangerous-mode permission dialog when running with --yolo.
     if yolo {
@@ -129,6 +130,12 @@ pub async fn run(
     }
 
     let mut env_vars = credentials.env_vars.clone();
+    // Add agent-specific static env vars (e.g. COPILOT_OFFLINE=true for copilot).
+    for (k, v) in agent_passthrough.extra_env_vars() {
+        if !env_vars.iter().any(|(ek, _)| ek == &k) {
+            env_vars.push((k, v));
+        }
+    }
     let passthrough_names = effective_env_passthrough(&git_root);
     for name in &passthrough_names {
         // Skip vars already supplied by keychain credentials — keychain takes precedence.
@@ -179,8 +186,9 @@ pub async fn run(
     // Recompute credentials and env_vars if fallback changed the agent.
     // Preserve overlays across agent fallback — they are agent-independent.
     let (final_env_vars, final_host_settings) = if effective_agent != agent {
+        let new_passthrough = crate::passthrough::passthrough_for_agent(&effective_agent);
         let new_creds = crate::commands::auth::resolve_auth(&git_root, &effective_agent)?;
-        let mut new_hs = crate::passthrough::passthrough_for_agent(&effective_agent).prepare_host_settings();
+        let mut new_hs = new_passthrough.prepare_host_settings();
         // Carry overlays from the original host_settings to the new one.
         let overlays = host_settings.as_ref().map(|hs| hs.overlays.clone()).unwrap_or_default();
         if !overlays.is_empty() {
@@ -190,6 +198,11 @@ pub async fn run(
             }
         }
         let mut new_ev = new_creds.env_vars.clone();
+        for (k, v) in new_passthrough.extra_env_vars() {
+            if !new_ev.iter().any(|(ek, _)| ek == &k) {
+                new_ev.push((k, v));
+            }
+        }
         for name in &passthrough_names {
             if new_ev.iter().any(|(k, _)| k == name) { continue; }
             if let Ok(val) = std::env::var(name) { new_ev.push((name.clone(), val)); }
@@ -636,6 +649,9 @@ pub async fn run_workflow(
         String::new()
     };
 
+    // Compute envPassthrough variable names once for per-step env_var resolution.
+    let passthrough_names = crate::config::effective_env_passthrough(git_root);
+
     // ── Pre-flight: validate all required agents ──────────────────────────────
     // Collect the distinct effective agent names required across all steps.
     let mut required_agents: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -797,6 +813,54 @@ pub async fn run_workflow(
         // Resolve model: step-level Model: field takes precedence over CLI --model.
         let step_model: Option<&str> = step_state.model.as_deref().or(cli_model);
 
+        // Re-create host settings for the step's agent when it differs from the workflow default.
+        // This ensures each step gets the correct agent-specific credentials and config file mounts,
+        // rather than using the default agent's settings (wrong files mounted) for all steps.
+        let step_hs: Option<HostSettings> = if step_agent != agent {
+            let mut new_hs = crate::passthrough::passthrough_for_agent(step_agent).prepare_host_settings();
+            // Carry overlays from the workflow-level settings to the step-specific settings.
+            let overlays = host_settings.as_ref().map(|hs| hs.overlays.clone()).unwrap_or_default();
+            if !overlays.is_empty() {
+                match new_hs.as_mut() {
+                    Some(hs) => hs.set_overlays(overlays),
+                    None => new_hs = Some(crate::runtime::HostSettings::overlays_only(overlays)),
+                }
+            }
+            if yolo {
+                if let Some(ref s) = new_hs {
+                    let _ = s.apply_yolo_settings();
+                }
+            }
+            new_hs
+        } else {
+            None
+        };
+        // step_hs takes precedence when the step agent differs; fall back to the workflow-level settings.
+        let effective_host_settings: Option<&HostSettings> = step_hs.as_ref().or_else(|| host_settings.as_ref());
+
+        // Resolve env_vars for this step: when the step agent differs from the workflow
+        // default, use the step agent's own credentials and extra env vars so the correct
+        // auth is passed (e.g. CLAUDE_CODE_OAUTH_TOKEN for a claude step, OPENAI_API_KEY
+        // via envPassthrough for a codex step). envPassthrough vars are always included.
+        let step_env_vars: Vec<(String, String)> = if step_agent != agent {
+            let step_passthrough = crate::passthrough::passthrough_for_agent(step_agent);
+            let step_creds = crate::commands::auth::resolve_auth(git_root, step_agent)
+                .unwrap_or_default();
+            let mut step_ev = step_creds.env_vars.clone();
+            for (k, v) in step_passthrough.extra_env_vars() {
+                if !step_ev.iter().any(|(ek, _)| ek == &k) {
+                    step_ev.push((k, v));
+                }
+            }
+            for name in &passthrough_names {
+                if step_ev.iter().any(|(k, _)| k == name) { continue; }
+                if let Ok(val) = std::env::var(name) { step_ev.push((name.clone(), val)); }
+            }
+            step_ev
+        } else {
+            env_vars.clone()
+        };
+
         // Generate a container name and record it for state persistence.
         let container_name = generate_container_name();
         state.set_container_id(&step_name, container_name.clone());
@@ -810,9 +874,9 @@ pub async fn run_workflow(
             &status_msg,
             &OutputSink::Stdout,
             Some(mount_path.clone()),
-            env_vars.clone(),
+            step_env_vars,
             non_interactive,
-            host_settings.as_ref(),
+            effective_host_settings,
             allow_docker,
             mount_ssh,
             Some(container_name),
@@ -839,13 +903,17 @@ pub async fn run_workflow(
                 if !next.is_empty() {
                     println!("Next step(s): {}", next.join(", "));
                 }
-                print!("Press [Enter] to advance, or [q] to abort: ");
-                std::io::stdout().flush()?;
-                let stdin = std::io::stdin();
-                let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
-                if answer.trim().eq_ignore_ascii_case("q") {
-                    println!("Workflow paused. Run again to resume.");
-                    break;
+                if yolo {
+                    println!("Auto-advancing to next step (--yolo).");
+                } else {
+                    print!("Press [Enter] to advance, or [q] to abort: ");
+                    std::io::stdout().flush()?;
+                    let stdin = std::io::stdin();
+                    let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+                    if answer.trim().eq_ignore_ascii_case("q") {
+                        println!("Workflow paused. Run again to resume.");
+                        break;
+                    }
                 }
             }
             Err(e) => {
@@ -853,13 +921,14 @@ pub async fn run_workflow(
                 workflow::save_workflow_state(git_root, &state)?;
 
                 println!("\nStep '{}' failed: {}", step_name, e);
-                print!("Press [r] to retry, or any other key to abort: ");
+                print!("[r]etry step / [e]xit workflow: ");
                 std::io::stdout().flush()?;
                 let stdin = std::io::stdin();
                 let answer = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
                 if answer.trim().eq_ignore_ascii_case("r") {
                     state.set_status(&step_name, StepStatus::Pending);
                     workflow::save_workflow_state(git_root, &state)?;
+                    println!("Retrying step '{}'...", step_name);
                     // Continue loop — the step will appear ready again.
                 } else {
                     println!("Workflow paused. Run again to resume from the failed step.");
@@ -1806,5 +1875,213 @@ mod tests {
 
         assert!(model_a.is_none(), "step A must have no model when neither step nor CLI supplies one");
         assert!(model_b.is_none(), "step B must have no model when neither step nor CLI supplies one");
+    }
+
+    // ── Per-step env_var resolution (auth passthrough + extra_env_vars) ───────
+    //
+    // The inline step_env_vars computation in run_workflow() mirrors these helpers.
+    // We extract the pure logic here so it can be tested without stdin/file I/O.
+
+    /// Mirror the per-step env_vars resolution from run_workflow():
+    /// - Non-default agent: resolve step agent credentials + extra_env_vars + envPassthrough.
+    /// - Default agent: use the pre-computed workflow-level env_vars as-is.
+    fn compute_step_env_vars(
+        step_agent: &str,
+        default_agent: &str,
+        workflow_env_vars: &[(String, String)],
+        passthrough_names: &[String],
+        // Simulated credential env var for testing
+        step_cred_vars: Vec<(String, String)>,
+        // Simulated extra_env_vars for testing
+        step_extra_vars: Vec<(String, String)>,
+        // Simulated host env at test time
+        host_env: &std::collections::HashMap<String, String>,
+    ) -> Vec<(String, String)> {
+        if step_agent != default_agent {
+            let mut step_ev = step_cred_vars;
+            for (k, v) in step_extra_vars {
+                if !step_ev.iter().any(|(ek, _)| ek == &k) {
+                    step_ev.push((k, v));
+                }
+            }
+            for name in passthrough_names {
+                if step_ev.iter().any(|(k, _)| k == name) { continue; }
+                if let Some(val) = host_env.get(name) {
+                    step_ev.push((name.clone(), val.clone()));
+                }
+            }
+            step_ev
+        } else {
+            workflow_env_vars.to_vec()
+        }
+    }
+
+    #[test]
+    fn step_env_vars_default_agent_uses_workflow_vars() {
+        let workflow_ev = vec![
+            ("CLAUDE_CODE_OAUTH_TOKEN".to_string(), "token-123".to_string()),
+            ("MY_VAR".to_string(), "val".to_string()),
+        ];
+        let result = compute_step_env_vars(
+            "claude", "claude", &workflow_ev, &[], vec![], vec![],
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(result, workflow_ev, "default-agent step must use workflow-level env_vars unchanged");
+    }
+
+    #[test]
+    fn step_env_vars_non_default_agent_gets_step_credentials() {
+        // Workflow default is "claude" with CLAUDE_CODE_OAUTH_TOKEN.
+        // Step uses "codex" which has no keychain creds but needs OPENAI_API_KEY via envPassthrough.
+        let workflow_ev = vec![
+            ("CLAUDE_CODE_OAUTH_TOKEN".to_string(), "claude-token".to_string()),
+        ];
+        let passthrough = vec!["OPENAI_API_KEY".to_string()];
+        let mut host_env = std::collections::HashMap::new();
+        host_env.insert("OPENAI_API_KEY".to_string(), "sk-openai-test".to_string());
+
+        let result = compute_step_env_vars(
+            "codex", "claude", &workflow_ev, &passthrough,
+            vec![],  // codex has no keychain creds
+            vec![],  // codex has no extra_env_vars
+            &host_env,
+        );
+
+        // Must NOT contain claude's token
+        assert!(
+            !result.iter().any(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN"),
+            "codex step must not receive CLAUDE_CODE_OAUTH_TOKEN; got: {:?}", result
+        );
+        // Must contain OPENAI_API_KEY from envPassthrough
+        assert!(
+            result.contains(&("OPENAI_API_KEY".to_string(), "sk-openai-test".to_string())),
+            "codex step must receive OPENAI_API_KEY via envPassthrough; got: {:?}", result
+        );
+    }
+
+    #[test]
+    fn step_env_vars_non_default_agent_gets_its_own_keychain_credentials() {
+        // Workflow default is "codex" with no keychain creds.
+        // Step uses "claude" which needs CLAUDE_CODE_OAUTH_TOKEN.
+        let workflow_ev = vec![
+            ("OPENAI_API_KEY".to_string(), "sk-openai".to_string()),
+        ];
+        let passthrough: Vec<String> = vec![];
+
+        let result = compute_step_env_vars(
+            "claude", "codex", &workflow_ev, &passthrough,
+            vec![("CLAUDE_CODE_OAUTH_TOKEN".to_string(), "sk-ant-token".to_string())],
+            vec![],
+            &std::collections::HashMap::new(),
+        );
+
+        // Must contain claude's own token
+        assert!(
+            result.contains(&("CLAUDE_CODE_OAUTH_TOKEN".to_string(), "sk-ant-token".to_string())),
+            "claude step must receive CLAUDE_CODE_OAUTH_TOKEN; got: {:?}", result
+        );
+        // Must NOT contain codex's vars from the workflow-level env
+        assert!(
+            !result.iter().any(|(k, _)| k == "OPENAI_API_KEY"),
+            "claude step must not receive workflow-level OPENAI_API_KEY; got: {:?}", result
+        );
+    }
+
+    #[test]
+    fn step_env_vars_extra_env_vars_injected_for_non_default_agent() {
+        // Copilot requires COPILOT_OFFLINE=true via extra_env_vars.
+        // Workflow default is "claude".
+        let workflow_ev = vec![
+            ("CLAUDE_CODE_OAUTH_TOKEN".to_string(), "token".to_string()),
+        ];
+        let passthrough: Vec<String> = vec![];
+
+        let result = compute_step_env_vars(
+            "copilot", "claude", &workflow_ev, &passthrough,
+            vec![],  // copilot has no keychain creds
+            vec![("COPILOT_OFFLINE".to_string(), "true".to_string())],
+            &std::collections::HashMap::new(),
+        );
+
+        assert!(
+            result.contains(&("COPILOT_OFFLINE".to_string(), "true".to_string())),
+            "copilot step must receive COPILOT_OFFLINE=true via extra_env_vars; got: {:?}", result
+        );
+        assert!(
+            !result.iter().any(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN"),
+            "copilot step must not receive CLAUDE_CODE_OAUTH_TOKEN; got: {:?}", result
+        );
+    }
+
+    #[test]
+    fn step_env_vars_envpassthrough_not_duplicated_when_in_step_credentials() {
+        // If a var is already in the step agent's keychain credentials, envPassthrough
+        // must not add it a second time.
+        let workflow_ev: Vec<(String, String)> = vec![];
+        let passthrough = vec!["MY_TOKEN".to_string()];
+        let mut host_env = std::collections::HashMap::new();
+        host_env.insert("MY_TOKEN".to_string(), "from-env".to_string());
+
+        let result = compute_step_env_vars(
+            "custom-agent", "claude", &workflow_ev, &passthrough,
+            vec![("MY_TOKEN".to_string(), "from-keychain".to_string())],
+            vec![],
+            &host_env,
+        );
+
+        let count = result.iter().filter(|(k, _)| k == "MY_TOKEN").count();
+        assert_eq!(count, 1, "MY_TOKEN must appear exactly once; got: {:?}", result);
+        assert_eq!(
+            result.iter().find(|(k, _)| k == "MY_TOKEN").map(|(_, v)| v.as_str()),
+            Some("from-keychain"),
+            "keychain value must take precedence over envPassthrough"
+        );
+    }
+
+    // ── extra_env_vars included in non-workflow run() env_vars ─────────────────
+
+    #[test]
+    fn copilot_extra_env_vars_are_injected_into_run_env_vars() {
+        // Verify the pure injection logic: extra_env_vars for copilot includes
+        // COPILOT_OFFLINE=true, which must be added to env_vars unless already present.
+        use crate::passthrough::passthrough_for_agent;
+        let passthrough = passthrough_for_agent("copilot");
+        let extra = passthrough.extra_env_vars();
+        assert!(
+            extra.contains(&("COPILOT_OFFLINE".to_string(), "true".to_string())),
+            "copilot extra_env_vars must contain COPILOT_OFFLINE=true; got: {:?}", extra
+        );
+
+        // Simulate the injection loop from run()
+        let creds: Vec<(String, String)> = vec![];
+        let mut env_vars = creds;
+        for (k, v) in passthrough.extra_env_vars() {
+            if !env_vars.iter().any(|(ek, _)| ek == &k) {
+                env_vars.push((k, v));
+            }
+        }
+        assert!(
+            env_vars.contains(&("COPILOT_OFFLINE".to_string(), "true".to_string())),
+            "COPILOT_OFFLINE=true must appear in computed env_vars; got: {:?}", env_vars
+        );
+    }
+
+    #[test]
+    fn extra_env_vars_not_duplicated_when_already_in_credentials() {
+        // If COPILOT_OFFLINE is already in credentials (hypothetically), extra_env_vars
+        // must not overwrite or duplicate it.
+        let mut env_vars = vec![("COPILOT_OFFLINE".to_string(), "false".to_string())];
+        let extra = vec![("COPILOT_OFFLINE".to_string(), "true".to_string())];
+        for (k, v) in extra {
+            if !env_vars.iter().any(|(ek, _)| ek == &k) {
+                env_vars.push((k, v));
+            }
+        }
+        let count = env_vars.iter().filter(|(k, _)| k == "COPILOT_OFFLINE").count();
+        assert_eq!(count, 1, "COPILOT_OFFLINE must not be duplicated");
+        assert_eq!(
+            env_vars[0].1, "false",
+            "credential value must not be overwritten by extra_env_vars"
+        );
     }
 }
