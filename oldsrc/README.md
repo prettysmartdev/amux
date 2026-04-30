@@ -1,0 +1,1 @@
+**FROZEN.** This tree is the pre-refactor amux source. Do not edit. The new architecture lives under `src/`. See `aspec/architecture/2026-grand-architecture.md`. This tree will be deleted in work item 0070.

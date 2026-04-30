@@ -65,6 +65,7 @@ dependencies = [
  "subtle",
  "tar",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "toml",
@@ -3444,6 +3445,7 @@ dependencies = [
  "atomic",
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

@@ -1,35 +1,13 @@
+#![forbid(unsafe_code)]
+// Layer 0 types are not yet consumed by any frontend; suppress dead-code
+// warnings for the duration of the refactor (work items 0066–0070).
 #![allow(dead_code)]
 
-mod cli;
-mod commands;
-mod config;
-mod git;
-mod overlays;
-mod passthrough;
-mod runtime;
-mod tui;
-mod workflow;
+mod command;
+mod data;
+mod engine;
+mod frontend;
 
-use anyhow::Result;
-use clap::Parser;
-use cli::Cli;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-
-    let global_config = crate::config::load_global_config().unwrap_or_default();
-    let runtime = crate::runtime::resolve_runtime(&global_config)?;
-
-    match cli.command {
-        Some(cmd) => commands::run(cmd, runtime).await,
-        None => {
-            let startup_ready_flags = tui::StartupReadyFlags {
-                build: cli.build,
-                no_cache: cli.no_cache,
-                refresh: cli.refresh,
-            };
-            tui::run(startup_ready_flags, runtime).await
-        }
-    }
+fn main() {
+    println!("amux-next: Layer 0 only — see aspec/architecture/2026-grand-architecture.md");
 }

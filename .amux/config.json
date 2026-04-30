@@ -1,6 +1,3 @@
 {
-  "agent": "claude",
-  "envPassthrough": [
-    "OMLX_API_KEY"
-  ]
+  "agent": "claude"
 }
