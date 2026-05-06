@@ -118,7 +118,7 @@ impl WorkflowFrontend for TuiCommandFrontend {
         agent: &str,
         _model: Option<&str>,
     ) {
-        // Signal the TUI event loop to reset the vt100 parser for the new step.
+        self.yolo_initialized = false;
         self.pty_reset_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -189,11 +189,14 @@ impl WorkflowFrontend for TuiCommandFrontend {
         &mut self,
         remaining: Duration,
     ) -> Result<YoloTickOutcome, EngineError> {
-        // Don't spawn a new dialog on every 100ms tick (the engine ticks at
-        // 10Hz). Instead, poke a shared state struct that the renderer reads
-        // and shows as a non-modal overlay. The engine cancels via PTY
-        // activity (via report_step_unstuck → that path also resets the
-        // ticker on the engine side).
+        // Ctrl-W: cancel countdown and show control board.
+        if self.yolo_ctrl_w.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            if let Ok(mut guard) = self.yolo_state.lock() {
+                *guard = None;
+            }
+            self.yolo_initialized = false;
+            return Ok(YoloTickOutcome::ShowControlBoard);
+        }
         let step_name = self
             .workflow_view
             .lock()
@@ -201,33 +204,23 @@ impl WorkflowFrontend for TuiCommandFrontend {
             .and_then(|g| g.as_ref().and_then(|v| v.current_step.clone()))
             .unwrap_or_else(|| "current step".to_string());
         if let Ok(mut guard) = self.yolo_state.lock() {
+            if guard.is_none() && self.yolo_initialized {
+                return Ok(YoloTickOutcome::Cancel);
+            }
             *guard = Some(crate::frontend::tui::tabs::YoloState {
                 step_name,
                 remaining_secs: remaining.as_secs(),
             });
         }
-        // Keep the countdown going. The TUI cancels via the keymap-level
-        // path (Esc) which sets a sentinel on yolo_state that we check here.
-        // If the user pressed Esc, the renderer-side handler clears
-        // `yolo_state` and we propagate Cancel.
-        let still_active = self
-            .yolo_state
-            .lock()
-            .ok()
-            .map(|g| g.is_some())
-            .unwrap_or(false);
-        Ok(if still_active {
-            YoloTickOutcome::Continue
-        } else {
-            YoloTickOutcome::Cancel
-        })
+        self.yolo_initialized = true;
+        Ok(YoloTickOutcome::Continue)
     }
 
     fn report_workflow_completed(&mut self, outcome: &WorkflowOutcome) {
-        // Clear the yolo overlay so it doesn't stick around after completion.
         if let Ok(mut g) = self.yolo_state.lock() {
             *g = None;
         }
+        self.yolo_initialized = false;
         match outcome {
             WorkflowOutcome::Completed => {
                 self.messages.success("Workflow completed successfully")
@@ -325,6 +318,9 @@ mod tests {
         };
         let workflow_view = std::sync::Arc::new(std::sync::Mutex::new(None));
         let yolo_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let yolo_ctrl_w = std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        );
         let pty_reset_flag = std::sync::Arc::new(
             std::sync::atomic::AtomicBool::new(false),
         );
@@ -338,6 +334,7 @@ mod tests {
             container_io,
             workflow_view,
             yolo_state,
+            yolo_ctrl_w,
             pty_reset_flag,
             std::sync::Arc::new(std::sync::Mutex::new(None)),
             stdin_tx_shared,

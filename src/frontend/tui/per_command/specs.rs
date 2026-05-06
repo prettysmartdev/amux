@@ -11,6 +11,7 @@ impl SpecsCommandFrontend for TuiCommandFrontend {
         let response = self.ask_dialog(DialogRequest::TextInput {
             title: "Spec title".into(),
             prompt: "Enter the work item title:".into(),
+            default_text: None,
         })?;
         match response {
             DialogResponse::Text(t) if !t.is_empty() => Ok(t),

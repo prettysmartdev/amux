@@ -10,6 +10,7 @@ impl NewCommandFrontend for TuiCommandFrontend {
         let response = self.ask_dialog(DialogRequest::TextInput {
             title: "Workflow name".into(),
             prompt: "Enter the workflow filename slug:".into(),
+            default_text: None,
         })?;
         match response {
             DialogResponse::Text(t) if !t.is_empty() => Ok(t),
@@ -21,6 +22,7 @@ impl NewCommandFrontend for TuiCommandFrontend {
         let response = self.ask_dialog(DialogRequest::TextInput {
             title: "Workflow summary".into(),
             prompt: "Enter a one-line summary:".into(),
+            default_text: None,
         })?;
         match response {
             DialogResponse::Text(t) => Ok(t),
@@ -32,6 +34,7 @@ impl NewCommandFrontend for TuiCommandFrontend {
         let response = self.ask_dialog(DialogRequest::TextInput {
             title: "Skill name".into(),
             prompt: "Enter the skill name:".into(),
+            default_text: None,
         })?;
         match response {
             DialogResponse::Text(t) if !t.is_empty() => Ok(t),
@@ -43,6 +46,7 @@ impl NewCommandFrontend for TuiCommandFrontend {
         let response = self.ask_dialog(DialogRequest::TextInput {
             title: "Skill summary".into(),
             prompt: "Enter a one-line skill summary:".into(),
+            default_text: None,
         })?;
         match response {
             DialogResponse::Text(t) => Ok(t),

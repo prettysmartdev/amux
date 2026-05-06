@@ -81,6 +81,11 @@ pub type SharedWorkflowViewState = Arc<Mutex<Option<WorkflowViewState>>>;
 /// "Auto-advancing in Ns" non-modal overlay.
 pub type SharedYoloState = Arc<Mutex<Option<YoloState>>>;
 
+/// Shared flag: TUI sets this when the user presses Ctrl-W during a yolo
+/// countdown, signalling the engine to cancel the countdown and show the
+/// workflow control board instead.
+pub type SharedYoloCtrlW = Arc<AtomicBool>;
+
 /// Shared flag set by the workflow frontend to signal the TUI event loop
 /// to reset the vt100 parser before the next step's PTY output arrives.
 pub type SharedPtyResetFlag = Arc<AtomicBool>;
@@ -174,6 +179,9 @@ pub struct Tab {
     /// engine side; rendered as a non-modal overlay (avoids the dialog-spam
     /// that a per-tick `ask_dialog` would cause).
     pub yolo_state: SharedYoloState,
+    /// Shared flag: set by Ctrl-W in the TUI to signal the engine to cancel
+    /// the yolo countdown and show the workflow control board.
+    pub yolo_ctrl_w: SharedYoloCtrlW,
     pub status_log: SharedStatusLog,
     pub status_log_collapsed: bool,
     pub scroll_offset: usize,
@@ -185,6 +193,10 @@ pub struct Tab {
     pub output_lines: Vec<String>,
     pub stuck: bool,
     pub yolo_countdown: Option<u64>,
+    /// When the user dismissed the yolo countdown (Esc or Ctrl-W), records the
+    /// instant so `tick_all_tabs` won't re-open the overlay until the stuck
+    /// backoff expires.
+    pub yolo_dismissed_at: Option<Instant>,
     pub last_output_time: Option<Instant>,
     /// Last time the user touched this tab (key press, mouse). Used together
     /// with `last_output_time` to suppress stuck detection while the user is
@@ -230,6 +242,7 @@ impl Tab {
             container_inner_area: None,
             workflow_state: Arc::new(Mutex::new(None)),
             yolo_state: Arc::new(Mutex::new(None)),
+            yolo_ctrl_w: Arc::new(AtomicBool::new(false)),
             status_log: Arc::new(Mutex::new(Vec::new())),
             status_log_collapsed: false,
             scroll_offset: 0,
@@ -241,6 +254,7 @@ impl Tab {
             output_lines: Vec::new(),
             stuck: false,
             yolo_countdown: None,
+            yolo_dismissed_at: None,
             last_output_time: None,
             last_user_activity_time: None,
             container_stdout_rx: None,
@@ -344,10 +358,36 @@ impl Tab {
         truncate_with_ellipsis(&name, 14)
     }
 
+    /// Yolo countdown label for background tabs: alternates emoji + countdown.
+    /// Returns `None` when no yolo countdown is active.
+    pub fn background_yolo_label(&self, tab_width: u16) -> Option<String> {
+        let state = self.yolo_state.lock().ok()?.as_ref()?.clone();
+        let label = if state.remaining_secs % 2 == 0 {
+            format!("\u{26a0}\u{fe0f}  yolo in {}", state.remaining_secs)
+        } else {
+            format!("\u{1f918} yolo in {}", state.remaining_secs)
+        };
+        let max_chars = tab_width.saturating_sub(4) as usize;
+        let truncated = if label.chars().count() > max_chars && max_chars > 1 {
+            let t: String = label.chars().take(max_chars - 1).collect();
+            format!("{}\u{2026}", t)
+        } else {
+            label
+        };
+        Some(truncated)
+    }
+
     /// Subcommand label rendered inside the tab cell (NOT in the title).
     /// Empty while Idle. Prepended with `⚠️ ` while stuck. Truncated to fit
     /// `tab_width - 4` chars (2 borders + 2 padding spaces).
+    /// For background tabs with an active yolo countdown, shows the countdown
+    /// label instead.
     pub fn tab_subcommand_label(&self, tab_width: u16, is_active: bool) -> String {
+        if !is_active {
+            if let Some(label) = self.background_yolo_label(tab_width) {
+                return label;
+            }
+        }
         let cmd = match &self.execution_phase {
             ExecutionPhase::Idle => return String::new(),
             ExecutionPhase::Running { command }

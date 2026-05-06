@@ -2,7 +2,7 @@
 //! command box, suggestion row.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 
 use crate::frontend::tui::app::{App, Focus};
 use crate::frontend::tui::container_view;
@@ -590,17 +590,36 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             prompt,
             editor,
         } => {
-            let dialog_area = dialogs::centered_fixed(60, 7, area);
+            let prompt_lines = prompt.lines().count() as u16;
+            let dialog_h = prompt_lines + 6;
+            let dialog_area = dialogs::centered_fixed(60, dialog_h, area);
             let inner =
                 dialogs::render_dialog_frame(title, Color::Cyan, dialog_area, frame);
-            let display_text: String = editor.text.chars().take(inner.width.saturating_sub(3) as usize).collect();
-            let text = format!("{prompt}\n> {}", display_text);
-            frame.render_widget(Paragraph::new(text), inner);
+            let prompt_area = Rect { height: prompt_lines, ..inner };
+            frame.render_widget(
+                Paragraph::new(prompt.as_str()).style(Style::default().fg(Color::Gray)),
+                prompt_area,
+            );
+            let input_area = Rect {
+                y: inner.y + prompt_lines + 1,
+                height: 3,
+                ..inner
+            };
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan));
+            let input_inner = input_block.inner(input_area);
+            frame.render_widget(input_block, input_area);
+            let display_text: String = editor.text.chars().take(input_inner.width as usize).collect();
+            frame.render_widget(
+                Paragraph::new(display_text).style(Style::default().fg(Color::White)),
+                input_inner,
+            );
             let text_before_cursor = &editor.text[..editor.cursor];
             let cursor_display_w = unicode_width::UnicodeWidthStr::width(text_before_cursor) as u16;
-            let cursor_x = inner.x + 2 + cursor_display_w.min(inner.width.saturating_sub(3));
-            let cursor_y = inner.y + 1;
-            if cursor_x < inner.x + inner.width {
+            let cursor_x = input_inner.x + cursor_display_w.min(input_inner.width.saturating_sub(1));
+            let cursor_y = input_inner.y;
+            if cursor_x < input_inner.x + input_inner.width {
                 frame.set_cursor_position(Position::new(cursor_x, cursor_y));
             }
         }
@@ -789,15 +808,21 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             frame.render_widget(Paragraph::new(lines), inner);
         }
         dialogs::Dialog::WorkflowYoloCountdown(state) => {
-            let dialog_area = dialogs::centered_fixed(50, 7, area);
+            let emoji = if state.remaining_secs % 2 == 0 {
+                "\u{26a0}\u{fe0f}"
+            } else {
+                "\u{1f918}"
+            };
+            let title = format!("{} Yolo in {}s", emoji, state.remaining_secs);
+            let dialog_area = dialogs::centered_fixed(50, 8, area);
             let inner = dialogs::render_dialog_frame(
-                "Yolo Countdown",
+                &title,
                 Color::Magenta,
                 dialog_area,
                 frame,
             );
             let text = format!(
-                "  Step: {}\n  Auto-advancing in {}s\n\n  [Esc] Cancel",
+                "  Step: {}\n  Auto-advancing in {}s\n\n  [Esc] Cancel   [Ctrl-W] Control board",
                 state.step_name, state.remaining_secs
             );
             frame.render_widget(Paragraph::new(text), inner);
@@ -863,7 +888,8 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             );
         }
         dialogs::Dialog::Custom { title, body, keys } => {
-            let height = (keys.len() as u16 + 6).min(area.height.saturating_sub(4));
+            let body_lines = body.lines().count() as u16;
+            let height = (keys.len() as u16 + body_lines + 5).min(area.height.saturating_sub(4));
             let dialog_area = dialogs::centered_fixed(55, height, area);
             let inner =
                 dialogs::render_dialog_frame(title, Color::Yellow, dialog_area, frame);
@@ -876,48 +902,122 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
     }
 }
 
-/// Render the config show dialog (full-screen table).
+/// Render the config show dialog using a Ratatui `Table` widget.
 fn render_config_show(
     state: &dialogs::ConfigShowState,
     area: Rect,
     frame: &mut Frame,
 ) {
-    let dialog_area = dialogs::centered_rect(90, 80, area);
-    let inner = dialogs::render_dialog_frame("Config", Color::Cyan, dialog_area, frame);
+    let popup_width = area.width.saturating_sub(4).min(110);
+    let popup_height = area.height.saturating_sub(4).min(26);
+    let popup = dialogs::centered_fixed(popup_width, popup_height, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .title(" amux config ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
 
-    let header = Line::from(vec![
-        Span::styled(
-            format!("{:<25} {:<20} {:<20} {:<20}", "Field", "Global", "Repo", "Effective"),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
+    let bottom_height: u16 = if state.editing { 3 } else { 2 };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(bottom_height)])
+        .split(inner);
+    let table_area = chunks[0];
+    let hint_area = chunks[1];
 
-    let mut lines = vec![header, Line::from("")];
-    for (i, row) in state.rows.iter().enumerate() {
+    let header_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let header = Row::new(vec![
+        Cell::from("Field").style(header_style),
+        Cell::from("Global").style(header_style),
+        Cell::from("Repo").style(header_style),
+        Cell::from("Effective").style(header_style),
+    ]).height(1);
+
+    let rows: Vec<Row> = state.rows.iter().enumerate().map(|(i, row)| {
         let is_selected = i == state.selected;
-        let style = if row.read_only {
-            Style::default().fg(Color::DarkGray)
-        } else if is_selected {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+
+        let gval = if is_selected && state.editing && state.edit_column == 0 {
+            let ev = &state.editor.text;
+            let cursor = state.editor.cursor;
+            format!("{}|{}", &ev[..cursor], &ev[cursor..])
         } else {
-            Style::default().fg(Color::Gray)
+            row.global.clone()
+        };
+        let rval = if is_selected && state.editing && state.edit_column == 1 {
+            let ev = &state.editor.text;
+            let cursor = state.editor.cursor;
+            format!("{}|{}", &ev[..cursor], &ev[cursor..])
+        } else {
+            row.repo.clone()
         };
 
-        let prefix = if is_selected { "▸ " } else { "  " };
-        let text = format!(
-            "{}{:<23} {:<20} {:<20} {:<20}",
-            prefix, row.field, row.global, row.repo, row.effective
-        );
-        lines.push(Line::from(Span::styled(text, style)));
+        let (gcell, rcell) = if is_selected && !state.editing {
+            let col_style = Style::default().fg(Color::Black).bg(Color::White);
+            if state.edit_column == 0 {
+                (Cell::from(gval).style(col_style), Cell::from(rval))
+            } else {
+                (Cell::from(gval), Cell::from(rval).style(col_style))
+            }
+        } else if is_selected && state.editing {
+            let edit_style = Style::default().fg(Color::Black).bg(Color::Green);
+            if state.edit_column == 0 {
+                (Cell::from(gval).style(edit_style), Cell::from(rval))
+            } else {
+                (Cell::from(gval), Cell::from(rval).style(edit_style))
+            }
+        } else {
+            (Cell::from(gval), Cell::from(rval))
+        };
+
+        let r = Row::new(vec![
+            Cell::from(row.field.as_str()),
+            gcell,
+            rcell,
+            Cell::from(row.effective.as_str()),
+        ]);
+        if is_selected {
+            r.style(Style::default().fg(Color::White).bg(Color::DarkGray))
+        } else if row.read_only {
+            r.style(Style::default().fg(Color::DarkGray))
+        } else {
+            r
+        }
+    }).collect();
+
+    let widths = [
+        Constraint::Percentage(28),
+        Constraint::Percentage(24),
+        Constraint::Percentage(24),
+        Constraint::Percentage(24),
+    ];
+    let table = Table::new(rows, widths).header(header);
+    frame.render_widget(table, table_area);
+
+    let mut hint_lines: Vec<Line> = Vec::new();
+    if state.editing {
+        hint_lines.push(Line::from(vec![
+            Span::styled("  Editing", Style::default().fg(Color::Green)),
+            Span::raw("  |  "),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw("=save  "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw("=cancel"),
+        ]));
+    } else {
+        hint_lines.push(Line::from(vec![
+            Span::styled("  \u{2191}\u{2193}", Style::default().fg(Color::Yellow)),
+            Span::raw("=row  "),
+            Span::styled("\u{2190}\u{2192}", Style::default().fg(Color::Yellow)),
+            Span::raw("=col  "),
+            Span::styled("e", Style::default().fg(Color::Yellow)),
+            Span::raw("=edit  "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw("=close"),
+        ]));
     }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "  ↑↓ navigate  |  Esc close",
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(hint_lines), hint_area);
 }

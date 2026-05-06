@@ -265,6 +265,26 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
             let tab = app.active_tab_mut();
             tab.container_window_state = tab.container_window_state.cycle();
         }
+        Action::WorkflowControl => {
+            // Guard: only act when a workflow is active with a current step.
+            let workflow_active = app.active_tab().workflow_state.lock().ok()
+                .and_then(|g| g.as_ref().and_then(|v| v.current_step.clone()))
+                .is_some();
+            if !workflow_active {
+                // No workflow running — ignore.
+            } else if matches!(app.active_dialog, Some(Dialog::WorkflowYoloCountdown(_))) {
+                // During yolo countdown: cancel it and signal the engine to
+                // show the workflow control board.
+                if let Ok(mut guard) = app.active_tab().yolo_state.lock() {
+                    *guard = None;
+                }
+                app.active_tab_mut().yolo_dismissed_at = Some(std::time::Instant::now());
+                app.active_tab().yolo_ctrl_w.store(true, std::sync::atomic::Ordering::Relaxed);
+                app.active_dialog = None;
+            } else if app.active_dialog.is_some() {
+                // Another dialog is blocking — don't interfere.
+            }
+        }
         Action::OpenConfigShow => {
             // Run `config show` through dispatch so the command layer
             // computes the rows and the frontend trait presents the dialog.
@@ -354,12 +374,11 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
                     return;
                 }
             }
-            // Yolo countdown cancel: clear shared state so the engine stops
-            // the countdown and pauses the workflow.
             if matches!(app.active_dialog, Some(Dialog::WorkflowYoloCountdown(_))) {
                 if let Ok(mut guard) = app.active_tab().yolo_state.lock() {
                     *guard = None;
                 }
+                app.active_tab_mut().yolo_dismissed_at = Some(std::time::Instant::now());
                 app.active_dialog = None;
                 return;
             }

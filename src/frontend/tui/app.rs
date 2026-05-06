@@ -203,6 +203,7 @@ impl App {
             container_io,
             tab.workflow_state.clone(),
             tab.yolo_state.clone(),
+            tab.yolo_ctrl_w.clone(),
             tab.pty_reset_flag.clone(),
             tab.container_name_shared.clone(),
             tab.stdin_tx_shared.clone(),
@@ -375,11 +376,6 @@ impl App {
             }
         }
 
-        // Sync yolo countdown overlay from shared state. The engine thread
-        // updates `yolo_state` every 100ms during the countdown; we reflect
-        // that into `active_dialog` for the active tab. Background tabs auto-
-        // advance via their own engine thread — the TUI just renders the tab
-        // label differently (handled in the tab-bar renderer).
         let active = self.active_tab;
         let yolo_snapshot = self.tabs[active]
             .yolo_state
@@ -387,10 +383,13 @@ impl App {
             .ok()
             .and_then(|g| g.clone());
         if let Some(state) = yolo_snapshot {
-            // Only overwrite when no command dialog is blocking. The yolo
-            // overlay is non-modal; command dialogs (step error, control
-            // board) take precedence.
-            if !self.command_dialog_active {
+            // Respect the backoff: if the user recently dismissed the yolo
+            // dialog, don't re-show it until the stuck backoff expires.
+            let backoff_active = self.tabs[active]
+                .yolo_dismissed_at
+                .map(|t| t.elapsed() < crate::engine::workflow::timing::STUCK_DIALOG_BACKOFF)
+                .unwrap_or(false);
+            if !self.command_dialog_active && !backoff_active {
                 self.active_dialog =
                     Some(Dialog::WorkflowYoloCountdown(
                         crate::frontend::tui::dialogs::WorkflowYoloCountdownState {
@@ -425,11 +424,15 @@ impl App {
                 DialogRequest::YesNoCancel { title, body } => {
                     Dialog::YesNoCancel { title, body }
                 }
-                DialogRequest::TextInput { title, prompt } => {
+                DialogRequest::TextInput { title, prompt, default_text } => {
+                    let mut editor = TextEdit::new(false);
+                    if let Some(text) = default_text {
+                        editor.set_text(&text);
+                    }
                     Dialog::TextInput {
                         title,
                         prompt,
-                        editor: TextEdit::new(false),
+                        editor,
                     }
                 }
                 DialogRequest::MultilineInput { title, prompt } => {

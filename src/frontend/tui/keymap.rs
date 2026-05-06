@@ -13,6 +13,7 @@ pub enum Action {
     CloseTabOrQuit,
     CycleContainerWindow,
     OpenConfigShow,
+    WorkflowControl,
 
     // ── Command box ─────────────────────────────────────────────────────
     SubmitCommand,
@@ -75,6 +76,7 @@ pub fn map_key(key: KeyEvent, ctx: FocusContext) -> Action {
             KeyCode::Char('a') => return Action::PreviousTab,
             KeyCode::Char('d') => return Action::NextTab,
             KeyCode::Char('m') => return Action::CycleContainerWindow,
+            KeyCode::Char('w') => return Action::WorkflowControl,
             _ => {}
         }
     }

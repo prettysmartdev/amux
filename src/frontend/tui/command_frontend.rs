@@ -16,7 +16,7 @@ use crate::command::error::CommandError;
 use crate::engine::container::frontend::ContainerIo;
 use crate::engine::message::{UserMessage, UserMessageSink};
 use crate::frontend::tui::dialogs::{DialogRequest, DialogResponse};
-use crate::frontend::tui::tabs::{SharedContainerName, SharedPtyResetFlag, SharedResizeTx, SharedStdinTx, SharedWorkflowViewState, SharedYoloState};
+use crate::frontend::tui::tabs::{SharedContainerName, SharedPtyResetFlag, SharedResizeTx, SharedStdinTx, SharedWorkflowViewState, SharedYoloCtrlW, SharedYoloState};
 use crate::frontend::tui::user_message::{SharedStatusLog, TuiUserMessageSink};
 
 /// TUI frontend struct. Implements every per-command frontend trait.
@@ -40,6 +40,11 @@ pub struct TuiCommandFrontend {
     pub(crate) status_log: SharedStatusLog,
     pub(crate) workflow_view: SharedWorkflowViewState,
     pub(crate) yolo_state: SharedYoloState,
+    pub(crate) yolo_ctrl_w: SharedYoloCtrlW,
+    /// Tracks whether yolo_countdown_tick has been called at least once for the
+    /// current countdown, so it can distinguish "not yet started" from "user
+    /// cancelled via Esc".
+    pub(crate) yolo_initialized: bool,
     pub(crate) pty_reset_flag: SharedPtyResetFlag,
     pub(crate) container_name_shared: SharedContainerName,
     /// Persistent stdout sender — kept alive across workflow steps so each
@@ -62,6 +67,7 @@ impl TuiCommandFrontend {
         container_io: ContainerIo,
         workflow_view: SharedWorkflowViewState,
         yolo_state: SharedYoloState,
+        yolo_ctrl_w: SharedYoloCtrlW,
         pty_reset_flag: SharedPtyResetFlag,
         container_name_shared: SharedContainerName,
         stdin_tx_shared: SharedStdinTx,
@@ -78,6 +84,8 @@ impl TuiCommandFrontend {
             status_log,
             workflow_view,
             yolo_state,
+            yolo_ctrl_w,
+            yolo_initialized: false,
             pty_reset_flag,
             container_name_shared,
             stdout_tx,

@@ -14,7 +14,7 @@ use crate::frontend::tui::text_edit::TextEdit;
 pub enum DialogRequest {
     YesNo { title: String, body: String },
     YesNoCancel { title: String, body: String },
-    TextInput { title: String, prompt: String },
+    TextInput { title: String, prompt: String, default_text: Option<String> },
     MultilineInput { title: String, prompt: String },
     ListPicker { title: String, items: Vec<String> },
     KindSelect { title: String, options: Vec<(String, String)> },

@@ -30,6 +30,13 @@ pub mod factory;
 pub mod frontend;
 pub mod timing;
 
+/// Result of `run_yolo_countdown`.
+enum YoloCountdownResult {
+    Advance,
+    Pause,
+    ShowControlBoard,
+}
+
 pub use actions::{
     StepOutput, StepOutputKind, WorkflowOutcome as Outcome, WorkflowStepStatus as Status,
 };
@@ -258,14 +265,17 @@ impl WorkflowEngine {
                 // In yolo mode, replace the interactive prompt with a 60-second
                 // countdown that auto-advances unless the user cancels.
                 if self.yolo {
-                    let advance = self.run_yolo_countdown().await?;
-                    if advance {
-                        continue;
-                    } else {
-                        self.persist()?;
-                        let outcome = WorkflowOutcome::Paused;
-                        self.frontend.report_workflow_completed(&outcome);
-                        return Ok(outcome);
+                    match self.run_yolo_countdown().await? {
+                        YoloCountdownResult::Advance => continue,
+                        YoloCountdownResult::Pause => {
+                            self.persist()?;
+                            let outcome = WorkflowOutcome::Paused;
+                            self.frontend.report_workflow_completed(&outcome);
+                            return Ok(outcome);
+                        }
+                        YoloCountdownResult::ShowControlBoard => {
+                            // Fall through to the interactive control board below.
+                        }
                     }
                 }
 
@@ -492,8 +502,8 @@ impl WorkflowEngine {
     }
 
     /// Run the 60-second yolo countdown, ticking through the frontend every
-    /// second. Returns `true` to advance to the next step, `false` to pause.
-    async fn run_yolo_countdown(&mut self) -> Result<bool, EngineError> {
+    /// second. Returns the next action to take.
+    async fn run_yolo_countdown(&mut self) -> Result<YoloCountdownResult, EngineError> {
         let total = std::time::Duration::from_secs(60);
         let start = std::time::Instant::now();
         loop {
@@ -504,12 +514,15 @@ impl WorkflowEngine {
                 total - elapsed
             };
             match self.frontend.yolo_countdown_tick(remaining)? {
-                YoloTickOutcome::AdvanceNow => return Ok(true),
-                YoloTickOutcome::Cancel => return Ok(false),
+                YoloTickOutcome::AdvanceNow => return Ok(YoloCountdownResult::Advance),
+                YoloTickOutcome::Cancel => return Ok(YoloCountdownResult::Pause),
+                YoloTickOutcome::ShowControlBoard => {
+                    return Ok(YoloCountdownResult::ShowControlBoard);
+                }
                 YoloTickOutcome::Continue => {}
             }
             if remaining.is_zero() {
-                return Ok(true);
+                return Ok(YoloCountdownResult::Advance);
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }

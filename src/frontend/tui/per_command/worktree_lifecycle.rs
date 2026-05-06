@@ -28,7 +28,7 @@ impl WorktreeLifecycleFrontend for TuiCommandFrontend {
     ) -> Result<PreWorktreeDecision, CommandError> {
         let file_list = format_file_list(files);
         let body = format!(
-            "{} uncommitted file(s):\n{}\n\nCommit them first, use last commit, or abort?",
+            "{} uncommitted file(s):\n{}\n\n[c] Commit first  [u] Use last commit  [a] Abort",
             files.len(),
             file_list
         );
@@ -45,7 +45,8 @@ impl WorktreeLifecycleFrontend for TuiCommandFrontend {
             DialogResponse::Char('c') => {
                 let msg_response = self.ask_dialog(DialogRequest::TextInput {
                     title: "Commit message".into(),
-                    prompt: format!("Suggested: {suggested_message}\n\nEnter commit message (or press Enter to accept):"),
+                    prompt: "Enter commit message (or press Enter to accept):".into(),
+                    default_text: Some(suggested_message.to_string()),
                 })?;
                 match msg_response {
                     DialogResponse::Text(msg) if !msg.is_empty() => {
@@ -139,7 +140,8 @@ impl WorktreeLifecycleFrontend for TuiCommandFrontend {
         ) {
             let msg_response = self.ask_dialog(DialogRequest::TextInput {
                 title: "Commit message".into(),
-                prompt: format!("Suggested: {suggested_message}\n\nEnter commit message (or press Enter to accept):"),
+                prompt: "Enter commit message (or press Enter to accept):".into(),
+                default_text: Some(suggested_message.to_string()),
             })?;
             match msg_response {
                 DialogResponse::Text(msg) if !msg.is_empty() => Ok(Some(msg)),

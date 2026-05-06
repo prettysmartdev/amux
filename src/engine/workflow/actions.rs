@@ -55,6 +55,9 @@ pub enum YoloTickOutcome {
     Continue,
     Cancel,
     AdvanceNow,
+    /// User pressed Ctrl-W: cancel the countdown and show the workflow
+    /// control board instead of pausing.
+    ShowControlBoard,
 }
 
 /// What `step_once` returned: the step that just executed plus its outcome.
