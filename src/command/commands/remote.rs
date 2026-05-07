@@ -10,6 +10,24 @@ use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
 use crate::engine::message::{MessageLevel, UserMessage, UserMessageSink};
 
+/// Build a `RemoteClient` for `addr`, pinning the locally-stored self-signed
+/// cert when (a) the target is loopback AND (b) the cert PEM is on disk.
+/// For non-loopback addresses we never pin — standard webpki verification
+/// stays in force, and the caller is expected to use a publicly-trusted cert.
+fn build_remote_client(
+    engines: &Engines,
+    addr: &str,
+    api_key: Option<&crate::engine::auth::ApiKey>,
+) -> Result<RemoteClient, CommandError> {
+    let pinned: Option<String> = if RemoteClient::is_loopback_addr(addr) {
+        let cert_path = engines.auth_engine.headless_paths().tls_cert_file();
+        std::fs::read_to_string(&cert_path).ok()
+    } else {
+        None
+    };
+    RemoteClient::new_with_pinned_cert(addr, api_key, pinned.as_deref())
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteRunFlags {
     pub command: Vec<String>,
@@ -71,7 +89,43 @@ pub enum RemoteOutcome {
     SessionKill(RemoteSessionKillOutcome),
 }
 
-pub trait RemoteCommandFrontend: UserMessageSink + Send + Sync {}
+/// Frontend hooks for the `remote` command family. Default impls return safe
+/// non-interactive choices (first option / declined save) so headless dispatch
+/// "just works"; CLI/TUI override to actually prompt.
+pub trait RemoteCommandFrontend: UserMessageSink + Send + Sync {
+    /// Choose one of multiple sessions reported by the server. Default: first.
+    fn ask_session_picker(&mut self, sessions: &[String]) -> Result<String, CommandError> {
+        sessions
+            .first()
+            .cloned()
+            .ok_or(CommandError::RemoteSessionMissing)
+    }
+
+    /// Choose one of the user's saved working directories. Default: first.
+    fn ask_saved_dir_picker(&mut self, dirs: &[String]) -> Result<String, CommandError> {
+        dirs.first().cloned().ok_or_else(|| {
+            CommandError::MissingRequiredArgument {
+                command: vec!["remote".into(), "session".into(), "start".into()],
+                argument: "dir".into(),
+            }
+        })
+    }
+
+    /// Choose which session to kill from a list. Default: first.
+    fn ask_session_kill_picker(&mut self, sessions: &[String]) -> Result<String, CommandError> {
+        sessions
+            .first()
+            .cloned()
+            .ok_or(CommandError::RemoteSessionMissing)
+    }
+
+    /// Should the just-used directory be persisted to the user's saved-dirs
+    /// list? Default: no — headless mode never persists side-effects without
+    /// an explicit signal.
+    fn confirm_save_dir(&mut self, _dir: &str) -> Result<bool, CommandError> {
+        Ok(false)
+    }
+}
 
 pub struct RemoteCommand {
     sub: RemoteSubcommand,
@@ -99,12 +153,14 @@ impl Command for RemoteCommand {
     ) -> Result<Self::Outcome, CommandError> {
         let session = open_session_for_cwd(&self.engines)?;
         let outcome = match self.sub {
-            RemoteSubcommand::Run(f) => run_remote_run(&session, f, &mut *frontend).await?,
+            RemoteSubcommand::Run(f) => {
+                run_remote_run(&session, &self.engines, f, &mut *frontend).await?
+            }
             RemoteSubcommand::SessionStart(f) => {
-                run_session_start(&session, f, &mut *frontend).await?
+                run_session_start(&session, &self.engines, f, &mut *frontend).await?
             }
             RemoteSubcommand::SessionKill(f) => {
-                run_session_kill(&session, f, &mut *frontend).await?
+                run_session_kill(&session, &self.engines, f, &mut *frontend).await?
             }
         };
         frontend.replay_queued();
@@ -135,16 +191,12 @@ fn resolve_session_id(
     session
         .effective_config()
         .remote_session()
-        .ok_or_else(|| {
-            CommandError::Other(
-                "No session specified. Pass --session <ID> or set AMUX_REMOTE_SESSION."
-                    .to_string(),
-            )
-        })
+        .ok_or(CommandError::RemoteSessionMissing)
 }
 
 async fn run_remote_run(
     session: &crate::data::session::Session,
+    engines: &Engines,
     flags: RemoteRunFlags,
     frontend: &mut dyn UserMessageSink,
 ) -> Result<RemoteOutcome, CommandError> {
@@ -159,19 +211,19 @@ async fn run_remote_run(
     let session_id = resolve_session_id(session, flags.session.as_deref())?;
     let api_key =
         RemoteClient::resolve_api_key(session, &addr, flags.api_key.as_deref())?;
-    let client = RemoteClient::new(&addr, api_key.as_ref())?;
+    let client = build_remote_client(engines, &addr, api_key.as_ref())?;
 
     let subcommand = &flags.command[0];
     let args: Vec<&str> = flags.command[1..].iter().map(|s| s.as_str()).collect();
 
     let resp = client
-        .send_command(
+        .send_command_with_headers(
             &["commands"],
             &[
                 ("subcommand", serde_json::json!(subcommand)),
                 ("args", serde_json::json!(args)),
-                ("session_id", serde_json::json!(&session_id)),
             ],
+            &[("x-amux-session", session_id.as_str())],
         )
         .await?;
 
@@ -238,6 +290,7 @@ async fn run_remote_run(
 
 async fn run_session_start(
     session: &crate::data::session::Session,
+    engines: &Engines,
     flags: RemoteSessionStartFlags,
     frontend: &mut dyn UserMessageSink,
 ) -> Result<RemoteOutcome, CommandError> {
@@ -246,10 +299,18 @@ async fn run_session_start(
         argument: "dir".into(),
     })?;
 
+    // Detached-HEAD warning: surfaces a UserMessage but does not block.
+    if engines.git_engine.is_detached_head(session.git_root()) {
+        frontend.write_message(UserMessage {
+            level: MessageLevel::Warning,
+            text: "detached HEAD — proceeding".into(),
+        });
+    }
+
     let addr = resolve_addr(session, flags.remote_addr.as_deref())?;
     let api_key =
         RemoteClient::resolve_api_key(session, &addr, flags.api_key.as_deref())?;
-    let client = RemoteClient::new(&addr, api_key.as_ref())?;
+    let client = build_remote_client(engines, &addr, api_key.as_ref())?;
 
     let resp = client
         .send_command(
@@ -277,6 +338,7 @@ async fn run_session_start(
 
 async fn run_session_kill(
     session: &crate::data::session::Session,
+    engines: &Engines,
     flags: RemoteSessionKillFlags,
     frontend: &mut dyn UserMessageSink,
 ) -> Result<RemoteOutcome, CommandError> {
@@ -290,9 +352,26 @@ async fn run_session_kill(
     let addr = resolve_addr(session, flags.remote_addr.as_deref())?;
     let api_key =
         RemoteClient::resolve_api_key(session, &addr, flags.api_key.as_deref())?;
-    let client = RemoteClient::new(&addr, api_key.as_ref())?;
+    let client = build_remote_client(engines, &addr, api_key.as_ref())?;
 
-    client.delete(&["sessions", &session_id]).await?;
+    match client.delete(&["sessions", &session_id]).await {
+        // 200 / 204 → success
+        Ok(_) => {}
+        // 404 → already gone — treat as idempotent success
+        Err(CommandError::RemoteHttpStatus { status: 404, .. }) => {}
+        Err(CommandError::RemoteHttpStatus { status, body }) => {
+            return Err(CommandError::RemoteSessionKillFailed {
+                session_id,
+                reason: format!("HTTP {status}: {body}"),
+            });
+        }
+        Err(other) => {
+            return Err(CommandError::RemoteSessionKillFailed {
+                session_id,
+                reason: other.to_string(),
+            });
+        }
+    }
 
     frontend.write_message(UserMessage {
         level: MessageLevel::Success,
@@ -303,4 +382,77 @@ async fn run_session_kill(
         session_id,
         remote_addr: addr,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::config::env::EnvSnapshot;
+    use crate::data::session::{Session, SessionOpenOptions};
+
+    fn make_session_empty() -> (tempfile::TempDir, Session) {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = SessionOpenOptions {
+            env: Some(EnvSnapshot::empty()),
+            ..Default::default()
+        };
+        let session = Session::open_at_git_root(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            opts,
+        )
+        .unwrap();
+        (tmp, session)
+    }
+
+    fn make_session_with_remote_addr(addr: &str) -> (tempfile::TempDir, Session) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_json = format!(r#"{{"remote":{{"defaultAddr":"{addr}"}}}}"#);
+        std::fs::write(tmp.path().join("config.json"), &config_json).unwrap();
+        let env = EnvSnapshot::with_overrides([("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap())]);
+        let opts = SessionOpenOptions {
+            env: Some(env),
+            ..Default::default()
+        };
+        let session = Session::open_at_git_root(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            opts,
+        )
+        .unwrap();
+        (tmp, session)
+    }
+
+    // ─── resolve_addr ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_addr_flag_wins_over_config() {
+        let (_tmp, session) = make_session_with_remote_addr("http://config-host:9876");
+        let addr = resolve_addr(&session, Some("http://flag-host:1234")).unwrap();
+        assert_eq!(addr, "http://flag-host:1234");
+    }
+
+    #[test]
+    fn resolve_addr_falls_back_to_config() {
+        let (_tmp, session) = make_session_with_remote_addr("http://config-host:9876");
+        let addr = resolve_addr(&session, None).unwrap();
+        assert_eq!(addr, "http://config-host:9876");
+    }
+
+    #[test]
+    fn resolve_addr_empty_flag_falls_back_to_config() {
+        let (_tmp, session) = make_session_with_remote_addr("http://config-host:9876");
+        let addr = resolve_addr(&session, Some("")).unwrap();
+        assert_eq!(addr, "http://config-host:9876");
+    }
+
+    #[test]
+    fn resolve_addr_errors_when_no_source_available() {
+        let (_tmp, session) = make_session_empty();
+        let result = resolve_addr(&session, None);
+        assert!(
+            matches!(result, Err(CommandError::MissingRemoteAddress)),
+            "must error when no addr source: {result:?}"
+        );
+    }
 }

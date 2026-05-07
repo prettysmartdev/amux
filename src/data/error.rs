@@ -68,6 +68,9 @@ pub enum DataError {
 
     #[error("invalid path {path}: {reason}")]
     InvalidPath { path: PathBuf, reason: String },
+
+    #[error("{0}")]
+    Other(String),
 }
 
 impl DataError {

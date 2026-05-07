@@ -31,7 +31,8 @@ pub struct AgentCredentials {
     pub env_vars: Vec<(String, String)>,
 }
 
-/// Newtype around a generated API key (32-byte URL-safe base64).
+/// Newtype around a generated API key (32 random bytes encoded as 64-char
+/// lowercase hex — matches old-amux wire format).
 #[derive(Debug, Clone)]
 pub struct ApiKey(String);
 
@@ -94,6 +95,10 @@ impl AuthEngine {
         }
     }
 
+    pub fn headless_paths(&self) -> &HeadlessPaths {
+        &self.headless_paths
+    }
+
     // ── Agent credential discovery ──────────────────────────────────────────
 
     /// Inspect the host for the agent's credentials. Always returns a status
@@ -147,13 +152,14 @@ impl AuthEngine {
 
     // ── Headless API-key lifecycle ─────────────────────────────────────────
 
-    /// Generate a fresh 32-byte API key, base64 URL-safe encoded.
+    /// Generate a fresh 32-byte API key, hex-encoded (64 chars). Matches
+    /// the old-amux wire format so existing scripts/regex/docs keep working.
     pub fn generate_api_key(&self) -> Result<ApiKey, EngineError> {
         let mut buf = [0u8; 32];
         SystemRandom::new()
             .fill(&mut buf)
             .map_err(|_| EngineError::Auth("failed to generate random bytes".into()))?;
-        Ok(ApiKey(base64_url_encode(&buf)))
+        Ok(ApiKey(hex_encode(&buf)))
     }
 
     /// Hash an API key (SHA-256 → hex).
@@ -216,13 +222,81 @@ impl AuthEngine {
 
     // ── TLS material ───────────────────────────────────────────────────────
 
-    /// Generate a self-signed certificate for the bind IP (placeholder until
-    /// 0070 wires the actual self-signed flow with `rcgen` or similar). For
-    /// now this generates a deterministic placeholder so callers can wire up
-    /// their TLS plumbing in 0068/0069.
-    pub fn ensure_self_signed_tls(&self, _bind_ip: IpAddr) -> Result<TlsMaterial, EngineError> {
-        Err(EngineError::NotImplemented(
-            "self-signed TLS material is implemented in a later WI",
+    /// Generate or load a self-signed certificate for the bind IP. Idempotent
+    /// when the existing cert was generated for the same bind IP — the
+    /// authoritative record of the cert's bind IP is the `bind_ip` sidecar
+    /// next to the cert file (rather than substring-scanning the DER, which
+    /// is brittle for short IPv4 byte sequences).
+    ///
+    /// Returns `(material, regenerated)` so the caller can surface the
+    /// "TLS cert regenerated for new bind IP — pinned remote clients will
+    /// need to re-pin" warning.
+    pub fn ensure_self_signed_tls(
+        &self,
+        bind_ip: IpAddr,
+    ) -> Result<(TlsMaterial, bool), EngineError> {
+        let tls_dir = self.headless_paths.tls_dir();
+        let cert_path = self.headless_paths.tls_cert_file();
+        let key_path = self.headless_paths.tls_key_file();
+        let bind_ip_path = self.headless_paths.tls_bind_ip_file();
+
+        if cert_path.exists() && key_path.exists() {
+            let stored_ip = std::fs::read_to_string(&bind_ip_path)
+                .ok()
+                .map(|s| s.trim().to_string());
+            if stored_ip.as_deref() == Some(&bind_ip.to_string()) {
+                let material = self.load_tls_from_paths(&cert_path, &key_path)?;
+                return Ok((material, false));
+            }
+        }
+
+        std::fs::create_dir_all(&tls_dir).map_err(|e| EngineError::io(&tls_dir, e))?;
+
+        let san_ip = bind_ip.to_string();
+        let sans = vec![san_ip.clone(), "localhost".to_string()];
+        let mut params = rcgen::CertificateParams::new(sans)
+            .map_err(|e| EngineError::Auth(format!("TLS cert params: {e}")))?;
+
+        let ip_short_hash = {
+            let h = digest::digest(&digest::SHA256, san_ip.as_bytes());
+            hex_encode(&h.as_ref()[..4])
+        };
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, format!("amux-headless-{ip_short_hash}"));
+
+        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2034, 1, 1);
+
+        let key_pair = rcgen::KeyPair::generate()
+            .map_err(|e| EngineError::Auth(format!("TLS keygen: {e}")))?;
+        let cert = params
+            .self_signed(&key_pair)
+            .map_err(|e| EngineError::Auth(format!("TLS self-sign: {e}")))?;
+
+        let cert_pem = cert.pem();
+        let key_pem = key_pair.serialize_pem();
+
+        std::fs::write(&cert_path, cert_pem.as_bytes())
+            .map_err(|e| EngineError::io(&cert_path, e))?;
+        write_file_secure(&key_path, key_pem.as_bytes())?;
+        std::fs::write(&bind_ip_path, san_ip.as_bytes())
+            .map_err(|e| EngineError::io(&bind_ip_path, e))?;
+
+        let fingerprint = {
+            let der_bytes: &[u8] = cert.der().as_ref();
+            let h = digest::digest(&digest::SHA256, der_bytes);
+            hex_encode(h.as_ref())
+        };
+
+        Ok((
+            TlsMaterial {
+                cert_pem,
+                key_pem,
+                fingerprint_sha256_hex: fingerprint,
+            },
+            true,
         ))
     }
 
@@ -234,11 +308,20 @@ impl AuthEngine {
     ) -> Result<TlsMaterial, EngineError> {
         let cert_pem = std::fs::read_to_string(cert).map_err(|e| EngineError::io(cert, e))?;
         let key_pem = std::fs::read_to_string(key).map_err(|e| EngineError::io(key, e))?;
-        let h = digest::digest(&digest::SHA256, cert_pem.as_bytes());
+        // Hash the DER bytes (decoded from PEM) to match the fingerprint computed in
+        // `ensure_self_signed_tls` which also hashes the DER bytes.
+        let fingerprint = if let Some(der) = pem_to_der(&cert_pem) {
+            let h = digest::digest(&digest::SHA256, &der);
+            hex_encode(h.as_ref())
+        } else {
+            // Fallback: hash the PEM string if DER decoding fails.
+            let h = digest::digest(&digest::SHA256, cert_pem.as_bytes());
+            hex_encode(h.as_ref())
+        };
         Ok(TlsMaterial {
             cert_pem,
             key_pem,
-            fingerprint_sha256_hex: hex_encode(h.as_ref()),
+            fingerprint_sha256_hex: fingerprint,
         })
     }
 }
@@ -248,39 +331,68 @@ impl AuthEngine {
 const SENTINEL_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
+/// Decode PEM (stripping header/footer and base64-decoding) into DER bytes.
+fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
+    let mut b64 = String::new();
+    for line in pem.lines() {
+        let l = line.trim();
+        if l.starts_with("-----") {
+            continue;
+        }
+        b64.push_str(l);
+    }
+    base64_decode(&b64)
+}
+
+/// Minimal base64 decoder (no padding variants needed for standard PEM).
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 256] = &{
+        let mut t = [255u8; 256];
+        let mut i = 0u8;
+        while i < 26 {
+            t[(b'A' + i) as usize] = i;
+            t[(b'a' + i) as usize] = i + 26;
+            i += 1;
+        }
+        let mut i = 0u8;
+        while i < 10 {
+            t[(b'0' + i) as usize] = 52 + i;
+            i += 1;
+        }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t[b'=' as usize] = 0; // padding
+        t
+    };
+
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        let a = TABLE[bytes[i] as usize];
+        let b = TABLE[bytes[i + 1] as usize];
+        let c = TABLE[bytes[i + 2] as usize];
+        let d = TABLE[bytes[i + 3] as usize];
+        if a == 255 || b == 255 || c == 255 || d == 255 {
+            return None;
+        }
+        out.push((a << 2) | (b >> 4));
+        if bytes[i + 2] != b'=' {
+            out.push((b << 4) | (c >> 2));
+        }
+        if bytes[i + 3] != b'=' {
+            out.push((c << 6) | d);
+        }
+        i += 4;
+    }
+    Some(out)
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         use std::fmt::Write as _;
         let _ = write!(out, "{b:02x}");
-    }
-    out
-}
-
-fn base64_url_encode(bytes: &[u8]) -> String {
-    const CHARSET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    let mut i = 0;
-    while i + 3 <= bytes.len() {
-        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | (bytes[i + 2] as u32);
-        out.push(CHARSET[((n >> 18) & 0x3F) as usize] as char);
-        out.push(CHARSET[((n >> 12) & 0x3F) as usize] as char);
-        out.push(CHARSET[((n >> 6) & 0x3F) as usize] as char);
-        out.push(CHARSET[(n & 0x3F) as usize] as char);
-        i += 3;
-    }
-    if i < bytes.len() {
-        let rem = bytes.len() - i;
-        let mut n: u32 = 0;
-        for j in 0..rem {
-            n |= (bytes[i + j] as u32) << (16 - 8 * j);
-        }
-        out.push(CHARSET[((n >> 18) & 0x3F) as usize] as char);
-        out.push(CHARSET[((n >> 12) & 0x3F) as usize] as char);
-        if rem == 2 {
-            out.push(CHARSET[((n >> 6) & 0x3F) as usize] as char);
-        }
     }
     out
 }
@@ -362,6 +474,19 @@ mod tests {
     }
 
     #[test]
+    fn generate_api_key_produces_64_char_lowercase_hex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let head = tmp.path().join("h");
+        let e = engine_with(tmp.path(), &head);
+        let key = e.generate_api_key().unwrap();
+        assert_eq!(key.as_str().len(), 64, "API key must be 64-char hex");
+        assert!(
+            key.as_str().chars().all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_lowercase())),
+            "API key must be lowercase hex; got {:?}", key.as_str()
+        );
+    }
+
+    #[test]
     fn hash_is_deterministic() {
         let tmp = tempfile::tempdir().unwrap();
         let head = tmp.path().join("h");
@@ -395,5 +520,124 @@ mod tests {
         e.write_api_key_hash(&hash).unwrap();
         let read_back = e.read_api_key_hash().unwrap().unwrap();
         assert_eq!(hash.as_str(), read_back.as_str());
+    }
+
+    #[test]
+    fn ensure_self_signed_tls_generates_cert_and_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let head = tmp.path().join("headless");
+        std::fs::create_dir_all(&head).unwrap();
+        let e = engine_with(tmp.path(), &head);
+
+        let bind_ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let (material, regenerated) = e.ensure_self_signed_tls(bind_ip).unwrap();
+        assert!(regenerated, "first call must report regenerated=true");
+
+        // Both files must exist on disk.
+        assert!(head.join("tls").join("cert.pem").exists(), "cert.pem not written");
+        assert!(head.join("tls").join("key.pem").exists(), "key.pem not written");
+        assert!(
+            head.join("tls").join("bind_ip").exists(),
+            "bind_ip sidecar must be written"
+        );
+
+        // PEM content must be non-empty.
+        assert!(!material.cert_pem.is_empty(), "cert_pem must be non-empty");
+        assert!(!material.key_pem.is_empty(), "key_pem must be non-empty");
+
+        // Fingerprint must be a 64-char lowercase hex string (SHA-256).
+        assert_eq!(
+            material.fingerprint_sha256_hex.len(),
+            64,
+            "fingerprint must be 64 hex chars"
+        );
+        assert!(
+            material.fingerprint_sha256_hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "fingerprint must be all hex digits"
+        );
+    }
+
+    #[test]
+    fn ensure_self_signed_tls_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let head = tmp.path().join("headless");
+        std::fs::create_dir_all(&head).unwrap();
+        let e = engine_with(tmp.path(), &head);
+
+        let bind_ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let (m1, regen1) = e.ensure_self_signed_tls(bind_ip).unwrap();
+        let (m2, regen2) = e.ensure_self_signed_tls(bind_ip).unwrap();
+
+        assert!(regen1, "first call must regenerate");
+        assert!(!regen2, "second call must not regenerate");
+        assert_eq!(
+            m1.cert_pem, m2.cert_pem,
+            "second call must return byte-identical cert"
+        );
+        assert_eq!(
+            m1.fingerprint_sha256_hex, m2.fingerprint_sha256_hex,
+            "fingerprint must be stable across calls"
+        );
+    }
+
+    #[test]
+    fn ensure_self_signed_tls_regenerates_on_bind_ip_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let head = tmp.path().join("headless");
+        std::fs::create_dir_all(&head).unwrap();
+        let e = engine_with(tmp.path(), &head);
+
+        let ip1: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let ip2: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+
+        let (m1, regen1) = e.ensure_self_signed_tls(ip1).unwrap();
+        let (m2, regen2) = e.ensure_self_signed_tls(ip2).unwrap();
+
+        assert!(regen1, "first call must regenerate");
+        assert!(regen2, "bind_ip change must trigger regeneration");
+        assert_ne!(
+            m1.cert_pem, m2.cert_pem,
+            "cert must be regenerated when bind_ip changes"
+        );
+        assert_ne!(
+            m1.fingerprint_sha256_hex, m2.fingerprint_sha256_hex,
+            "fingerprint must differ for different bind_ips"
+        );
+    }
+
+    #[test]
+    fn refresh_api_key_writes_hash_and_returns_plaintext() {
+        let tmp = tempfile::tempdir().unwrap();
+        let head = tmp.path().join("headless");
+        std::fs::create_dir_all(&head).unwrap();
+        let e = engine_with(tmp.path(), &head);
+
+        let key = e.refresh_api_key().unwrap();
+
+        // Plaintext key must be non-empty.
+        assert!(!key.as_str().is_empty(), "returned key must be non-empty");
+
+        // Hash file must be on disk and match the SHA-256 of the plaintext key.
+        let hash_on_disk = e.read_api_key_hash().unwrap().expect("hash file must exist");
+        let expected_hash = e.hash_api_key(&key);
+        assert_eq!(
+            hash_on_disk.as_str(),
+            expected_hash.as_str(),
+            "on-disk hash must be SHA-256 of the returned plaintext"
+        );
+
+        // On Unix, the hash file must have mode 0600.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let hash_path = head.join("api_key.hash");
+            let meta = std::fs::metadata(&hash_path).unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "hash file must have mode 0600, got {mode:o}");
+        }
+
+        // Verification with the returned plaintext must succeed.
+        let outcome = e.verify_api_key(&key).unwrap();
+        assert_eq!(outcome, AuthOutcome::Authorized);
     }
 }

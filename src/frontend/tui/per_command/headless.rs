@@ -1,6 +1,20 @@
 //! `HeadlessCommandFrontend` impl for the TUI.
 
+use async_trait::async_trait;
+
 use crate::command::commands::headless::HeadlessCommandFrontend;
+use crate::command::error::CommandError;
+use crate::frontend::headless::HeadlessServeConfig;
 use crate::frontend::tui::command_frontend::TuiCommandFrontend;
 
-impl HeadlessCommandFrontend for TuiCommandFrontend {}
+#[async_trait]
+impl HeadlessCommandFrontend for TuiCommandFrontend {
+    async fn serve_until_shutdown(
+        &mut self,
+        _config: HeadlessServeConfig,
+    ) -> Result<(), CommandError> {
+        Err(CommandError::NotImplemented(
+            "headless server cannot be started from the TUI",
+        ))
+    }
+}

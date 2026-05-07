@@ -87,9 +87,33 @@ impl HeadlessPaths {
         self.root.join(TLS_SUBDIR)
     }
 
+    /// PEM-encoded TLS certificate.
+    pub fn tls_cert_file(&self) -> PathBuf {
+        self.tls_dir().join("cert.pem")
+    }
+
+    /// PEM-encoded TLS private key (mode 0o600 on Unix).
+    pub fn tls_key_file(&self) -> PathBuf {
+        self.tls_dir().join("key.pem")
+    }
+
+    /// Sidecar file recording the bind IP that the cert was generated for.
+    /// Used to detect SAN-mismatch and trigger regeneration safely without
+    /// having to parse DER.
+    pub fn tls_bind_ip_file(&self) -> PathBuf {
+        self.tls_dir().join("bind_ip")
+    }
+
     /// Headless server PID file.
     pub fn pid_file(&self) -> PathBuf {
         self.root.join("amux.pid")
+    }
+
+    /// Sidecar metadata for the running server (port, scheme). Written next
+    /// to the PID file so `headless status` can HTTP-probe the right
+    /// endpoint without needing CLI flags.
+    pub fn server_meta_file(&self) -> PathBuf {
+        self.root.join("server.json")
     }
 
     /// Headless server log file.

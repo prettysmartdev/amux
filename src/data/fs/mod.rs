@@ -7,6 +7,7 @@
 pub mod auth_paths;
 pub mod headless_db;
 pub mod headless_paths;
+pub mod headless_process;
 pub mod overlay_paths;
 pub mod skill_dirs;
 pub mod workflow_dirs;

@@ -55,10 +55,12 @@ pub struct TuiCommandFrontend {
     /// loop can pick it up and forward keystrokes to the new container.
     pub(crate) stdin_tx_shared: std::sync::Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
     /// Shared slot for the resize sender, same pattern as stdin_tx_shared.
+    #[allow(clippy::type_complexity)]
     pub(crate) resize_tx_shared: std::sync::Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u16, u16)>>>>,
 }
 
 impl TuiCommandFrontend {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         parsed: ParsedCommandBoxInput,
         status_log: SharedStatusLog,

@@ -2,43 +2,34 @@
 
 ## TUI
 
-TUI-1: The yolo countdown timer dialog during `exec workflow` is not properly dismissed with `Esc`, it immediately re-appears. When `Esc is pressed, the yolo countdown should be canceled and the tab-stuck timer re-set. Only when the tab-stuck timer expires again should the yolo countdown restart. Review old-amux behaviour and replicate it.
+TUI-1: When `exec workflow` is run, the workflow state strip does not immediately show up (might be covered by the execution window and/or container window?) Ensure it shows up immediately when a workflow becomes active and that when a workflow ends and the user runs a different command, the session's active workflow is wiped and the state strip is reset (meaning it dissapears if there's no active workflow for the new command, or it is rendered from scratch if the user runs another workflow). The state strip shows up AFTER the first step complets, which means something is not happening in the correct order.
 
-**Status: FIXED**
-Root cause: race condition in `yolo_countdown_tick()` — the engine unconditionally wrote `Some(YoloState)` to the shared state before reading it, immediately overwriting the user's Esc cancellation on the next 100ms tick. Fix: added `yolo_initialized` bool to `TuiCommandFrontend` to distinguish "not yet started" from "user cancelled". The tick method now checks if state was cleared before writing. Added `yolo_dismissed_at: Option<Instant>` to `Tab` so `tick_all_tabs()` respects the `STUCK_DIALOG_BACKOFF` (60s) before re-showing the yolo overlay. Files changed: `command_frontend.rs`, `workflow_frontend.rs`, `tabs.rs`, `app.rs`, `mod.rs`.
+TUI-2: Somehow, after 5 attempts to fix it, CONTAINER STATS ARE STILL NOT SHOWING IN THE TOP RIGHT CORNER OF THE CONTAINER WINDOW TITLE. The container NAME is now showing which is a small improvement, but the CPU and memory stats are not showing. It's unacceptable that this has been broken for this long despite trying to get it fixed so many times. FIGURE IT OUT AND FIX IT. FOR DOCKER AND APPLE. 
 
-TUI-2: Pressing Ctrl-W while the yolo countdown timer dialog is running should cancel the countdown (just like TUI-1 describes), and open the workflow control dialog instead, allowing the user to take manual control of workflow proceeding. This should also re-start the tab-stuck timer and if it expires again, the workflow control dialog can be dismissed and replaced with a new yolo countdown dialog again.
+TUI-3: Container window PTY scrollback should not be limited to 50 lines, it should default to 5000 lines, and the repo and/or global config should properly allow it to be configured to the user's preference. Ensure scrollback works identically to old-amux and that the repo config overrides the global config if they are both set.
 
-**Status: FIXED**
-Added `YoloTickOutcome::ShowControlBoard` variant and `SharedYoloCtrlW` (`Arc<AtomicBool>`) shared flag. Ctrl-W is now a global keybinding (`Action::WorkflowControl`) that clears the yolo state, sets `yolo_dismissed_at`, and raises the `yolo_ctrl_w` flag. The engine's `yolo_countdown_tick` checks this flag and returns `ShowControlBoard`. `run_yolo_countdown` now returns a `YoloCountdownResult` enum; the `ShowControlBoard` variant falls through to the interactive control board in `run_to_completion`. Files changed: `actions.rs`, `keymap.rs`, `tabs.rs`, `command_frontend.rs`, `workflow_frontend.rs`, `mod.rs` (engine and TUI), `app.rs`.
+TUI-4 The dirty files in the git wortree are STILL not showing in the pre-workflow git worktree prep dialog. Ensure the full list of files is shown IN THE DIALOG in addition to the execution window's output. Also, add some padding below the git commit message text field.
 
-TUI-3: The pre-workflow "commit uncommited files" dialog does not show the list of dirty files, and the suggested git commit message should be pre-loaded in the text field and directly editable instead of in the preamble. Also, the git commit text box text is currently invisible. Ensure the dialog shows dirty files, has visible text and blinking cursor in the git commit message field, and that the suggested git commit message is editable text in the field instead of in the title or preamble text. Replicate the dialog from old-amux as closely as possible.
+TUI-5: Add padding below the text field in the new tab dialog.
 
-**Status: FIXED**
-1. The Custom dialog for uncommitted files now includes the file list in the body text (was already present but the dialog height didn't account for multi-line bodies — fixed height calculation to use `body.lines().count()`).
-2. Added `default_text: Option<String>` field to `DialogRequest::TextInput`. The commit message dialog now passes `default_text: Some(suggested_message)` so the suggested message is pre-loaded in the editable text field instead of shown in the prompt.
-3. Rewrote the TextInput dialog rendering: prompt text shown in gray above a bordered Cyan input block with white text and a visible cursor. The dialog height now scales to fit the prompt. Files changed: `dialogs/mod.rs`, `render.rs`, `worktree_lifecycle.rs`, `app.rs`, `specs.rs`, `new.rs`.
+TUI-6: When a workflow is active in the current tab and running in a worktree, show `Using worktree: <path>` at the bottom below the command text box instead of the CWD. `Using worktree` should be blue and the worktree path itself should be grey. Copy old-amux for this. Ensure the use of a worktree is tracked in the Tab's `Session` along with the active `WorkflowState`.
 
-TUI-4: In the post-workflow worktree prompt, pressing `d` to discard the worktree does nothing, it leaves the worktree in place. It should run `git worktree remove <> --force` and `git branch -D <>`
+TUI-7: Ctrl-W still does not dismiss the yolo countdown dialog and show the workflow control dialog. Ensure that Ctrl-W works properly.
 
-**Status: INVESTIGATED — BACKEND CORRECT**
-The dialog handling and git backend are verified correct: the Custom dialog properly sends `DialogResponse::Char('d')`, which maps to `PostWorkflowWorktreeAction::Discard`, which calls `remove_worktree_logged` (`git worktree remove --force`) and `delete_branch_logged` (`git branch -D`). All 14 worktree lifecycle unit tests pass including `finalize_discard_removes_worktree_and_deletes_branch`. The issue is likely environment-specific (e.g., locked files, current directory being inside the worktree, or a git error that's reported in the status log but not noticed). Fixed the Custom dialog height calculation to properly account for multi-line body text so error messages are more visible.
+TUI-8: After the yolo countdown reaches 0 and the next container in the workflow is launched, the yolo dialog should dissapear. It currently stays visible even thought the countdown is 0 and the next step is running. The same is true for a tab running a yolo countdown in the background. After the countdown expires, the tab label and color should reset and reflect the current status of the new running step automatically, even if the user doesn't switch back to that tab.
 
-TUI-5: The `config show` dialog in the TUI has very small text, no cell borders, no obvious way to know which cell is selected, no text cursor, and no hints at the bottom of the dialog to know what keys do what. Replicate the visual style of the config show dialog in old-amux as closely as possible and fix all the issues listed here.
+TUI-9: Sometimes scrolling in the container PTY gets messed up and I can't scroll all the way to the bottom of Claude's TUI after I scrolled to the top of the available scrollback. Ensure scrolling in both directions works properly (tied to TUI-3).
 
-**Status: FIXED**
-Rewrote `render_config_show()` from scratch using Ratatui `Table` widget with `Row`/`Cell`, matching old-amux visual style:
-- Yellow rounded border with centered " amux config " title
-- Cyan bold header row (Field / Global / Repo / Effective)
-- Selected row highlighted with `White on DarkGray` background
-- Selected column within selected row highlighted with `Black on White` (browse) or `Black on Green` (edit mode)
-- Read-only rows in `DarkGray`
-- Percentage-based column widths (28/24/24/24) that scale with terminal width
-- Bottom hint area with colored key hints: `↑↓=row ←→=col e=edit Esc=close` (browse mode) or `Enter=save Esc=cancel` (edit mode)
-- Inline cursor display in editing mode (`value|rest` format)
-Files changed: `render.rs`.
+TUI-10: When a workflow is running in a tab, add the step name to the inner text label of the tab itself, like `exec workflow: implement (1/5)`. Ensure tab sizes grow appropriately for the size of their inner label unless they need to be truncated when there's too many tabs for the window width. Ensure the tab inner label updates each time the workflow status changes.
 
-TUI-6: During the yolo countdown, the purple/yellow tab flashing should also be accompanied by emojis and the 'yolo in x' text counting down so the user knows the state even if working in another tab. Replicate the emojis and countdown in the tab inner label just like old-amux.
+## Command Layer
 
-**Status: FIXED**
-Added `background_yolo_label()` method to `Tab` that returns alternating emoji + countdown text: `⚠️  yolo in N` (even seconds) / `🤘 yolo in N` (odd seconds), truncated to fit `tab_width`. Updated `tab_subcommand_label()` to show this label for non-active tabs when a yolo countdown is active (background tabs show the countdown instead of the command name). Also updated the yolo countdown dialog rendering to include emojis in the title bar and a Ctrl-W hint. Files changed: `tabs.rs`, `render.rs`.
+COM-1: The `status` command is not showing any running agent containers even when one is running. Fix the status command, ensure it shows everything exactly the same as old-amux, that it works with both Docker and Apple, and that it includes the tab number for any container that is running in the same TUI as `status` is being run in. Ensure it all renders correctly in tables in the TUI and CLI frontends, and that `--status` properly keeps things updating in both frontends.
+
+## Engine Layer
+
+ENG-1: Running a workflow in new-amux does not currently persist workflow state in $GITROOT/.amux/workflows/... review what old-amux did and ensure that workflow persistence works AND is updated after every step AND that workflows can be resumed if there is unfinished workflow state on disk AND that all of the dialogs to support that are properly wired into the TUI and CLI frontends. This should behave identically to old-amux. Ensure that if a step was marked as 'running', that the user is given the choice to restart that step or move to the next one when resuming a workflow.
+
+ENG-2: A frontend must be able to report into the WorkflowEngine that an agent container for the current step is stuck, which must cause the WorkflowEngine to either 1) trigger the workflow control board to be shown by the frontend or 2) Trigger the yolo countdown automatically. Neither of those things happens right now. Ensure that a stuck container (as detectd by the TUI, for example) causes SOMETHING to happen by reporting into the workflowengine and having the engine make the right choice for what the frontend is supposed to do.
+
+ENG-3: Work item section template insertion does not seem to be working. Ensure that work item sections are parsed and any workflow prompts with work item section template markers get the correct template section's text inserted. Do it exactly like old-amux did. Ensure all different types of workflow step prompt template insertion are working just like old-amux.

@@ -31,6 +31,20 @@ impl RemoteClient {
     pub const READ_TIMEOUT: Duration = Duration::from_secs(600);
 
     pub fn new(base_url: &str, api_key: Option<&ApiKey>) -> Result<Self, CommandError> {
+        Self::new_with_pinned_cert(base_url, api_key, None)
+    }
+
+    /// Construct a client that additionally trusts a specific PEM-encoded
+    /// certificate. Used when talking to a loopback amux headless server with
+    /// a self-signed cert: the cert PEM is loaded from the local `tls/`
+    /// directory and added as a trusted root, effectively pinning by identity.
+    /// For non-loopback targets, the caller MUST NOT pass `pinned_cert_pem` —
+    /// standard webpki verification stays in force.
+    pub fn new_with_pinned_cert(
+        base_url: &str,
+        api_key: Option<&ApiKey>,
+        pinned_cert_pem: Option<&str>,
+    ) -> Result<Self, CommandError> {
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Self::CONNECT_TIMEOUT)
             .timeout(Self::READ_TIMEOUT);
@@ -42,6 +56,11 @@ impl RemoteClient {
             headers.insert(reqwest::header::AUTHORIZATION, value);
             builder = builder.default_headers(headers);
         }
+        if let Some(pem) = pinned_cert_pem {
+            let cert = reqwest::Certificate::from_pem(pem.as_bytes())
+                .map_err(|e| CommandError::Other(format!("invalid pinned cert: {e}")))?;
+            builder = builder.add_root_certificate(cert);
+        }
         let http = builder
             .build()
             .map_err(|e| CommandError::RemoteTransport(e.to_string()))?;
@@ -49,6 +68,21 @@ impl RemoteClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             http,
         })
+    }
+
+    /// Returns `true` when `addr` resolves to a loopback host (`127.0.0.1`,
+    /// `::1`, `localhost`). Used to decide whether the locally-stored
+    /// self-signed cert should be trusted.
+    pub fn is_loopback_addr(addr: &str) -> bool {
+        let trimmed = addr.trim();
+        let after_scheme = trimmed.split_once("://").map(|(_, rest)| rest).unwrap_or(trimmed);
+        let host_part = after_scheme.split_once('/').map(|(h, _)| h).unwrap_or(after_scheme);
+        let host = host_part
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_part);
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        matches!(host, "127.0.0.1" | "::1" | "localhost")
     }
 
     /// API-key resolution per spec §6.5: explicit > AMUX_API_KEY > global
@@ -89,18 +123,31 @@ impl RemoteClient {
         path: &[&str],
         flags: &[(&str, serde_json::Value)],
     ) -> Result<RemoteResponse, CommandError> {
+        self.send_command_with_headers(path, flags, &[]).await
+    }
+
+    /// Like `send_command` but also attaches request headers — used to set
+    /// `x-amux-session` on `POST /v1/commands` (the server reads the session
+    /// from the header, not the body).
+    pub async fn send_command_with_headers(
+        &self,
+        path: &[&str],
+        flags: &[(&str, serde_json::Value)],
+        headers: &[(&str, &str)],
+    ) -> Result<RemoteResponse, CommandError> {
         let url = format!("{}/v1/{}", self.base_url, path.join("/"));
         let mut body = serde_json::Map::new();
         for (k, v) in flags {
             body.insert(k.to_string(), v.clone());
         }
-        let resp = self
+        let mut req = self
             .http
             .post(&url)
-            .json(&serde_json::Value::Object(body))
-            .send()
-            .await
-            .map_err(Self::map_reqwest_error)?;
+            .json(&serde_json::Value::Object(body));
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let resp = req.send().await.map_err(Self::map_reqwest_error)?;
         let status = resp.status().as_u16();
         let body = resp
             .json::<serde_json::Value>()
@@ -159,20 +206,92 @@ impl RemoteClient {
         Ok(RemoteResponse { status, body })
     }
 
-    /// Stream SSE events from the remote server. Disables the read timeout
-    /// so long-running commands don't hit the 600s ceiling.
+    /// Stream SSE events from the remote server progressively. Reads byte
+    /// chunks as they arrive, splits on the `\n\n` event separator, and
+    /// dispatches each event to the sink the moment it is parsed. The
+    /// per-request timeout is set to 24h so a long-running command doesn't
+    /// get cut off by the default client read timeout.
     pub async fn stream_command(
         &self,
         path: &[&str],
-        flags: &[(&str, serde_json::Value)],
-        _sink: &mut dyn RemoteEventSink,
+        _flags: &[(&str, serde_json::Value)],
+        sink: &mut dyn RemoteEventSink,
     ) -> Result<(), CommandError> {
-        // Streaming is wired up in 0070 against a real headless server; this
-        // entry point exists so the API surface is stable.
-        let _ = (path, flags);
-        Err(CommandError::NotImplemented(
-            "RemoteClient::stream_command",
-        ))
+        use futures_util::StreamExt;
+
+        let url = format!("{}/v1/{}", self.base_url, path.join("/"));
+
+        let resp = self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(86400))
+            .send()
+            .await
+            .map_err(Self::map_reqwest_error)?;
+
+        if resp.status().as_u16() >= 400 {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CommandError::RemoteHttpStatus { status, body });
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut buffer = String::new();
+
+        while let Some(chunk_res) = stream.next().await {
+            let chunk = chunk_res.map_err(|e| CommandError::RemoteTransport(e.to_string()))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Pull every complete `\n\n`-delimited event block out of the buffer
+            // and dispatch it. Whatever's left after the final separator stays
+            // in the buffer until more bytes arrive.
+            while let Some(pos) = buffer.find("\n\n") {
+                let event_block = buffer[..pos].to_string();
+                buffer.drain(..pos + 2);
+                if Self::dispatch_sse_event(&event_block, sink) {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Stream ended without [amux:done] — emit any partial event then close.
+        if !buffer.trim().is_empty() {
+            let trailing = std::mem::take(&mut buffer);
+            if Self::dispatch_sse_event(&trailing, sink) {
+                return Ok(());
+            }
+        }
+        sink.on_done();
+        Ok(())
+    }
+
+    /// Parse one `\n\n`-delimited SSE event block and forward it to the sink.
+    /// Returns `true` when the block was the `[amux:done]` sentinel (caller
+    /// should stop streaming).
+    fn dispatch_sse_event(block: &str, sink: &mut dyn RemoteEventSink) -> bool {
+        if block.trim().is_empty() {
+            return false;
+        }
+        let mut event_type = "message";
+        let mut data_lines: Vec<&str> = Vec::new();
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix("event: ") {
+                event_type = rest;
+            } else if let Some(rest) = line.strip_prefix("event:") {
+                event_type = rest;
+            } else if let Some(rest) = line.strip_prefix("data: ") {
+                data_lines.push(rest);
+            } else if let Some(rest) = line.strip_prefix("data:") {
+                data_lines.push(rest);
+            }
+        }
+        let data = data_lines.join("\n");
+        if data == "[amux:done]" {
+            sink.on_done();
+            return true;
+        }
+        sink.on_event(event_type, &data);
+        false
     }
 
     pub fn map_reqwest_error(e: reqwest::Error) -> CommandError {
@@ -219,6 +338,23 @@ mod tests {
     use super::*;
     use crate::data::config::env::EnvSnapshot;
     use crate::data::session::{Session, SessionOpenOptions};
+
+    // ─── is_loopback_addr ─────────────────────────────────────────────────────
+
+    #[test]
+    fn loopback_addr_recognizes_ipv4_and_ipv6_and_localhost() {
+        assert!(RemoteClient::is_loopback_addr("https://127.0.0.1:9876"));
+        assert!(RemoteClient::is_loopback_addr("http://127.0.0.1:9876/"));
+        assert!(RemoteClient::is_loopback_addr("https://localhost"));
+        assert!(RemoteClient::is_loopback_addr("https://[::1]:9876"));
+    }
+
+    #[test]
+    fn loopback_addr_rejects_remote_hosts() {
+        assert!(!RemoteClient::is_loopback_addr("https://example.com:9876"));
+        assert!(!RemoteClient::is_loopback_addr("http://10.0.0.1"));
+        assert!(!RemoteClient::is_loopback_addr("https://my-host"));
+    }
 
     // ─── URL canonicalize helpers ─────────────────────────────────────────────
 
@@ -430,20 +566,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_command_returns_not_implemented() {
-        let client = RemoteClient::new("http://localhost:9876", None).unwrap();
-        struct NoopSink;
-        impl RemoteEventSink for NoopSink {
-            fn on_event(&mut self, _event_type: &str, _data: &str) {}
-            fn on_done(&mut self) {}
-        }
-        let result = client
-            .stream_command(&["status"], &[], &mut NoopSink)
+    async fn stream_command_parses_sse_events_and_calls_sink() {
+        use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+
+        let sse_body = "data: hello world\n\ndata: second line\n\ndata: [amux:done]\n\n";
+
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path("/v1/commands/cmd-1/logs/stream"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
             .await;
-        assert!(
-            matches!(result, Err(CommandError::NotImplemented(_))),
-            "stream_command must return NotImplemented until 0070: {result:?}"
-        );
+
+        let client = RemoteClient::new(&server.uri(), None).unwrap();
+
+        struct CollectSink {
+            events: Vec<(String, String)>,
+            done: bool,
+        }
+        impl RemoteEventSink for CollectSink {
+            fn on_event(&mut self, event_type: &str, data: &str) {
+                self.events.push((event_type.to_string(), data.to_string()));
+            }
+            fn on_done(&mut self) {
+                self.done = true;
+            }
+        }
+
+        let mut sink = CollectSink {
+            events: Vec::new(),
+            done: false,
+        };
+        let result = client
+            .stream_command(&["commands", "cmd-1", "logs", "stream"], &[], &mut sink)
+            .await;
+        assert!(result.is_ok(), "stream_command should succeed: {result:?}");
+        assert!(sink.done, "on_done must be called");
+        assert_eq!(sink.events.len(), 2);
+        assert_eq!(sink.events[0].1, "hello world");
+        assert_eq!(sink.events[1].1, "second line");
     }
 
     #[tokio::test]

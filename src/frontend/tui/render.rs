@@ -294,7 +294,7 @@ fn render_output_content(
                 if w == 0 {
                     1
                 } else {
-                    (w + inner_width - 1) / inner_width
+                    w.div_ceil(inner_width)
                 }
             })
             .sum()

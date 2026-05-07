@@ -166,6 +166,16 @@ pub(crate) fn format_error(err: &CommandError) -> String {
                 "headless server is already running on PID {pid}; run `amux headless kill` first"
             )
         }
+        CommandError::HeadlessNotRunning => "headless server is not running".into(),
+        CommandError::HeadlessAuthMissing => {
+            "no API key configured. Run `amux headless start --refresh-key` first, or pass `--dangerously-skip-auth`.".into()
+        }
+        CommandError::RemoteSessionMissing => {
+            "no remote session id; pass --session <id> or run `amux remote session start` first".into()
+        }
+        CommandError::RemoteSessionKillFailed { session_id, reason } => {
+            format!("failed to kill remote session '{session_id}': {reason}")
+        }
         CommandError::NotImplemented(msg) => format!("not yet implemented: {msg}"),
         CommandError::Other(msg) => msg.to_string(),
         CommandError::WorkItemNotFound { number } => {
@@ -330,7 +340,11 @@ pub(crate) fn error_exit_code(err: &CommandError) -> u8 {
         | CommandError::RemoteHttpStatus { .. }
         | CommandError::MalformedSseEvent(_)
         | CommandError::RemoteTransport(_) => 1,
-        CommandError::HeadlessAlreadyRunning { .. } => 1,
+        CommandError::HeadlessAlreadyRunning { .. }
+        | CommandError::HeadlessNotRunning
+        | CommandError::HeadlessAuthMissing
+        | CommandError::RemoteSessionMissing
+        | CommandError::RemoteSessionKillFailed { .. } => 1,
         CommandError::NotImplemented(_) => 1,
         CommandError::Other(_) => 1,
     }

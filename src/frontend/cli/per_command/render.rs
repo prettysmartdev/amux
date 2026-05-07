@@ -353,14 +353,29 @@ fn render_headless_logs(o: &HeadlessLogsOutcome) -> String {
 }
 
 fn render_headless_status(o: &HeadlessStatusOutcome) -> String {
-    if o.running {
-        match o.pid {
-            Some(pid) => format!("Headless server is running (PID {pid})."),
-            None => "Headless server is running.".to_string(),
-        }
-    } else {
-        "Headless server is not running.".to_string()
+    if !o.running {
+        return "Headless server is not running.".to_string();
     }
+    let pid_part = o
+        .pid
+        .map(|p| format!(" (PID {p})"))
+        .unwrap_or_default();
+    let addr_part = o
+        .bound_addr
+        .as_deref()
+        .map(|a| format!(" at {a}"))
+        .unwrap_or_default();
+    let version_part = o
+        .version
+        .as_deref()
+        .map(|v| format!(", version {v}"))
+        .unwrap_or_default();
+    let responsive_part = if o.responsive {
+        ""
+    } else {
+        " — process alive but HTTP probe failed"
+    };
+    format!("Headless server is running{pid_part}{addr_part}{version_part}{responsive_part}.")
 }
 
 // ─── remote ──────────────────────────────────────────────────────────────────
@@ -659,8 +674,27 @@ mod tests {
         let s = render_headless_status(&HeadlessStatusOutcome {
             running: true,
             pid: Some(1234),
+            bound_addr: Some("https://127.0.0.1:9876".into()),
+            version: Some("0.7.0".into()),
+            responsive: true,
         });
-        assert_eq!(s, "Headless server is running (PID 1234).");
+        assert!(s.contains("Headless server is running"));
+        assert!(s.contains("PID 1234"));
+        assert!(s.contains("at https://127.0.0.1:9876"));
+        assert!(s.contains("version 0.7.0"));
+        assert!(!s.contains("HTTP probe failed"));
+    }
+
+    #[test]
+    fn render_headless_status_alive_but_unresponsive() {
+        let s = render_headless_status(&HeadlessStatusOutcome {
+            running: true,
+            pid: Some(1234),
+            bound_addr: None,
+            version: None,
+            responsive: false,
+        });
+        assert!(s.contains("HTTP probe failed"));
     }
 
     #[test]
@@ -668,6 +702,9 @@ mod tests {
         let s = render_headless_status(&HeadlessStatusOutcome {
             running: false,
             pid: None,
+            bound_addr: None,
+            version: None,
+            responsive: false,
         });
         assert_eq!(s, "Headless server is not running.");
     }

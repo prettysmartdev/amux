@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn ctrl_c_in_maximized_container_forwards_to_pty() {
         let k = key(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        let action = map_key(k.clone(), FocusContext::ContainerMaximized);
+        let action = map_key(k, FocusContext::ContainerMaximized);
         assert_eq!(action, Action::ForwardToPty(k));
     }
 
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn regular_key_in_maximized_container_forwards_to_pty() {
         let k = key(KeyCode::Char('q'), KeyModifiers::NONE);
-        let action = map_key(k.clone(), FocusContext::ContainerMaximized);
+        let action = map_key(k, FocusContext::ContainerMaximized);
         assert_eq!(action, Action::ForwardToPty(k));
     }
 

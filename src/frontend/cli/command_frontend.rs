@@ -18,8 +18,8 @@ use clap::ArgMatches;
 use crate::command::commands::status::StatusCommandFrontend;
 use crate::command::commands::{
     auth::AuthCommandFrontend, config::ConfigCommandFrontend,
-    download::DownloadCommandFrontend, headless::HeadlessCommandFrontend,
-    new::NewCommandFrontend, remote::RemoteCommandFrontend,
+    download::DownloadCommandFrontend, new::NewCommandFrontend,
+    remote::RemoteCommandFrontend,
     specs::{SpecsCommandFrontend, WorkItemKind},
 };
 use crate::command::dispatch::CommandFrontend;
@@ -393,7 +393,7 @@ fn require_multiline_input(prompt: &str) -> Result<String, CommandError> {
         }),
     }
 }
-impl HeadlessCommandFrontend for CliFrontend {}
+// HeadlessCommandFrontend for CliFrontend is in per_command/headless.rs
 
 impl StatusCommandFrontend for CliFrontend {
     /// Watch loop continues until the user presses Ctrl+C.

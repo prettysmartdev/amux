@@ -186,10 +186,10 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
 
     // WorkflowControlBoard intercepts arrow keys and Ctrl+Enter before the
     // generic keymap so they map to workflow navigation rather than scroll/cursor.
-    if matches!(app.active_dialog, Some(Dialog::WorkflowControlBoard(_))) {
-        if handle_workflow_control_board_key(app, key) {
-            return;
-        }
+    if matches!(app.active_dialog, Some(Dialog::WorkflowControlBoard(_)))
+        && handle_workflow_control_board_key(app, key)
+    {
+        return;
     }
 
     let action = keymap::map_key(key, ctx);
@@ -723,7 +723,7 @@ fn key_to_bytes(key: &crossterm::event::KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Char(c) => {
             if ctrl {
                 let n = (c as u8).to_ascii_lowercase();
-                if n >= b'a' && n <= b'z' {
+                if n.is_ascii_lowercase() {
                     return Some(vec![n - b'a' + 1]);
                 }
             }

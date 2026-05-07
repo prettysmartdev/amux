@@ -37,7 +37,7 @@ impl ConfigCommandFrontend for TuiCommandFrontend {
                     Ok(None)
                 }
             }
-            DialogResponse::Dismissed | _ => Ok(None),
+            _ => Ok(None),
         }
     }
 }

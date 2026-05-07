@@ -105,6 +105,19 @@ pub enum CommandError {
     #[error("headless server already running on PID {pid}")]
     HeadlessAlreadyRunning { pid: u32 },
 
+    #[error("headless server is not running")]
+    HeadlessNotRunning,
+
+    #[error("no API key configured; run `amux headless start --refresh-key` first, or pass `--dangerously-skip-auth`")]
+    HeadlessAuthMissing,
+
+    // ── Remote ────────────────────────────────────────────────────────────
+    #[error("no remote session id; pass --session <id> or run `amux remote session start`")]
+    RemoteSessionMissing,
+
+    #[error("failed to kill remote session '{session_id}': {reason}")]
+    RemoteSessionKillFailed { session_id: String, reason: String },
+
     // ── Work item / spec ──────────────────────────────────────────────────────
     #[error("work item {number} not found in aspec/work-items/")]
     WorkItemNotFound { number: u32 },
