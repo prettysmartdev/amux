@@ -125,24 +125,66 @@ Navigate to your project's Git root and run:
 amux init
 ```
 
-This does several things:
+This sets up your project for use with amux. The process is interactive and walks you through each phase:
 
-1. Writes `.amux/config.json` (per-repo config) with the chosen agent
-2. Writes `Dockerfile.dev` (project base template) at the Git root
-3. Writes `.amux/Dockerfile.{agent}` (agent template) in the `.amux/` directory
-4. Offers to run the **agent audit** — launches a container that inspects your project and updates `Dockerfile.dev` with the tools your codebase actually needs. It's strongly advised that you accept; it's the main reason `Dockerfile.dev` exists.
-5. Builds the project base image (`amux-{project}:latest`) from `Dockerfile.dev`
-6. Builds the agent image (`amux-{project}-{agent}:latest`) from `.amux/Dockerfile.{agent}`
-7. Prints a summary table showing the result of each step
+### Phase 1: Agent selection
 
-The init summary looks like this:
+```
+Which agent would you like to use? [claude/codex/opencode/maki/gemini]:
+```
+
+Choose your preferred code agent. This becomes the default for all future `amux` commands in this repo. You can change it later with `amux config set agent codex` or pick a different agent for a specific command with the `--agent` flag.
+
+### Phase 2: Dockerfile setup
+
+amux creates two Dockerfile templates:
+
+- **`Dockerfile.dev`** at the Git root (your project's build environment)
+- **`.amux/Dockerfile.{agent}`** in the `.amux/` directory (agent-specific tooling)
+
+Both are created from templates and should be committed to source control so teammates get identical environments.
+
+### Phase 3: Agent audit (optional)
+
+```
+Run the agent audit? This inspects your project and updates Dockerfile.dev with the tools you actually need. [y/N]:
+```
+
+The audit launches a container that reads your codebase, detects what you're building (Python? Node? Rust? Docker?), and updates `Dockerfile.dev` with the exact build tools, language runtimes, and test dependencies your project needs. **It's strongly recommended** — it's the main value of having `Dockerfile.dev` as a separate file.
+
+If you decline, `Dockerfile.dev` will be a minimal debian base, and you'll need to manually add any tools your agents need later.
+
+### Phase 4: Work items setup (if needed)
+
+If you didn't pass `--aspec` and no `aspec/` folder already exists, amux offers to set up work item handling:
+
+```
+Set up work items? You can configure a custom work items directory or use the bundled aspec/ template. [y/N]:
+```
+
+**Accept:** amux walks you through two options:
+
+1. **Download the bundled `aspec/` template** — gives you spec templates and work item scaffolding matching the `aspec/` standard layout.
+2. **Configure a custom directory** — point amux to an existing `docs/specs/`, `workitems/`, or other directory where you keep work item files.
+
+Either way, amux writes the configuration so that `specs new` and `implement 0001` can find your work item files without extra flags.
+
+**Decline:** You can set this up later with `amux init --aspec` or `amux config set work_items.dir docs/specs`.
+
+### Phase 5: Image building
+
+amux builds the project base image and agent image. This may take a few minutes on first run, depending on your `Dockerfile.dev` and network speed.
+
+### Init summary
+
+When complete, amux shows a summary table:
 
 ```
 ┌──────────────────────────────────────────────────┐
 │              Init Summary (claude)                │
 ├───────────────────┬──────────────────────────────┤
 │            Config │ ✓ saved                       │
-│      aspec folder │ – use --aspec to download     │
+│      aspec folder │ ✓ downloaded (--aspec flag)   │
 │    Dockerfile.dev │ ✓ created                     │
 │  Agent dockerfile │ ✓ created                     │
 │       Agent audit │ ✓ completed                   │
@@ -152,13 +194,17 @@ The init summary looks like this:
 └───────────────────┴──────────────────────────────┘
 ```
 
-The **Work items** row appears when `--aspec` is not passed and no `aspec/` folder exists. `init` offers to set a custom work items directory interactively during setup. If you decline or already have `aspec/`, the row shows `– not needed`.
+Each row indicates whether that phase was skipped (`–`), succeeded (`✓`), or encountered an error (`✗`).
+
+### Download aspec separately
 
 To also download the `aspec/` folder with spec templates and work item scaffolding:
 
 ```sh
 amux init --aspec
 ```
+
+This flag is only needed if you want the full `aspec/` folder — the work items setup prompt (Phase 4 above) already offers to download it interactively.
 
 ---
 

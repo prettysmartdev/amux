@@ -72,7 +72,9 @@ pub fn render_frame(app: &mut App, frame: &mut Frame) {
         .ok()
         .and_then(|g| g.clone())
     {
-        workflow_view::render_workflow_strip(&wf_state, chunks[3], frame);
+        let scroll_offset = app.active_tab().workflow_strip_scroll_offset;
+        workflow_view::render_workflow_strip(&wf_state, chunks[3], frame, scroll_offset);
+        app.active_tab_mut().last_strip_rect = Some(chunks[3]);
     }
 
     render_status_bar(app, chunks[4], frame);
@@ -488,17 +490,50 @@ fn render_command_box(app: &App, area: Rect, frame: &mut Frame) {
         return;
     }
 
+    // E.2: ghost text when empty, focused, and idle/done.
+    if app.command_input.text.is_empty() && focused {
+        let show_ghost = matches!(
+            app.active_tab().execution_phase,
+            ExecutionPhase::Idle | ExecutionPhase::Done { .. }
+        );
+        if show_ghost {
+            let prefix = Span::styled("> ", Style::default().fg(Color::Cyan));
+            let ghost = Span::styled("q to quit", Style::default().fg(Color::DarkGray));
+            let line = Line::from(vec![prefix, ghost]);
+            frame.render_widget(Paragraph::new(line), inner);
+            let cursor_x = area.x + 1 + 2;
+            let cursor_y = area.y + 1;
+            frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+            return;
+        }
+    }
+
     let prefix = Span::styled("> ", Style::default().fg(Color::Cyan));
     let display_text = app.command_input.text.replace('\n', "\u{21b5}");
-    let line = Line::from(vec![prefix, Span::raw(display_text)]);
+
+    // E.1: horizontal scroll for long input.
+    let visible_width = inner.width.saturating_sub(2) as usize; // subtract prefix "> "
+    let cursor_col = {
+        let text_before_cursor = &app.command_input.text[..app.command_input.cursor];
+        unicode_width::UnicodeWidthStr::width(
+            text_before_cursor.replace('\n', "\u{21b5}").as_str(),
+        )
+    };
+    let scroll_offset = if cursor_col >= visible_width {
+        cursor_col - visible_width + 1
+    } else {
+        0
+    };
+    let visible_text: String = display_text
+        .chars()
+        .skip(scroll_offset)
+        .collect();
+    let line = Line::from(vec![prefix, Span::raw(visible_text)]);
     frame.render_widget(Paragraph::new(line), inner);
 
     if focused && app.active_dialog.is_none() {
-        let text_before_cursor = &app.command_input.text[..app.command_input.cursor];
-        let display_before = unicode_width::UnicodeWidthStr::width(
-            text_before_cursor.replace('\n', "\u{21b5}").as_str(),
-        );
-        let cursor_x = area.x + 1 + 2 + display_before as u16;
+        let display_cursor_x = (cursor_col - scroll_offset) as u16;
+        let cursor_x = area.x + 1 + 2 + display_cursor_x;
         let cursor_y = area.y + 1;
         if cursor_x < area.x + area.width.saturating_sub(1) {
             frame.set_cursor_position(Position::new(cursor_x, cursor_y));
@@ -520,6 +555,12 @@ fn render_suggestion_row(app: &App, area: Rect, frame: &mut Frame) {
 
     if show_suggestions {
         let mut spans: Vec<Span> = Vec::with_capacity(app.suggestion_row.len() * 2);
+        let catalogue = crate::command::dispatch::catalogue::CommandCatalogue::get();
+        let command_path: Vec<&str> = app.command_input.text
+            .split_whitespace()
+            .take_while(|t| !t.starts_with('-'))
+            .collect();
+        let cmd_spec = catalogue.lookup(&command_path);
         for (i, s) in app.suggestion_row.iter().enumerate() {
             let sep = if i == 0 {
                 Span::raw("  ")
@@ -528,6 +569,16 @@ fn render_suggestion_row(app: &App, area: Rect, frame: &mut Frame) {
             };
             spans.push(sep);
             spans.push(Span::styled(s.as_str(), Style::default().fg(Color::Cyan)));
+            // F.2: append flag hint with em-dash if available.
+            let flag_name = s.strip_prefix("--").unwrap_or(s);
+            if let Some(spec) = cmd_spec.and_then(|cs| cs.find_flag(flag_name)) {
+                if !spec.help.is_empty() {
+                    spans.push(Span::styled(
+                        format!(" \u{2014} {}", spec.help),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+            }
         }
         let para =
             Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray));
@@ -542,19 +593,90 @@ fn render_suggestion_row(app: &App, area: Rect, frame: &mut Frame) {
     let is_worktree = working_dir != git_root;
 
     let para = if is_worktree {
-        let wt_str = working_dir.to_string_lossy().into_owned();
+        let label = "  Using worktree: ";
+        let max_path_w = (area.width as usize).saturating_sub(label.len() + 2);
+        let wt_str = truncate_middle(&working_dir.to_string_lossy(), max_path_w);
         Paragraph::new(Line::from(vec![
-            Span::styled("  Using worktree: ", Style::default().fg(Color::Blue)),
+            Span::styled(label, Style::default().fg(Color::Blue)),
             Span::styled(wt_str, Style::default().fg(Color::DarkGray)),
         ]))
     } else {
-        let cwd_str = working_dir.to_string_lossy().into_owned();
+        let label = "  CWD: ";
+        let max_path_w = (area.width as usize).saturating_sub(label.len() + 2);
+        let cwd_str = truncate_middle(&working_dir.to_string_lossy(), max_path_w);
         Paragraph::new(Line::from(vec![
-            Span::styled("  CWD: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(label, Style::default().fg(Color::DarkGray)),
             Span::styled(cwd_str, Style::default().fg(Color::DarkGray)),
         ]))
     };
     frame.render_widget(para, area);
+}
+
+/// Truncate a string to at most `max` characters, replacing the middle with an
+/// ellipsis (`…`) when the string exceeds the limit.
+fn truncate_middle(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let ellipsis = "\u{2026}";
+    let available = max.saturating_sub(1); // 1 for the ellipsis char
+    let prefix_len = available / 2;
+    let suffix_len = available - prefix_len;
+    let prefix: String = s.chars().take(prefix_len).collect();
+    let suffix: String = s
+        .chars()
+        .rev()
+        .take(suffix_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{prefix}{ellipsis}{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_middle;
+
+    #[test]
+    fn long_path_truncated_with_middle_ellipsis() {
+        // Path clearly longer than max → contains ellipsis character.
+        let long_path = "/home/user/projects/very-long-directory-name/another-long-part/file.txt";
+        let result = truncate_middle(long_path, 30);
+        assert!(
+            result.contains('\u{2026}'),
+            "long path must be truncated with '…', got: {result:?}"
+        );
+        assert!(
+            result.chars().count() <= 30,
+            "truncated string must be at most 30 chars, got {} chars: {result:?}",
+            result.chars().count()
+        );
+    }
+
+    #[test]
+    fn short_path_not_truncated() {
+        let short = "/home/user/foo";
+        let result = truncate_middle(short, 40);
+        assert_eq!(result, short, "path shorter than max must not be truncated");
+    }
+
+    #[test]
+    fn truncate_middle_exact_length_not_truncated() {
+        let s = "abcdefghij"; // 10 chars
+        let result = truncate_middle(s, 10);
+        assert_eq!(result, s, "string at exactly max chars must not be truncated");
+    }
+
+    #[test]
+    fn truncate_middle_preserves_prefix_and_suffix() {
+        let s = "start-middle-end";
+        let result = truncate_middle(s, 10);
+        // The result must start with the prefix chars and end with suffix chars.
+        assert!(result.starts_with("star"), "prefix must be preserved");
+        assert!(result.ends_with("end"), "suffix must be preserved");
+        assert!(result.contains('\u{2026}'));
+    }
 }
 
 /// Map message level to display color.
@@ -701,11 +823,17 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             .iter()
             .filter(|x| **x)
             .count() as u16;
+            let mid_step_extra: u16 = if state.is_mid_step { 2 } else { 0 };
             let base_height: u16 = if state.can_finish { 15 } else { 13 };
             let dialog_area =
-                dialogs::centered_fixed(52, base_height + extra_reasons, area);
+                dialogs::centered_fixed(52, base_height + extra_reasons + mid_step_extra, area);
+            let title = if state.is_mid_step {
+                "Workflow Control (step running)"
+            } else {
+                "Workflow Control"
+            };
             let inner = dialogs::render_dialog_frame(
-                "Workflow Control",
+                title,
                 Color::Yellow,
                 dialog_area,
                 frame,
@@ -786,10 +914,21 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 ]));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "  [d] Disable auto-advance   [a] Abort   [Esc] Pause",
-                dimmed_style,
-            )));
+            if state.is_mid_step {
+                lines.push(Line::from(Span::styled(
+                    "  [d] Disable auto-advance   [a] Abort   [p] Pause",
+                    dimmed_style,
+                )));
+                lines.push(Line::from(Span::styled(
+                    "  [Esc] dismiss (step keeps running)",
+                    dimmed_style,
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "  [d] Disable auto-advance   [a] Abort   [Esc] Pause",
+                    dimmed_style,
+                )));
+            }
             frame.render_widget(Paragraph::new(lines), inner);
         }
         dialogs::Dialog::WorkflowStepError(state) => {
@@ -895,6 +1034,20 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 inner,
             );
         }
+        dialogs::Dialog::WorkflowStepConfirm(state) => {
+            let dialog_area = dialogs::centered_fixed(60, 7, area);
+            let inner = dialogs::render_dialog_frame(
+                "Step Complete",
+                Color::Green,
+                dialog_area,
+                frame,
+            );
+            let text = format!(
+                "  Step '{}' done. Advance to '{}'?\n\n  [Enter] yes   [Esc] pause   [Ctrl+W] full control board",
+                state.completed_step, state.next_step
+            );
+            frame.render_widget(Paragraph::new(text), inner);
+        }
         dialogs::Dialog::Custom { title, body, keys } => {
             let body_lines = body.lines().count() as u16;
             let height = (keys.len() as u16 + body_lines + 6).min(area.height.saturating_sub(4));
@@ -903,7 +1056,8 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             let dialog_area = dialogs::centered_fixed(width, height, area);
             let inner =
                 dialogs::render_dialog_frame(title, Color::Yellow, dialog_area, frame);
-            let mut lines = vec![Line::from(body.as_str()), Line::from("")];
+            let mut lines: Vec<Line> = body.lines().map(Line::from).collect();
+            lines.push(Line::from(""));
             for (ch, label) in keys {
                 lines.push(Line::from(format!("  [{ch}] {label}")));
             }

@@ -579,6 +579,23 @@ impl ExecutionBackend for DockerExecution {
             .status();
         Ok(())
     }
+
+    fn cancel_handle(&self) -> Option<super::instance::CancelHandle> {
+        let name = self.container_name.clone();
+        Some(super::instance::CancelHandle::new(move || {
+            let _ = Command::new("docker")
+                .args(["stop", &name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = Command::new("docker")
+                .args(["rm", &name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            Ok(())
+        }))
+    }
 }
 
 /// Translate `ResolvedContainerOptions` into a `docker run` argv (without the

@@ -438,32 +438,100 @@ All flags available on `implement` work with `--workflow`:
 
 ## Workflow control board (TUI only)
 
-While a workflow step is **running**, press **Ctrl+W** to open the **workflow control board** — a popup that lets you redirect execution without waiting for the current step to finish. Ctrl+W works regardless of whether the container window is maximized or minimized.
+Press **Ctrl+W** at any time to open the **workflow control board** — a popup that lets you redirect execution without waiting for the current step to finish. Ctrl+W works regardless of whether the container window is maximized or minimized.
+
+There are two variants of the control board:
+
+### Lightweight step confirmation (between steps)
+
+When a step completes and the next step is ready, amux shows a compact confirmation dialog:
 
 ```
-╭──────── Workflow Control ────────╮
-│ Step: implement                  │
-│                                  │
-│         ↑ Restart current step   │
-│                                  │
-│ ← Cancel to prev   → Next: new   │
-│                                  │
-│         ↓ Next: same container   │
-│                                  │
-│  [Arrow] select  [d]isable  [Esc] dismiss  │
-╰──────────────────────────────────╯
+╭─ Step 'implement' done. Advance to 'test'? ─╮
+│                                             │
+│  [Enter] yes  [Esc] pause  [Ctrl+W] details │
+╰─────────────────────────────────────────────╯
 ```
 
 | Key | Action |
 |-----|--------|
-| **↑** | Restart current step — reset to Pending and relaunch in a fresh container |
-| **←** | Cancel to previous step — mark current step Pending and re-run the most recently completed step |
-| **→** | Next step: new container — mark current step Done and advance to the next step in a new container |
-| **↓** | Next step: same container — mark current step Done and send the next step's prompt to the existing container via PTY |
-| **d** | Disable auto-popup for this step — dismiss and suppress auto-open for the remainder of this step |
-| **Esc** | Dismiss without changing anything |
+| **Enter** | Advance to the next step |
+| **Esc** | Pause and wait for your input |
+| **Ctrl+W** | Open the full workflow control board for more options |
 
-Each action persists workflow state before launching any new execution, so an unexpected exit leaves state consistent.
+### Full workflow control board (between or during steps)
+
+The full control board appears when you have multiple options or want fine-grained control. It can be opened mid-step without disrupting the running container:
+
+```
+╭───── Workflow Control ──────╮
+│ Step: implement             │
+│                             │
+│    ↑ Restart current step   │
+│                             │
+│ ← Prev   → Next (new cont.) │
+│                             │
+│    ↓ Next (same container)  │
+│                             │
+│ [Arrow] select  [Esc] done  │
+╰─────────────────────────────╯
+```
+
+#### Between-step actions
+
+| Key | Effect | Container killed? |
+|-----|--------|-------------------|
+| **↑** | Restart current step — reset to Pending and relaunch in a fresh container | ✓ Yes |
+| **←** | Cancel to previous step — mark current step Pending and re-run the most recently completed step | ✓ Yes |
+| **→** | Next step: new container — mark current step Done and advance in a new container | ✓ Yes |
+| **↓** | Next step: same container — mark current step Done and send the next step's prompt to the existing container via PTY | ✗ No |
+| **Esc** | Dismiss and continue waiting | ✗ No |
+
+#### Mid-step actions (when step is running)
+
+When you open the control board **while a step is actively running**, the same actions are available, but with different implications:
+
+| Key | Effect | Container killed? | Step status |
+|-----|--------|-------------------|-------------|
+| **→** | Force advance — mark current step Done regardless of completion and launch the next step | ✓ Yes | Treated as succeeded |
+| **↓** | Continue in current container — queue a message for the running agent to process | ✗ No | Continues running |
+| **Esc** | Dismiss — let the step continue running undisturbed | ✗ No | Continues running |
+| **↑**, **←** | (same as between-step) | ✓ Yes | (same as between-step) |
+
+The dialog title shows `Workflow Control (step running)` when opened mid-step. Actions that kill the container display a sub-note in gray: `↳ kills running container`. The dismiss action shows: `↳ step keeps running`.
+
+### Next step: same container
+
+The **↓** action reuses the already-running container — the next step's prompt is written directly to its PTY stdin. Useful when the container has already installed dependencies or built artifacts that the next step needs. If the PTY session has closed, amux falls back to a new container and shows a status message.
+
+If the next step requires a **different agent** than the current step, the **↓** option is unavailable. In the TUI it renders greyed out with the message:
+
+```
+Next step uses agent 'codex'; cannot reuse current 'claude' container.
+```
+
+In command mode, the "same container" prompt is skipped entirely and the explanation is printed instead. Use **→** (new container) to advance, which always works regardless of agent.
+
+### Manual vs. automatic opening
+
+Ctrl+W works:
+- Between steps (always available)
+- **During a running step** (new) — does not kill the container unless you select a destructive action
+- When no other dialog is open
+
+---
+
+## Disabling auto-advance for a step
+
+In the full workflow control board, press **[d]** to disable auto-advance for the current step. A lock icon (🔒) appears in the workflow strip next to the step name.
+
+When auto-advance is disabled for a step:
+- The yolo countdown timer does not fire — you must manually advance
+- The stuck-detection dialog still appears if the step goes silent
+- You can still use Ctrl+W to open the control board at any time
+- The toggle takes effect the next time the engine evaluates that step
+
+In yolo mode, disabling auto-advance for a step is a useful escape valve: the step will wait for your decision instead of advancing automatically after 10 seconds of silence.
 
 ### Next step: same container
 
@@ -486,14 +554,51 @@ Ctrl+W requires:
 
 ---
 
-## Auto-advance when stuck
+## Workflow strip and step status
 
-If a running workflow step produces no output for **10 seconds**, amux automatically opens the workflow control board so you can decide what to do without having to notice the yellow indicator yourself.
+The **workflow status strip** shows the state of every step in the workflow:
+
+```
+Running: plan     ┃  ● implement    ✓ review    ⚠️ docs
+```
+
+| Visual | Meaning |
+|--------|---------|
+| **●** (Blue, bold) | Step is currently running |
+| **✓** (Green) | Step completed successfully |
+| **⚠️** (Yellow, bold) | Step is stuck (no output for >10 seconds) |
+| **●** (Gray, dim) | Step is pending |
+| **✗** (Red, bold) | Step encountered an error |
+
+### Stuck steps
+
+When a step produces no output for more than 10 seconds, it is marked as stuck in the strip. Stuck steps show a warning indicator (⚠️) both in the strip box and in the tab label.
+
+Stuck steps trigger automatic behavior:
+- If the stuck tab is active, the workflow control board opens automatically
+- If the stuck tab is in the background (yolo mode), a countdown timer appears in the tab bar
+- The stuck timer respects the auto-advance toggle — if you've disabled auto-advance for that step via **[d]**, it won't auto-open even if stuck
+
+You can always open the control board manually via **Ctrl+W** regardless of stuck status.
+
+### Parallel step groups
+
+Steps that share the same dependencies form a **parallel group** and execute sequentially in file order. In the workflow strip, they are stacked vertically with slight indentation. If a group has more than two steps, the additional steps are shown as `+ N more…`. Use **mouse wheel** to scroll within the strip and view hidden parallel steps.
+
+### Viewing the full control board
+
+When a step completes, amux shows the lightweight confirmation dialog. To see all available actions and options, press **Ctrl+W** to open the full control board. Pressing **Esc** on the lightweight dialog pauses the workflow for manual input.
+
+---
+
+## Auto-advance when stuck (yolo mode)
+
+If a running workflow step produces no output for **10 seconds**, yolo mode automatically opens the workflow control board so you can decide what to do without having to notice the yellow indicator yourself.
 
 The auto-open fires only when:
 - The stuck tab is the currently active tab (background tabs are deferred until you switch to them)
 - No other dialog is already open
-- Auto-open has not been disabled for this step via the **d** key
+- Auto-advance is enabled for this step (not toggled with **[d]**)
 - The user has also been idle for 10 seconds on the active tab (see below)
 
 **Active-tab suppression:** If you are actively pressing keys or scrolling on the currently active tab, the stuck timer is held back even if the container is silent. The control board will not open while you are engaged with the output. The timer starts only once both the container and the user have been idle for 10 seconds. Background tabs are always checked using output time alone.

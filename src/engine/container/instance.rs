@@ -67,11 +67,32 @@ enum ExecutionState {
     Detached,
 }
 
+/// Standalone cancel handle — extracted before `wait()` moves the backend,
+/// so the engine can cancel a container mid-step while the wait future is
+/// in flight. Backends produce these via `ExecutionBackend::cancel_handle`.
+pub struct CancelHandle(Box<dyn Fn() -> Result<(), EngineError> + Send + Sync>);
+
+impl CancelHandle {
+    pub fn new(f: impl Fn() -> Result<(), EngineError> + Send + Sync + 'static) -> Self {
+        Self(Box::new(f))
+    }
+    pub fn cancel(&self) -> Result<(), EngineError> {
+        (self.0)()
+    }
+}
+
 /// Internal trait — the concrete execution wrapper that backends produce.
 /// Not pub outside `src/engine/container/`.
 pub(crate) trait ExecutionBackend: Send {
     fn wait_blocking(self: Box<Self>) -> Result<ContainerExitInfo, EngineError>;
     fn cancel(&self) -> Result<(), EngineError>;
+
+    /// Return a standalone cancel handle that works even after `wait()` has
+    /// moved the backend into a blocking task. Default returns `None` for
+    /// backends that don't support mid-step cancellation.
+    fn cancel_handle(&self) -> Option<CancelHandle> {
+        None
+    }
 
     /// Best-effort: push raw bytes into the running container's stdin.
     ///
@@ -137,6 +158,16 @@ impl ContainerExecution {
         match &self.inner {
             ExecutionState::Running(b) => b.cancel(),
             _ => Ok(()),
+        }
+    }
+
+    /// Extract a standalone cancel handle. Must be called before `wait()`
+    /// which moves the backend into a blocking task. Returns `None` when the
+    /// execution is not in Running state or the backend doesn't support it.
+    pub fn cancel_handle(&self) -> Option<CancelHandle> {
+        match &self.inner {
+            ExecutionState::Running(b) => b.cancel_handle(),
+            _ => None,
         }
     }
 

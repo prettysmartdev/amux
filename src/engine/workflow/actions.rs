@@ -21,6 +21,9 @@ pub enum NextAction {
     Pause,
     /// Abort the workflow entirely.
     Abort,
+    /// Mid-step only: dismiss the control board dialog without affecting the
+    /// running step. The step continues executing undisturbed.
+    Dismiss,
 }
 
 /// Set of `NextAction` variants the frontend may present to the user. The
@@ -41,6 +44,9 @@ pub struct AvailableActions {
     pub continue_unavailable_reason: Option<String>,
     pub cancel_to_previous_unavailable_reason: Option<String>,
     pub finish_workflow_unavailable_reason: Option<String>,
+    /// True when the control board was opened mid-step (container still
+    /// running). Changes Esc semantics from Pause to Dismiss.
+    pub is_mid_step: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

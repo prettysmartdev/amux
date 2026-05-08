@@ -65,7 +65,7 @@ The command box is where you interact with amux. Type any subcommand and press *
 | Type | Update input; suggestions appear below |
 | **Enter** | Execute command |
 | **Ctrl+Enter** or **Shift+Enter** | Insert a newline (multi-line input) |
-| **← / →** | Move cursor within input |
+| **← / →** | Move cursor within input; long input scrolls to keep cursor visible |
 | **Ctrl+← / Ctrl+→** | Move cursor by word |
 | **Home / End** | Move cursor to start / end of input |
 | **↑** | Focus the execution window (for scrolling) |
@@ -73,9 +73,20 @@ The command box is where you interact with amux. Type any subcommand and press *
 | **Ctrl+Backspace** | Delete previous word |
 | **Tab** | Cycle to next autocomplete suggestion |
 | **Shift+Tab** | Cycle to previous autocomplete suggestion |
+| **q** | Quit amux (when command box is empty and idle) |
 | **Ctrl+C** | Close tab (multiple tabs) or open quit confirmation (single tab) |
 
-### Autocomplete
+### Input handling
+
+The command box supports long inputs with automatic horizontal scrolling:
+
+- When your input is longer than the visible width, the text scrolls automatically to keep the cursor in view
+- You can move freely within the input using **← / →**, **Home**, and **End** — the visible portion scrolls to follow your cursor
+- Multi-line inputs are supported via **Ctrl+Enter** or **Shift+Enter**; lines are joined with `↵` in the display
+
+When the command box is empty and the tab is idle (no command running), you'll see a helpful ghost text: `q to quit`. This disappears as soon as you type.
+
+### Autocomplete and suggestions
 
 As you type, matching command completions appear in the suggestion row below the command box:
 
@@ -91,7 +102,21 @@ chat --agent=codex
 implement 0042 --agent opencode --plan
 ```
 
-When the input is empty or there are no matching completions, the suggestion row shows the current working directory of the active session instead:
+Suggestions include flag hints from the command catalogue:
+
+```
+--yolo — enable auto-advance mode    --plan — read-only run
+```
+
+When a suggestion shows a file path (worktree or working directory), long paths are automatically truncated in the middle to fit the display:
+
+```
+Using Worktree: /home/user/my…/worktree-branch
+```
+
+### Context display
+
+When the input is empty or there are no matching completions, the suggestion row shows contextual information instead:
 
 ```
 CWD: /home/user/myproject
@@ -211,17 +236,23 @@ Scrollback holds up to 10,000 lines by default. While scrolled, the title bar sh
 
 ### Minimizing and restoring
 
-Press **Ctrl+M** to minimize the container window. The agent keeps running. The window collapses to a 1-line status bar:
+Press **Ctrl+M** to cycle the container window between three states:
+
+1. **Maximized** — container fills the screen
+2. **Minimized** — container collapses to a 1-line status bar
+3. **Hidden** — container is not displayed (agent keeps running)
 
 ```
 ─ 🔒 claude | myproject | 5% | 200mb | 1m 23s ─────────────────
 ```
 
-From the minimized state:
+When you cycle the container window, amux automatically resizes the running container's PTY to match the new display dimensions. This ensures interactive agents see the correct terminal size.
+
+From the minimized or hidden state:
 
 | Key | Effect |
 |-----|--------|
-| **Ctrl+M** | Restore the container window |
+| **Ctrl+M** | Cycle to the next state (minimized → hidden → maximized → minimized) |
 | **↑ / ↓** | Scroll the execution window (behind the status bar) |
 | **b / e** | Jump to beginning / end of execution window |
 | **Esc** | Return focus to command box |
@@ -276,7 +307,7 @@ Press **Ctrl+,** from anywhere in the TUI to open the config dialog instantly �
 
 When a row is selected, a hint line below the table shows the accepted values for that field (e.g. `claude | codex | opencode | maki | gemini`).
 
-Fields marked `(read-only)` — such as `auto_agent_auth_accepted` — are skipped during navigation for edit purposes. Their values are shown but cannot be changed from this dialog.
+Fields marked `(read-only)` — such as `auto_agent_auth_accepted` — are skipped during navigation for edit purposes. Their values are shown but cannot be changed from this dialog. If you press **Enter** on a read-only field, a toast message appears briefly at the bottom of the dialog: `This field is read-only`.
 
 ### Scope and saving
 
@@ -344,49 +375,101 @@ For workflow tabs, amux goes further: the [workflow control board](04-workflows.
 
 ## Reference: all keyboard shortcuts
 
-| Key | Context | Action |
-|-----|---------|--------|
-| **Ctrl+T** | Anywhere | Open new tab |
-| **Ctrl+A** | Anywhere | Switch to previous tab |
-| **Ctrl+D** | Anywhere | Switch to next tab |
-| **Ctrl+M** | Anywhere | Toggle container window (minimize / restore / hide) |
-| **Ctrl+C** | Single tab open | Open quit confirmation |
-| **Ctrl+C** | Multiple tabs open | Open close-tab dialog |
-| **Ctrl+W** | Workflow running | Open workflow control board |
-| **Ctrl+,** | Anywhere | Open / close config dialog |
-| **Enter** | Command box | Execute command |
-| **Ctrl+Enter** or **Shift+Enter** | Command box | Insert newline |
-| **Tab** | Command box | Cycle to next autocomplete suggestion |
-| **Shift+Tab** | Command box | Cycle to previous autocomplete suggestion |
-| **↑** | Command box | Focus execution window |
-| **← / →** | Command box | Move cursor |
-| **Ctrl+← / Ctrl+→** | Command box | Move cursor by word |
-| **Home / End** | Command box | Move cursor to start / end |
-| **Ctrl+Backspace** | Command box | Delete previous word |
-| **Esc** | Execution window | Return focus to command box |
-| **↑ / ↓** | Execution window | Scroll output line by line |
-| **PageUp / PageDown** | Execution window | Scroll output by page |
-| **b** | Execution window | Jump to beginning |
-| **e** | Execution window | Jump to end (live view) |
-| **l** | Execution window | Toggle status log collapsed / expanded |
-| **Ctrl+Y** | Execution window (text selected) | Copy selection to clipboard |
-| **Esc** | Container window maximized | Forwarded to agent (`\x1b`) |
-| **Ctrl+Y** | Container window maximized (text selected) | Copy selection to clipboard |
-| **Ctrl+M** | Container window maximized | Minimize container window |
-| Mouse scroll | Container window | Scroll scrollback history |
-| Mouse drag | Container window | Select text |
-| **y** | Quit dialog | Quit amux |
-| **n / Esc** | Quit dialog | Cancel |
-| **q** | Close-tab dialog | Quit amux |
-| **c** | Close-tab dialog | Close current tab only |
-| **n / Esc** | Close-tab dialog | Cancel |
-| **↑ / ↓** | Config dialog | Navigate between fields |
-| **← / →** | Config dialog | Navigate between columns |
-| **e** | Config dialog | Enter edit mode for selected field |
-| **Enter** | Config dialog (edit mode) | Confirm value and exit edit mode |
-| **Esc** | Config dialog (edit mode) | Cancel edit without saving |
-| **Ctrl+Enter** | Config dialog | Save all changes to config files |
-| **Esc** | Config dialog (navigation) | Close dialog |
+### Global shortcuts (anywhere in TUI)
+
+| Key | Action |
+|-----|--------|
+| **Ctrl+T** | Open a new tab (prompts for working directory) |
+| **Ctrl+A** | Switch to the previous tab |
+| **Ctrl+D** | Switch to the next tab |
+| **Ctrl+M** | Toggle container window between maximized, minimized, and hidden |
+| **Ctrl+W** | Open workflow control board (between steps or mid-step while running) |
+| **Ctrl+,** | Open / close the configuration dialog |
+| **Ctrl+C** | Quit amux (single tab) or close current tab (multiple tabs open) |
+
+### Command box
+
+| Key | Action |
+|-----|--------|
+| **Enter** | Execute the typed command |
+| **Ctrl+Enter** or **Shift+Enter** | Insert a newline in multi-line input |
+| **Tab** / **Shift+Tab** | Cycle through autocomplete suggestions |
+| **← / →** | Move cursor left / right; input scrolls horizontally if needed |
+| **Ctrl+← / Ctrl+→** | Move cursor by word |
+| **Home / End** | Jump to start / end of input |
+| **Backspace / Delete** | Delete characters |
+| **Ctrl+Backspace** | Delete the previous word |
+| **↑** | Focus the execution window (for scrolling) |
+| **q** | Quit amux (when command box is empty and tab is idle) |
+
+### Execution window
+
+| Key | Action |
+|-----|--------|
+| **↑ / ↓** | Scroll output line by line |
+| **PageUp / PageDown** | Scroll output one full page |
+| **b** | Jump to beginning of output |
+| **e** | Jump to end (return to live view) |
+| **l** | Toggle status log between collapsed and expanded view |
+| **Esc** | Return focus to command box |
+| Mouse scroll | Scroll output at any time (focus not required) |
+
+### Container window (when maximized)
+
+| Key | Action |
+|-----|--------|
+| **Esc** | Forward `\x1b` to the agent (for vim, fzf, interactive CLIs) |
+| **Tab / Shift+Tab** | Forward to the agent |
+| Type | Forward input directly to the agent |
+| **Ctrl+M** | Minimize the container window |
+| Mouse scroll | Scroll terminal scrollback history (5 lines per tick) |
+| Mouse drag | Select text in the terminal (highlighted with inverted colors) |
+| **Ctrl+Y** | Copy selected text to clipboard (ANSI codes stripped) |
+
+### Workflow control board
+
+| Key | Action |
+|-----|--------|
+| **↑** | Restart current step (in a fresh container) |
+| **←** | Cancel to previous step (rewind) |
+| **→** | Next step: advance in a new container |
+| **↓** | Next step: same container (reuse current container) |
+| **[d]** | Disable auto-advance for this step (toggle) |
+| **Enter** | Confirm selected action (lightweight step-confirm dialog) |
+| **Ctrl+W** | Escalate from lightweight dialog to full control board (while dialog is open) |
+| **Esc** | Dismiss without changing anything (mid-step: step keeps running) |
+
+### Workflow strip
+
+| Key | Action |
+|-----|--------|
+| Mouse wheel (scroll up) | Scroll parallel step group upward (reveal hidden steps) |
+| Mouse wheel (scroll down) | Scroll parallel step group downward |
+
+### Configuration dialog
+
+| Key | Action |
+|-----|--------|
+| **↑ / ↓** | Navigate between config field rows |
+| **← / →** | Navigate between columns (Global, Repo, Effective) |
+| **e** | Enter edit mode for the selected field |
+| **Enter** | Confirm the new value and exit edit mode |
+| **Esc** | Cancel edit without saving (edit mode) or close dialog (navigation mode) |
+| **Ctrl+Enter** | Save all pending changes to config files |
+| **Ctrl+,** | Close the dialog (same as Esc in navigation mode) |
+
+### Dialogs
+
+| Context | Key | Action |
+|---------|-----|--------|
+| Quit confirmation | **y** | Confirm quit |
+| Quit confirmation | **n** or **Esc** | Cancel |
+| Close-tab dialog | **q** | Quit amux |
+| Close-tab dialog | **c** | Close current tab only |
+| Close-tab dialog | **n** or **Esc** | Cancel |
+| Lightweight step-confirm | **Enter** | Advance to next step |
+| Lightweight step-confirm | **Esc** | Pause workflow |
+| Lightweight step-confirm | **Ctrl+W** | Open full control board |
 
 ---
 

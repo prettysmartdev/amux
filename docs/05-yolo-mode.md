@@ -86,7 +86,9 @@ When `--yolo` is used **without** `--workflow`, `--worktree` is **not** implied.
 
 ### 4. Auto-advances stuck workflow steps
 
-Instead of opening the manual [workflow control board](04-workflows.md#workflow-control-board), amux begins a **yolo countdown** when a workflow step goes silent for 10 seconds. How the countdown is presented depends on whether the tab is active or in the background.
+When a workflow step goes silent for 10 seconds, amux begins a **yolo countdown** instead of opening the manual [workflow control board](04-workflows.md#workflow-control-board). The countdown timer automatically advances to the next step when it expires. How the countdown is presented depends on whether the tab is active or in the background.
+
+**Auto-advance disabled per-step:** In the [workflow control board](04-workflows.md#disabling-auto-advance-for-a-step), you can press **[d]** to toggle auto-advance off for a specific step. When disabled, the yolo countdown does not fire — the step waits for your manual decision via the workflow control board.
 
 **Active tab — yolo countdown dialog:**
 
@@ -103,7 +105,7 @@ When the stuck tab is currently active, the countdown dialog opens:
 ╰──────────────────────────────────────────╯
 ```
 
-**Active-tab suppression:** If you are actively pressing keys or scrolling on the tab, the stuck timer is held back and the dialog will not open. Both the container and the user must be idle for 10 seconds before the countdown starts.
+**Active-tab suppression:** If you are actively pressing keys or scrolling on the tab, the stuck timer is held back and the dialog will not open. Both the container and the user must be idle for 10 seconds before the countdown starts. Similarly, if a step has auto-advance disabled via the **[d]** toggle, the countdown does not fire even if silent.
 
 **Background tab — tab bar countdown:**
 

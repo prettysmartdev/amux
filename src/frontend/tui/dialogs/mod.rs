@@ -21,6 +21,7 @@ pub enum DialogRequest {
     WorkflowControlBoard(WorkflowControlBoardState),
     WorkflowStepError(WorkflowStepErrorState),
     WorkflowYoloCountdown(WorkflowYoloCountdownState),
+    WorkflowStepConfirm(WorkflowStepConfirmState),
     AgentSetup(AgentSetupState),
     MountScope(MountScopeState),
     AgentAuth(AgentAuthState),
@@ -58,6 +59,7 @@ pub enum Dialog {
     WorkflowControlBoard(WorkflowControlBoardState),
     WorkflowStepError(WorkflowStepErrorState),
     WorkflowYoloCountdown(WorkflowYoloCountdownState),
+    WorkflowStepConfirm(WorkflowStepConfirmState),
     AgentSetup(AgentSetupState),
     MountScope(MountScopeState),
     AgentAuth(AgentAuthState),
@@ -84,6 +86,9 @@ pub struct WorkflowControlBoardState {
     pub continue_unavailable_reason: Option<String>,
     pub cancel_to_previous_unavailable_reason: Option<String>,
     pub finish_workflow_unavailable_reason: Option<String>,
+    /// True when the WCB was opened mid-step (container still running).
+    /// Changes rendering: Esc = dismiss (step keeps running), [p] = pause.
+    pub is_mid_step: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +101,12 @@ pub struct WorkflowStepErrorState {
 pub struct WorkflowYoloCountdownState {
     pub step_name: String,
     pub remaining_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowStepConfirmState {
+    pub completed_step: String,
+    pub next_step: String,
 }
 
 #[derive(Debug, Clone)]

@@ -18,6 +18,11 @@ use super::helpers::{render_summary_box, step_status_label, yes_no};
 
 impl InitFrontend for CliFrontend {
     fn ask_replace_aspec(&mut self) -> Result<bool, EngineError> {
+        eprintln!();
+        eprintln!("amux: The aspec/ folder contains your project specification files —");
+        eprintln!("amux: architecture docs, design decisions, and work item templates.");
+        eprintln!("amux: Replacing it will overwrite any customisations you've made.");
+        eprintln!();
         Ok(yes_no(
             "An aspec/ folder already exists. Replace it with fresh templates?",
             false,
@@ -25,6 +30,12 @@ impl InitFrontend for CliFrontend {
     }
 
     fn ask_run_audit(&mut self) -> Result<bool, EngineError> {
+        eprintln!();
+        eprintln!("amux: The agent audit scans your repository and tailors the");
+        eprintln!("amux: Dockerfile.dev for your project's language, build tools,");
+        eprintln!("amux: and dependencies. It runs inside a container and does not");
+        eprintln!("amux: modify your repository — only the generated Dockerfile.");
+        eprintln!();
         Ok(yes_no(
             "Run the agent audit container to scan and customise the Dockerfile?",
             false,

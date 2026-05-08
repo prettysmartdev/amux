@@ -56,7 +56,11 @@ impl HasContainerFrontend for TuiCommandFrontend {
         // continues to be used for status messages and dialog prompts.
         match self.container_io.take() {
             Some(io) => {
-                Box::new(super::TuiContainerProxy::with_io(self.status_log.clone(), io))
+                Box::new(super::TuiContainerProxy::with_io(
+                    self.status_log.clone(),
+                    io,
+                    self.container_name_shared.clone(),
+                ))
             }
             None => Box::new(super::TuiContainerProxy::new(self.status_log.clone())),
         }

@@ -16,7 +16,7 @@ use crate::command::error::CommandError;
 use crate::engine::container::frontend::ContainerIo;
 use crate::engine::message::{UserMessage, UserMessageSink};
 use crate::frontend::tui::dialogs::{DialogRequest, DialogResponse};
-use crate::frontend::tui::tabs::{SharedContainerName, SharedPtyResetFlag, SharedResizeTx, SharedStdinTx, SharedWorkflowViewState, SharedYoloCtrlW, SharedYoloState};
+use crate::frontend::tui::tabs::{SharedContainerName, SharedControlBoardTx, SharedPtyResetFlag, SharedResizeTx, SharedStdinTx, SharedWorkflowViewState, SharedYoloCtrlW, SharedYoloState};
 use crate::frontend::tui::user_message::{SharedStatusLog, TuiUserMessageSink};
 
 /// TUI frontend struct. Implements every per-command frontend trait.
@@ -57,6 +57,10 @@ pub struct TuiCommandFrontend {
     /// Shared slot for the resize sender, same pattern as stdin_tx_shared.
     #[allow(clippy::type_complexity)]
     pub(crate) resize_tx_shared: std::sync::Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u16, u16)>>>>,
+    /// Shared slot for the control board sender. The engine publishes the
+    /// sender here via `set_control_board_sender`; the TUI event loop reads
+    /// it to send mid-step WCB requests.
+    pub(crate) control_board_tx_shared: SharedControlBoardTx,
 }
 
 impl TuiCommandFrontend {
@@ -74,6 +78,7 @@ impl TuiCommandFrontend {
         container_name_shared: SharedContainerName,
         stdin_tx_shared: SharedStdinTx,
         resize_tx_shared: SharedResizeTx,
+        control_board_tx_shared: SharedControlBoardTx,
     ) -> Self {
         let stdout_tx = container_io.stdout.clone();
         Self {
@@ -93,6 +98,7 @@ impl TuiCommandFrontend {
             stdout_tx,
             stdin_tx_shared,
             resize_tx_shared,
+            control_board_tx_shared,
         }
     }
 

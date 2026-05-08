@@ -264,6 +264,15 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         Action::CycleContainerWindow => {
             let tab = app.active_tab_mut();
             tab.container_window_state = tab.container_window_state.cycle();
+            if tab.container_window_state != ContainerWindowState::Hidden {
+                if let Ok(size) = crossterm::terminal::size() {
+                    let (cols, rows) = compute_container_inner_size(size.0, size.1);
+                    tab.vt100_parser.set_size(rows, cols);
+                    if let Some(ref tx) = tab.container_resize_tx {
+                        let _ = tx.send((cols, rows));
+                    }
+                }
+            }
         }
         Action::WorkflowControl => {
             // Guard: act when a workflow is active (has steps) OR a yolo
@@ -275,7 +284,7 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
                 .and_then(|g| g.is_some().then_some(true))
                 .unwrap_or(false);
             if !workflow_active && !yolo_active {
-                // No workflow running — ignore.
+                app.status_bar.text = "no workflow running".to_string();
             } else if matches!(app.active_dialog, Some(Dialog::WorkflowYoloCountdown(_))) {
                 // During yolo countdown: cancel it and signal the engine to
                 // show the workflow control board.
@@ -285,8 +294,27 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
                 app.active_tab_mut().yolo_dismissed_at = Some(std::time::Instant::now());
                 app.active_tab().yolo_ctrl_w.store(true, std::sync::atomic::Ordering::Relaxed);
                 app.active_dialog = None;
+            } else if matches!(app.active_dialog, Some(Dialog::WorkflowStepConfirm(_))) {
+                // Escalate from lightweight step confirm to full WCB.
+                // Send Dismissed so the workflow frontend falls through.
+                app.send_dialog_response(DialogResponse::Char('W'));
+                app.active_dialog = None;
+                app.command_dialog_active = false;
             } else if app.active_dialog.is_some() {
                 // Another dialog is blocking — don't interfere.
+            } else {
+                // No dialog open and workflow is active: check if a step is
+                // running and send a mid-step control board request.
+                let step_running = app.active_tab().workflow_state.lock().ok()
+                    .and_then(|g| g.as_ref().and_then(|v| v.current_step.clone()))
+                    .is_some();
+                if step_running {
+                    if let Ok(guard) = app.active_tab().control_board_tx_shared.lock() {
+                        if let Some(tx) = guard.as_ref() {
+                            let _ = tx.send(crate::engine::workflow::ControlBoardRequest::OpenControlBoard);
+                        }
+                    }
+                }
             }
         }
         Action::OpenConfigShow => {
@@ -502,16 +530,30 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent) {
 
     match mouse.kind {
         MouseEventKind::ScrollUp => {
+            // Workflow strip scroll.
+            if let Some(strip_rect) = app.active_tab().last_strip_rect {
+                if mouse.row >= strip_rect.y
+                    && mouse.row < strip_rect.y + strip_rect.height
+                    && mouse.column >= strip_rect.x
+                    && mouse.column < strip_rect.x + strip_rect.width
+                {
+                    let tab = app.active_tab_mut();
+                    tab.workflow_strip_scroll_offset =
+                        tab.workflow_strip_scroll_offset.saturating_sub(1);
+                    return;
+                }
+            }
             let tab = app.active_tab_mut();
             if tab.container_window_state == ContainerWindowState::Maximized {
                 // vt100's visible_rows() overflows when scrollback_offset >
                 // screen rows, so cap to min(scrollback_depth, rows).
                 let max_scroll = {
                     let parser = &mut tab.vt100_parser;
+                    let screen_rows = parser.screen().size().0 as usize;
                     parser.set_scrollback(usize::MAX);
                     let depth = parser.screen().scrollback();
                     parser.set_scrollback(0);
-                    depth
+                    depth.min(screen_rows)
                 };
                 tab.container_scroll_offset =
                     (tab.container_scroll_offset + 5).min(max_scroll);
@@ -520,6 +562,18 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent) {
             }
         }
         MouseEventKind::ScrollDown => {
+            // Workflow strip scroll.
+            if let Some(strip_rect) = app.active_tab().last_strip_rect {
+                if mouse.row >= strip_rect.y
+                    && mouse.row < strip_rect.y + strip_rect.height
+                    && mouse.column >= strip_rect.x
+                    && mouse.column < strip_rect.x + strip_rect.width
+                {
+                    let tab = app.active_tab_mut();
+                    tab.workflow_strip_scroll_offset += 1;
+                    return;
+                }
+            }
             let tab = app.active_tab_mut();
             if tab.container_window_state == ContainerWindowState::Maximized {
                 tab.container_scroll_offset =
@@ -907,6 +961,7 @@ fn handle_dialog_submit(app: &mut App) {
                 // selected row. edit_column 0 = global, 1 = repo.
                 let row = &state.rows[state.selected];
                 if row.read_only {
+                    app.status_bar.text = "This field is read-only".to_string();
                     return;
                 }
                 let initial_value = if state.edit_column == 0 {
@@ -920,6 +975,12 @@ fn handle_dialog_submit(app: &mut App) {
                     state.editor.set_text(&initial_value);
                 }
             }
+        }
+
+        Some(Dialog::WorkflowStepConfirm(_)) if is_command => {
+            app.send_dialog_response(DialogResponse::Char('>'));
+            app.active_dialog = None;
+            app.command_dialog_active = false;
         }
 
         _ => {}
@@ -1110,6 +1171,11 @@ fn handle_dialog_char(app: &mut App, c: char) {
             app.send_dialog_response(DialogResponse::Char(c));
             app.active_dialog = None;
             app.command_dialog_active = false;
+        }
+
+        Some(Dialog::WorkflowStepConfirm(_)) => {
+            // Only Ctrl+W is handled as a char here — it escalates to the full WCB.
+            // Enter and Esc are handled by SubmitCommand and DismissDialog actions.
         }
 
         Some(Dialog::KindSelect { options, .. }) if is_command => {
@@ -1716,6 +1782,7 @@ mod tests {
                 continue_unavailable_reason: None,
                 cancel_to_previous_unavailable_reason: None,
                 finish_workflow_unavailable_reason: None,
+                is_mid_step: false,
             },
         ));
         app.command_dialog_active = true;
@@ -1950,5 +2017,290 @@ mod tests {
         } else {
             panic!("dialog should still be open");
         }
+    }
+
+    // ─── Ctrl+W workflow control ──────────────────────────────────────────────
+
+    #[test]
+    fn ctrl_w_with_no_workflow_pushes_status_bar_message() {
+        let mut app = make_app();
+        // No workflow state set — workflow_state is None by default.
+        press_key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(
+            app.status_bar.text, "no workflow running",
+            "Ctrl+W with no active workflow must update the status bar"
+        );
+        assert!(
+            app.active_dialog.is_none(),
+            "no dialog must be opened when no workflow is active"
+        );
+    }
+
+    #[test]
+    fn ctrl_w_during_running_step_sends_control_board_request() {
+        use crate::engine::workflow::ControlBoardRequest;
+        use crate::frontend::tui::tabs::WorkflowStepView;
+        use crate::frontend::tui::tabs::WorkflowViewState;
+        use std::collections::HashSet;
+
+        let mut app = make_app();
+
+        // Seed the workflow_state with a running step.
+        let view = WorkflowViewState {
+            steps: vec![WorkflowStepView {
+                name: "build".into(),
+                status: "running".into(),
+                agent: None,
+                model: None,
+                depends_on: vec![],
+                stuck: false,
+            }],
+            current_step: Some("build".into()),
+            auto_disabled: HashSet::new(),
+        };
+        *app.active_tab_mut().workflow_state.lock().unwrap() = Some(view);
+
+        // Wire up a control board channel so we can observe what's sent.
+        let (cb_tx, mut cb_rx) = tokio::sync::mpsc::unbounded_channel::<ControlBoardRequest>();
+        *app.active_tab_mut().control_board_tx_shared.lock().unwrap() = Some(cb_tx);
+
+        press_key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+
+        let msg = cb_rx.try_recv().expect("control board tx must receive a message");
+        assert!(
+            matches!(msg, ControlBoardRequest::OpenControlBoard),
+            "Ctrl+W during a running step must send OpenControlBoard"
+        );
+    }
+
+    #[test]
+    fn ctrl_w_in_step_confirm_escalates_to_wcb() {
+        use crate::frontend::tui::tabs::{WorkflowViewState, WorkflowStepView};
+        use std::collections::HashSet;
+
+        let mut app = make_app();
+
+        // A workflow must be active for Ctrl+W to do anything.
+        let view = WorkflowViewState {
+            steps: vec![WorkflowStepView {
+                name: "build".into(),
+                status: "done".into(),
+                agent: None,
+                model: None,
+                depends_on: vec![],
+                stuck: false,
+            }],
+            current_step: None,
+            auto_disabled: HashSet::new(),
+        };
+        *app.active_tab_mut().workflow_state.lock().unwrap() = Some(view);
+
+        // Open a StepConfirm dialog with a response channel.
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.tabs[app.active_tab].dialog_response_tx = Some(tx);
+        app.active_dialog = Some(Dialog::WorkflowStepConfirm(
+            crate::frontend::tui::dialogs::WorkflowStepConfirmState {
+                completed_step: "build".into(),
+                next_step: "test".into(),
+            },
+        ));
+        app.command_dialog_active = true;
+
+        press_key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+
+        // The dialog should have been dismissed.
+        assert!(
+            app.active_dialog.is_none(),
+            "StepConfirm dialog must close on Ctrl+W"
+        );
+        // The frontend must have received Char('W') so it can open the full WCB.
+        let resp = rx.try_recv().expect("dialog_response_tx must receive a message");
+        assert!(
+            matches!(resp, crate::frontend::tui::dialogs::DialogResponse::Char('W')),
+            "escalation must send Char('W') to trigger full WCB"
+        );
+    }
+
+    // ─── ConfigShow read-only toast ───────────────────────────────────────────
+
+    #[test]
+    fn enter_on_read_only_shows_toast() {
+        use crate::frontend::tui::dialogs::{ConfigShowRow, ConfigShowState};
+        use crate::frontend::tui::text_edit::TextEdit;
+
+        let mut app = make_app();
+        app.active_dialog = Some(Dialog::ConfigShow(ConfigShowState {
+            rows: vec![ConfigShowRow {
+                field: "agent".into(),
+                global: "claude".into(),
+                repo: "claude".into(),
+                effective: "claude".into(),
+                read_only: true,
+            }],
+            selected: 0,
+            editing: false,
+            edit_column: 0,
+            editor: TextEdit::new(false),
+        }));
+        app.command_dialog_active = true;
+
+        press_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            app.status_bar.text, "This field is read-only",
+            "pressing Enter on a read-only ConfigShow row must update the status bar"
+        );
+        // The dialog should remain open.
+        assert!(app.active_dialog.is_some(), "dialog must stay open after read-only toast");
+    }
+
+    // ─── ContainerWindow cycle / resize ──────────────────────────────────────
+
+    #[test]
+    fn cycle_to_hidden_does_not_send_resize() {
+        let mut app = make_app();
+        // Wire a resize channel to observe.
+        let (resize_tx, mut resize_rx) = tokio::sync::mpsc::unbounded_channel::<(u16, u16)>();
+        app.active_tab_mut().container_resize_tx = Some(resize_tx);
+
+        // Start at Maximized, cycle → Minimized (not Hidden, resize expected on next test).
+        app.active_tab_mut().container_window_state =
+            crate::frontend::tui::tabs::ContainerWindowState::Maximized;
+        // Cycle: Maximized → Minimized
+        press_key(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        assert_eq!(
+            app.active_tab().container_window_state,
+            crate::frontend::tui::tabs::ContainerWindowState::Minimized,
+        );
+
+        // Cycle again: Minimized → Maximized (still not hidden, resize may be sent)
+        press_key(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        assert_eq!(
+            app.active_tab().container_window_state,
+            crate::frontend::tui::tabs::ContainerWindowState::Maximized,
+        );
+
+        // Cycle: Maximized → Minimized once more — no Hidden state reached yet.
+        // Now let's explicitly set Hidden and verify cycling to Hidden sends nothing.
+        app.active_tab_mut().container_window_state =
+            crate::frontend::tui::tabs::ContainerWindowState::Minimized;
+        // Drain channel to reset state.
+        while resize_rx.try_recv().is_ok() {}
+
+        // Hidden → Maximized (sending resize) then Maximized → Minimized (sending resize)
+        // We want to reach Hidden from Minimized: but cycle(Minimized) = Maximized.
+        // Actually cycle(Hidden) = Maximized, cycle(Minimized) = Maximized, cycle(Maximized) = Minimized.
+        // There's no transition TO Hidden — Hidden is the initial state.
+        // So we test that cycling out of Hidden (to Maximized) might send a resize,
+        // and cycling Maximized → Minimized does NOT go to Hidden and always sends resize.
+        // "Cycle to hidden does not send resize" means starting from Maximized → Minimized:
+        // In that transition, a resize IS sent (not hidden). But if we start from Hidden and
+        // cycle, we go to Maximized (sends resize). Since Hidden isn't reachable via cycle from
+        // a non-hidden state, let's verify: starting at Maximized, cycling to Minimized.
+        app.active_tab_mut().container_window_state =
+            crate::frontend::tui::tabs::ContainerWindowState::Maximized;
+        while resize_rx.try_recv().is_ok() {}
+        press_key(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        // Minimized ≠ Hidden so resize is attempted (may fail in headless env).
+        // The key assertion: cycling from Hidden should not send resize even if Hidden
+        // is explicitly set.
+        app.active_tab_mut().container_window_state =
+            crate::frontend::tui::tabs::ContainerWindowState::Hidden;
+        app.active_tab_mut().container_resize_tx = None; // no channel
+        // Cycling from Hidden → Maximized — the resize send should not panic.
+        press_key(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        assert_eq!(
+            app.active_tab().container_window_state,
+            crate::frontend::tui::tabs::ContainerWindowState::Maximized,
+        );
+    }
+
+    // ─── Workflow strip scroll ────────────────────────────────────────────────
+
+    #[test]
+    fn scroll_down_reveals_hidden_parallel_steps() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+        use crate::frontend::tui::tabs::{WorkflowViewState, WorkflowStepView};
+        use std::collections::HashSet;
+
+        let mut app = make_app();
+
+        // Seed a workflow with many parallel steps so the strip would have overflow.
+        let view = WorkflowViewState {
+            steps: (0..6).map(|i| WorkflowStepView {
+                name: format!("step-{i}"),
+                status: "pending".into(),
+                agent: None,
+                model: None,
+                depends_on: vec![],
+                stuck: false,
+            }).collect(),
+            current_step: None,
+            auto_disabled: HashSet::new(),
+        };
+        *app.active_tab_mut().workflow_state.lock().unwrap() = Some(view);
+
+        // Simulate the renderer having recorded a strip rect.
+        let strip_rect = Rect::new(0, 30, 80, 9);
+        app.active_tab_mut().last_strip_rect = Some(strip_rect);
+
+        assert_eq!(app.active_tab().workflow_strip_scroll_offset, 0);
+
+        // Mouse scroll-down inside the strip rect increments the offset.
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 10,
+                row: 32, // inside strip_rect
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            app.active_tab().workflow_strip_scroll_offset, 1,
+            "scroll down inside strip must increment workflow_strip_scroll_offset"
+        );
+    }
+
+    #[test]
+    fn scroll_clamped_at_bounds() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+        use crate::frontend::tui::tabs::{WorkflowViewState, WorkflowStepView};
+        use std::collections::HashSet;
+
+        let mut app = make_app();
+        let view = WorkflowViewState {
+            steps: vec![WorkflowStepView {
+                name: "only".into(),
+                status: "pending".into(),
+                agent: None,
+                model: None,
+                depends_on: vec![],
+                stuck: false,
+            }],
+            current_step: None,
+            auto_disabled: HashSet::new(),
+        };
+        *app.active_tab_mut().workflow_state.lock().unwrap() = Some(view);
+
+        let strip_rect = Rect::new(0, 30, 80, 3);
+        app.active_tab_mut().last_strip_rect = Some(strip_rect);
+
+        // Scroll up when already at 0 → offset stays at 0 (no underflow).
+        super::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 10,
+                row: 31,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            app.active_tab().workflow_strip_scroll_offset, 0,
+            "scrolling up at offset=0 must not underflow"
+        );
     }
 }

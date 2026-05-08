@@ -66,4 +66,20 @@ pub trait WorkflowFrontend: UserMessageSink + Send {
         _model: Option<&str>,
     ) {
     }
+
+    /// Whether the given step should auto-advance (yolo countdown). Returns
+    /// `true` by default so CLI/headless frontends always auto-advance. The
+    /// TUI overrides this to respect the per-step `[d]` toggle.
+    fn should_auto_advance(&self, _step_name: &str) -> bool {
+        true
+    }
+
+    /// Called by the engine after creating the control-board channel. The
+    /// frontend stores the sender so the TUI event loop can open the WCB
+    /// mid-step. Default is a no-op (CLI/headless don't need this).
+    fn set_control_board_sender(
+        &mut self,
+        _tx: tokio::sync::mpsc::UnboundedSender<crate::engine::workflow::ControlBoardRequest>,
+    ) {
+    }
 }

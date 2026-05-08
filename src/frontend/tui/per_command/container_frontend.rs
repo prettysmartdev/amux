@@ -76,21 +76,24 @@ impl ContainerFrontend for TuiCommandFrontend {
 pub struct TuiContainerProxy {
     log: SharedStatusLog,
     container_io: Option<crate::engine::container::frontend::ContainerIo>,
+    container_name_shared: Option<crate::frontend::tui::tabs::SharedContainerName>,
 }
 
 impl TuiContainerProxy {
     /// Construct a status-log-only proxy (no PTY bridging).
     pub fn new(log: SharedStatusLog) -> Self {
-        Self { log, container_io: None }
+        Self { log, container_io: None, container_name_shared: None }
     }
 
     /// Construct a proxy that also carries the byte-stream I/O channels for
-    /// engine-side PTY bridging.
+    /// engine-side PTY bridging, plus the shared container name slot so the
+    /// TUI stats poller can discover the container.
     pub fn with_io(
         log: SharedStatusLog,
         io: crate::engine::container::frontend::ContainerIo,
+        container_name_shared: crate::frontend::tui::tabs::SharedContainerName,
     ) -> Self {
-        Self { log, container_io: Some(io) }
+        Self { log, container_io: Some(io), container_name_shared: Some(container_name_shared) }
     }
 }
 
@@ -143,7 +146,15 @@ impl ContainerFrontend for TuiContainerProxy {
         Ok(0) // Text commands don't need stdin
     }
 
-    fn report_status(&mut self, _status: ContainerStatus) {}
+    fn report_status(&mut self, status: ContainerStatus) {
+        if let ContainerStatus::Running { ref container_name } = status {
+            if let Some(ref shared) = self.container_name_shared {
+                if let Ok(mut name) = shared.lock() {
+                    *name = Some(container_name.clone());
+                }
+            }
+        }
+    }
 
     fn report_progress(&mut self, _progress: ContainerProgress) {}
 

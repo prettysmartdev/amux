@@ -37,11 +37,41 @@ enum YoloCountdownResult {
     ShowControlBoard,
 }
 
+/// Result of mid-step control board interaction.
+enum MidStepOutcome {
+    /// User dismissed the dialog — resume waiting on the step.
+    Continue,
+    /// Step completed while dialog was open; outcome is ready.
+    StepCompleted(StepOutcome),
+    /// User chose a workflow-level action (pause/abort/finish).
+    WorkflowEnded(WorkflowOutcome),
+    /// User chose an action that re-enters the loop (restart/advance/etc).
+    LoopContinue,
+}
+
+/// Result of `step_once_interruptible`.
+enum InterruptibleStepResult {
+    /// Step completed (naturally or while dialog was open).
+    StepCompleted(StepOutcome),
+    /// Mid-step action ended the workflow.
+    WorkflowEnded(WorkflowOutcome),
+    /// Mid-step action requires the outer loop to continue (restart/advance).
+    LoopContinue,
+}
+
 pub use actions::{
     StepOutput, StepOutputKind, WorkflowOutcome as Outcome, WorkflowStepStatus as Status,
 };
 pub use factory::{ContainerExecutionFactory as Factory, WorkflowRuntimeContext as RuntimeContext};
 pub use frontend::WorkflowFrontend as Frontend;
+
+/// Request sent from the TUI (via channel) to interrupt the engine mid-step.
+#[derive(Debug, Clone)]
+pub enum ControlBoardRequest {
+    /// User pressed Ctrl+W while a step is running. The engine computes
+    /// mid-step available actions and calls `user_choose_next_action`.
+    OpenControlBoard,
+}
 
 /// Configuration the engine consumes at construction.
 pub struct WorkflowEngine {
@@ -72,6 +102,8 @@ pub struct WorkflowEngine {
     /// Exit info from the most recent step execution, used by the step-failure
     /// dialog so it can display timing and signal information.
     last_exit_info: Option<ContainerExitInfo>,
+    /// Receiver for mid-step control board requests from the TUI.
+    control_board_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ControlBoardRequest>>,
 }
 
 impl WorkflowEngine {
@@ -79,7 +111,7 @@ impl WorkflowEngine {
         session: &Session,
         workflow: Workflow,
         work_item: Option<u32>,
-        frontend: Box<dyn WorkflowFrontend>,
+        mut frontend: Box<dyn WorkflowFrontend>,
         container_factory: Box<dyn ContainerExecutionFactory>,
         git_engine: Arc<GitEngine>,
         overlay_engine: Arc<OverlayEngine>,
@@ -94,6 +126,8 @@ impl WorkflowEngine {
         );
         let state_store = WorkflowStateStore::new(session);
         let effective_config = session.effective_config();
+        let (cb_tx, cb_rx) = tokio::sync::mpsc::unbounded_channel();
+        frontend.set_control_board_sender(cb_tx);
         Ok(Self {
             session: session.clone(),
             workflow,
@@ -112,6 +146,7 @@ impl WorkflowEngine {
             work_item,
             yolo: false,
             last_exit_info: None,
+            control_board_rx: Some(cb_rx),
         })
     }
 
@@ -180,6 +215,8 @@ impl WorkflowEngine {
         }
 
         let effective_config = session.effective_config();
+        let (cb_tx, cb_rx) = tokio::sync::mpsc::unbounded_channel();
+        frontend.set_control_board_sender(cb_tx);
         Ok(Self {
             session: session.clone(),
             workflow,
@@ -198,6 +235,7 @@ impl WorkflowEngine {
             work_item,
             yolo: false,
             last_exit_info: None,
+            control_board_rx: Some(cb_rx),
         })
     }
 
@@ -221,7 +259,12 @@ impl WorkflowEngine {
                 self.frontend.report_workflow_completed(&outcome);
                 return Ok(outcome);
             }
-            let outcome = self.step_once().await?;
+            let interruptible_result = self.step_once_interruptible().await?;
+            let outcome = match interruptible_result {
+                InterruptibleStepResult::StepCompleted(o) => o,
+                InterruptibleStepResult::WorkflowEnded(wo) => return Ok(wo),
+                InterruptibleStepResult::LoopContinue => continue,
+            };
             if let WorkflowStepStatus::Failed { exit_code } = outcome.status {
                 let progress = self.workflow_progress_info();
                 self.frontend.report_workflow_progress(&progress);
@@ -277,7 +320,11 @@ impl WorkflowEngine {
 
                 // In yolo mode, replace the interactive prompt with a 60-second
                 // countdown that auto-advances unless the user cancels.
-                if self.yolo {
+                // Respect the per-step auto-advance toggle ([d] in TUI).
+                let step_auto_advance = self.current_step_name.as_deref()
+                    .map(|n| self.frontend.should_auto_advance(n))
+                    .unwrap_or(true);
+                if self.yolo && step_auto_advance {
                     match self.run_yolo_countdown().await? {
                         YoloCountdownResult::Advance => continue,
                         YoloCountdownResult::Pause => {
@@ -297,6 +344,7 @@ impl WorkflowEngine {
                     .frontend
                     .user_choose_next_action(&self.state, &available)?;
                 match action {
+                    NextAction::Dismiss => continue,
                     NextAction::LaunchNext => continue,
                     NextAction::ContinueInCurrentContainer { prompt } => {
                         // Pre-validate before calling inject_prompt: the next
@@ -415,13 +463,24 @@ impl WorkflowEngine {
 
     /// Advance exactly one step, reporting status through the frontend.
     pub async fn step_once(&mut self) -> Result<StepOutcome, EngineError> {
+        let step_name = self.launch_step().await?;
+        let exit = {
+            let exec = self.current_execution.as_mut().expect("launch_step stored execution");
+            exec.wait().await?
+        };
+        self.finalize_step(&step_name, exit)
+    }
+
+    /// First half of `step_once`: find the next ready step, resolve
+    /// agent/model, launch the container, store in `current_execution`.
+    /// Returns the step name so the caller can pass it to `finalize_step`.
+    async fn launch_step(&mut self) -> Result<String, EngineError> {
         let ready = self.state.next_ready(&self.dag);
         let step_name = ready.first().cloned().ok_or_else(|| {
             EngineError::InvalidAdvanceAction("no ready steps remaining".into())
         })?;
         let step = self.find_step(&step_name)?;
 
-        // Resolve agent + model.
         let resolved_agent = self.resolve_agent(&step)?;
         let resolved_model = self.resolve_model(&step);
         tracing::info!(
@@ -438,14 +497,12 @@ impl WorkflowEngine {
             session_id: self.session.id(),
         };
 
-        // Emit the interactive-launch notice so the CLI can print the banner.
         self.frontend.report_step_interactive_launch(
             &step,
             resolved_agent.as_str(),
             resolved_model.as_deref(),
         );
 
-        // Mark running and launch.
         self.state.set_status(
             &step.name,
             StepState::Running {
@@ -460,7 +517,6 @@ impl WorkflowEngine {
             .container_factory
             .execution_for_step(&step, &self.session, &runtime)?;
 
-        // Persist the container ID now that we know it.
         self.state.set_status(
             &step.name,
             StepState::Running {
@@ -469,18 +525,22 @@ impl WorkflowEngine {
         );
         self.persist()?;
 
-        // Store before waiting so the execution is available for
-        // ContinueInCurrentContainer prompt injection after this step completes.
         self.current_execution = Some(execution);
-        let exit = {
-            let exec = self.current_execution.as_mut().expect("just stored");
-            exec.wait().await?
-        };
+        self.current_step_name = Some(step.name.clone());
+        self.current_step_agent = Some(resolved_agent);
+        self.current_step_model = resolved_model;
+        Ok(step.name)
+    }
 
-        // Store exit info for the step-failure dialog.
+    /// Second half of `step_once`: process exit info, update state, return
+    /// the step outcome.
+    fn finalize_step(
+        &mut self,
+        step_name: &str,
+        exit: ContainerExitInfo,
+    ) -> Result<StepOutcome, EngineError> {
         self.last_exit_info = Some(exit.clone());
 
-        // Persist new step state based on exit code.
         let (status, step_state) = if exit.exit_code == 0 {
             (WorkflowStepStatus::Succeeded, StepState::Succeeded)
         } else {
@@ -494,11 +554,9 @@ impl WorkflowEngine {
                 },
             )
         };
-        self.state.set_status(&step.name, step_state);
+        let step = self.find_step(step_name)?;
+        self.state.set_status(step_name, step_state);
         self.frontend.report_step_status(&step, status.clone());
-        self.current_step_name = Some(step.name.clone());
-        self.current_step_agent = Some(resolved_agent);
-        self.current_step_model = resolved_model;
         self.persist()?;
 
         let remaining = self
@@ -508,10 +566,202 @@ impl WorkflowEngine {
             .filter(|s| !self.state.completed_steps.contains(&s.name))
             .count();
         Ok(StepOutcome {
-            step_name: step.name,
+            step_name: step_name.to_string(),
             status,
             remaining,
         })
+    }
+
+    /// Like `step_once`, but allows the user to open the Workflow Control
+    /// Board mid-step via the control board channel. The step continues
+    /// running while the user interacts with the dialog.
+    async fn step_once_interruptible(&mut self) -> Result<InterruptibleStepResult, EngineError> {
+        let step_name = self.launch_step().await?;
+
+        // Extract a cancel handle before spawning the wait — once `wait()`
+        // moves the backend into a blocking task, the execution can no
+        // longer cancel itself.
+        let cancel_handle = self.current_execution.as_ref()
+            .and_then(|e| e.cancel_handle());
+
+        // Move the execution into a spawned task so we can `select!` between
+        // it and the control board channel without holding `&mut self`.
+        let mut exec = self.current_execution.take()
+            .expect("launch_step stored execution");
+        let (wait_tx, mut wait_rx) =
+            tokio::sync::oneshot::channel::<(ContainerExecution, Result<ContainerExitInfo, EngineError>)>();
+        tokio::spawn(async move {
+            let result = exec.wait().await;
+            let _ = wait_tx.send((exec, result));
+        });
+
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut wait_rx => {
+                    let (exec_back, exit_result) = result
+                        .map_err(|_| EngineError::Other("step wait task dropped unexpectedly".into()))?;
+                    self.current_execution = Some(exec_back);
+                    return Ok(InterruptibleStepResult::StepCompleted(
+                        self.finalize_step(&step_name, exit_result?)?
+                    ));
+                }
+                Some(req) = Self::recv_control_board(&mut self.control_board_rx) => {
+                    match req {
+                        ControlBoardRequest::OpenControlBoard => {
+                            let mid_step_outcome = self.handle_mid_step_control_board(
+                                &step_name,
+                                &cancel_handle,
+                                &mut wait_rx,
+                            )?;
+                            match mid_step_outcome {
+                                MidStepOutcome::Continue => continue,
+                                MidStepOutcome::StepCompleted(o) => {
+                                    return Ok(InterruptibleStepResult::StepCompleted(o));
+                                }
+                                MidStepOutcome::WorkflowEnded(wo) => {
+                                    return Ok(InterruptibleStepResult::WorkflowEnded(wo));
+                                }
+                                MidStepOutcome::LoopContinue => {
+                                    return Ok(InterruptibleStepResult::LoopContinue);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Receive from the control board channel, or pend forever if None.
+    async fn recv_control_board(
+        rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<ControlBoardRequest>>,
+    ) -> Option<ControlBoardRequest> {
+        match rx {
+            Some(rx) => rx.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Handle a mid-step control board request. Shows the WCB dialog and
+    /// returns what the engine should do next.
+    fn handle_mid_step_control_board(
+        &mut self,
+        step_name: &str,
+        cancel_handle: &Option<crate::engine::container::instance::CancelHandle>,
+        wait_rx: &mut tokio::sync::oneshot::Receiver<(ContainerExecution, Result<ContainerExitInfo, EngineError>)>,
+    ) -> Result<MidStepOutcome, EngineError> {
+        let mut available = self.compute_available_actions()?;
+        available.is_mid_step = true;
+        let action = self.frontend.user_choose_next_action(&self.state, &available)?;
+
+        // Check if the container finished while the dialog was open.
+        let already_finished = match wait_rx.try_recv() {
+            Ok((exec_back, exit_result)) => {
+                self.current_execution = Some(exec_back);
+                Some(exit_result)
+            }
+            Err(_) => None,
+        };
+
+        match action {
+            NextAction::Dismiss => {
+                if let Some(exit_result) = already_finished {
+                    return Ok(MidStepOutcome::StepCompleted(
+                        self.finalize_step(step_name, exit_result?)?
+                    ));
+                }
+                Ok(MidStepOutcome::Continue)
+            }
+            NextAction::ContinueInCurrentContainer { prompt } => {
+                if let Some(exec) = self.current_execution.as_ref() {
+                    let _ = self.container_factory.inject_prompt(exec, &prompt);
+                }
+                if let Some(exit_result) = already_finished {
+                    return Ok(MidStepOutcome::StepCompleted(
+                        self.finalize_step(step_name, exit_result?)?
+                    ));
+                }
+                Ok(MidStepOutcome::Continue)
+            }
+            NextAction::Pause => {
+                if already_finished.is_none() {
+                    if let Some(ch) = cancel_handle {
+                        let _ = ch.cancel();
+                    }
+                }
+                self.state.set_status(step_name, StepState::Pending);
+                self.persist()?;
+                let outcome = WorkflowOutcome::Paused;
+                self.frontend.report_workflow_completed(&outcome);
+                Ok(MidStepOutcome::WorkflowEnded(outcome))
+            }
+            NextAction::Abort => {
+                if already_finished.is_none() {
+                    if let Some(ch) = cancel_handle {
+                        let _ = ch.cancel();
+                    }
+                }
+                for s in &self.workflow.steps {
+                    if !self.state.completed_steps.contains(&s.name) {
+                        self.state.set_status(&s.name, StepState::Cancelled);
+                    }
+                }
+                self.persist()?;
+                let outcome = WorkflowOutcome::Aborted;
+                self.frontend.report_workflow_completed(&outcome);
+                Ok(MidStepOutcome::WorkflowEnded(outcome))
+            }
+            NextAction::FinishWorkflow => {
+                if already_finished.is_none() {
+                    if let Some(ch) = cancel_handle {
+                        let _ = ch.cancel();
+                    }
+                }
+                for s in &self.workflow.steps {
+                    if !self.state.completed_steps.contains(&s.name) {
+                        self.state.set_status(&s.name, StepState::Skipped);
+                    }
+                }
+                self.persist()?;
+                let outcome = WorkflowOutcome::Completed;
+                self.frontend.report_workflow_completed(&outcome);
+                Ok(MidStepOutcome::WorkflowEnded(outcome))
+            }
+            NextAction::LaunchNext => {
+                if already_finished.is_none() {
+                    if let Some(ch) = cancel_handle {
+                        let _ = ch.cancel();
+                    }
+                }
+                self.state.set_status(step_name, StepState::Succeeded);
+                self.persist()?;
+                Ok(MidStepOutcome::LoopContinue)
+            }
+            NextAction::RestartCurrentStep => {
+                if already_finished.is_none() {
+                    if let Some(ch) = cancel_handle {
+                        let _ = ch.cancel();
+                    }
+                }
+                self.state.set_status(step_name, StepState::Pending);
+                self.persist()?;
+                Ok(MidStepOutcome::LoopContinue)
+            }
+            NextAction::CancelToPreviousStep => {
+                if already_finished.is_none() {
+                    if let Some(ch) = cancel_handle {
+                        let _ = ch.cancel();
+                    }
+                }
+                if let Some(prev) = self.previous_step_name() {
+                    self.state.set_status(step_name, StepState::Cancelled);
+                    self.state.set_status(&prev, StepState::Pending);
+                    self.persist()?;
+                }
+                Ok(MidStepOutcome::LoopContinue)
+            }
+        }
     }
 
     /// Run the 60-second yolo countdown, ticking through the frontend every
@@ -734,7 +984,7 @@ fn workflow_name_for(workflow: &Workflow) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -1723,6 +1973,747 @@ mod tests {
             contexts[0].step_agent.as_str(),
             "codex",
             "EffectiveConfig agent must be used when step and workflow have none"
+        );
+    }
+
+    // ── BlockingBackend / BlockingFactory ─────────────────────────────────────
+    // Used by mid-step control-board tests that need an execution that stays
+    // alive until cancelled or explicitly signalled to complete.
+
+    use std::sync::Condvar;
+
+    struct BlockingBackend {
+        cancel_flag: Arc<AtomicBool>,
+        completion: Arc<(Mutex<Option<i32>>, Condvar)>,
+    }
+
+    impl crate::engine::container::instance::ExecutionBackend for BlockingBackend {
+        fn wait_blocking(self: Box<Self>) -> Result<ContainerExitInfo, EngineError> {
+            let (lock, cvar) = &*self.completion;
+            loop {
+                if self.cancel_flag.load(Ordering::Relaxed) {
+                    let now = Utc::now();
+                    return Ok(ContainerExitInfo {
+                        exit_code: -1,
+                        signal: None,
+                        started_at: now,
+                        ended_at: now,
+                    });
+                }
+                let guard = lock.lock().unwrap();
+                let (guard, _) =
+                    cvar.wait_timeout(guard, Duration::from_millis(20)).unwrap();
+                if let Some(code) = *guard {
+                    let now = Utc::now();
+                    return Ok(ContainerExitInfo {
+                        exit_code: code,
+                        signal: None,
+                        started_at: now,
+                        ended_at: now,
+                    });
+                }
+            }
+        }
+
+        fn cancel(&self) -> Result<(), EngineError> {
+            self.cancel_flag.store(true, Ordering::Relaxed);
+            let (_, cvar) = &*self.completion;
+            cvar.notify_all();
+            Ok(())
+        }
+
+        fn cancel_handle(&self) -> Option<crate::engine::container::instance::CancelHandle> {
+            let flag = self.cancel_flag.clone();
+            let completion = self.completion.clone();
+            Some(crate::engine::container::instance::CancelHandle::new(move || {
+                flag.store(true, Ordering::Relaxed);
+                let (_, cvar) = &*completion;
+                cvar.notify_all();
+                Ok(())
+            }))
+        }
+    }
+
+    /// Create a (cancel_flag, completion_arc) pair for a blocking execution.
+    fn make_blocking_entry() -> (
+        Arc<AtomicBool>,
+        Arc<(Mutex<Option<i32>>, Condvar)>,
+    ) {
+        (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new((Mutex::new(None), Condvar::new())),
+        )
+    }
+
+    /// Signal a blocking execution to complete with the given exit code.
+    fn signal_completion(c: &Arc<(Mutex<Option<i32>>, Condvar)>, code: i32) {
+        let (lock, cvar) = &**c;
+        *lock.lock().unwrap() = Some(code);
+        cvar.notify_all();
+    }
+
+    /// A factory that returns blocking executions for the first N steps (each
+    /// backed by its own (cancel_flag, completion) pair) and instant exit-0
+    /// executions for any additional steps.
+    struct BlockingFactory {
+        execution_count: Arc<AtomicUsize>,
+        inject_count: Arc<AtomicUsize>,
+        inject_result: Option<()>,
+        /// Per-execution (cancel_flag, completion) for slow steps.
+        blocking_slots: Mutex<VecDeque<(Arc<AtomicBool>, Arc<(Mutex<Option<i32>>, Condvar)>)>>,
+    }
+
+    impl BlockingFactory {
+        fn new(
+            slots: impl IntoIterator<
+                Item = (Arc<AtomicBool>, Arc<(Mutex<Option<i32>>, Condvar)>),
+            >,
+        ) -> Self {
+            Self {
+                execution_count: Arc::new(AtomicUsize::new(0)),
+                inject_count: Arc::new(AtomicUsize::new(0)),
+                inject_result: None,
+                blocking_slots: Mutex::new(slots.into_iter().collect()),
+            }
+        }
+
+        fn with_inject(mut self) -> Self {
+            self.inject_result = Some(());
+            self
+        }
+    }
+
+    impl ContainerExecutionFactory for BlockingFactory {
+        fn execution_for_step(
+            &self,
+            _step: &WorkflowStep,
+            _session: &Session,
+            _runtime: &WorkflowRuntimeContext,
+        ) -> Result<ContainerExecution, EngineError> {
+            let idx = self.execution_count.fetch_add(1, Ordering::Relaxed);
+            let slot = self.blocking_slots.lock().unwrap().pop_front();
+            if let Some((cancel_flag, completion)) = slot {
+                let backend = Box::new(BlockingBackend {
+                    cancel_flag,
+                    completion,
+                });
+                let now = Utc::now();
+                let handle = ContainerHandle {
+                    id: format!("blocking-{idx}"),
+                    image_tag: "test:latest".into(),
+                    name: "blocking-container".into(),
+                    started_at: now,
+                };
+                Ok(ContainerExecution::new(handle, backend))
+            } else {
+                // Fallback: instant success.
+                let now = Utc::now();
+                let info = ContainerExitInfo {
+                    exit_code: 0,
+                    signal: None,
+                    started_at: now,
+                    ended_at: now,
+                };
+                let handle = ContainerHandle {
+                    id: format!("instant-{idx}"),
+                    image_tag: "test:latest".into(),
+                    name: "instant-container".into(),
+                    started_at: now,
+                };
+                Ok(ContainerExecution::finished(handle, info))
+            }
+        }
+
+        fn inject_prompt(
+            &self,
+            _execution: &ContainerExecution,
+            _prompt: &str,
+        ) -> Result<Option<()>, EngineError> {
+            self.inject_count.fetch_add(1, Ordering::Relaxed);
+            Ok(self.inject_result)
+        }
+    }
+
+    /// A frontend that captures the control-board sender, records which
+    /// `AvailableActions` were passed to `user_choose_next_action`, and pops
+    /// from a scripted action queue (same pattern as `FakeWorkflowFrontend`).
+    struct CapturingFrontend {
+        actions: Mutex<VecDeque<NextAction>>,
+        step_statuses: Mutex<Vec<(String, WorkflowStepStatus)>>,
+        completed: Mutex<Option<WorkflowOutcome>>,
+        available_log: Mutex<Vec<AvailableActions>>,
+        cb_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<ControlBoardRequest>>>>,
+    }
+
+    impl CapturingFrontend {
+        fn new(
+            actions: impl IntoIterator<Item = NextAction>,
+            cb_tx: Arc<
+                Mutex<Option<tokio::sync::mpsc::UnboundedSender<ControlBoardRequest>>>,
+            >,
+        ) -> Self {
+            Self {
+                actions: Mutex::new(actions.into_iter().collect()),
+                step_statuses: Mutex::new(Vec::new()),
+                completed: Mutex::new(None),
+                available_log: Mutex::new(Vec::new()),
+                cb_tx,
+            }
+        }
+    }
+
+    impl crate::engine::message::UserMessageSink for CapturingFrontend {
+        fn write_message(&mut self, _msg: crate::engine::message::UserMessage) {}
+        fn replay_queued(&mut self) {}
+    }
+
+    impl WorkflowFrontend for CapturingFrontend {
+        fn user_choose_next_action(
+            &mut self,
+            _state: &WorkflowState,
+            available: &AvailableActions,
+        ) -> Result<NextAction, EngineError> {
+            self.available_log.lock().unwrap().push(available.clone());
+            let action = self
+                .actions
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(NextAction::Pause);
+            Ok(action)
+        }
+
+        fn confirm_resume(&mut self, _: &ResumeMismatch) -> Result<bool, EngineError> {
+            Ok(true)
+        }
+
+        fn user_choose_after_step_failure(
+            &mut self,
+            _step: &WorkflowStep,
+            _exit: &ContainerExitInfo,
+        ) -> Result<StepFailureChoice, EngineError> {
+            Ok(StepFailureChoice::Abort)
+        }
+
+        fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus) {
+            self.step_statuses
+                .lock()
+                .unwrap()
+                .push((step.name.clone(), status));
+        }
+
+        fn report_step_output(&mut self, _step: &WorkflowStep, _output: StepOutput) {}
+        fn report_step_stuck(&mut self, _step: &WorkflowStep) {}
+        fn report_step_unstuck(&mut self, _step: &WorkflowStep) {}
+
+        fn yolo_countdown_tick(
+            &mut self,
+            _remaining: Duration,
+        ) -> Result<YoloTickOutcome, EngineError> {
+            Ok(YoloTickOutcome::Cancel)
+        }
+
+        fn report_workflow_completed(&mut self, outcome: &WorkflowOutcome) {
+            *self.completed.lock().unwrap() = Some(outcome.clone());
+        }
+
+        fn set_control_board_sender(
+            &mut self,
+            tx: tokio::sync::mpsc::UnboundedSender<ControlBoardRequest>,
+        ) {
+            *self.cb_tx.lock().unwrap() = Some(tx);
+        }
+    }
+
+    fn make_capturing_engine(
+        session: &Session,
+        workflow: Workflow,
+        factory: BlockingFactory,
+        actions: impl IntoIterator<Item = NextAction>,
+        cb_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<ControlBoardRequest>>>>,
+    ) -> WorkflowEngine {
+        let overlay = OverlayEngine::with_auth_resolver(
+            crate::data::fs::auth_paths::AuthPathResolver::at_home(session.git_root()),
+        );
+        let frontend = CapturingFrontend::new(actions, cb_tx);
+        WorkflowEngine::new(
+            session,
+            workflow,
+            None,
+            Box::new(frontend),
+            Box::new(factory),
+            Arc::new(crate::engine::git::GitEngine::new()),
+            Arc::new(overlay),
+        )
+        .unwrap()
+    }
+
+    // ── Mid-step control board engine tests ───────────────────────────────────
+
+    /// Opening the WCB mid-step must NOT cancel the running container — only a
+    /// destructive user action triggers cancellation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_control_board_mid_step_does_not_cancel_container() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session(&tmp);
+        let workflow = make_workflow(
+            Some("wf-mid-no-cancel"),
+            Some("claude"),
+            vec![make_step("a", &[], None), make_step("b", &["a"], None)],
+        );
+
+        let (cancel_flag, completion1) = make_blocking_entry();
+        let cb_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<ControlBoardRequest>>>> =
+            Arc::new(Mutex::new(None));
+
+        let factory = BlockingFactory::new([(cancel_flag.clone(), completion1.clone())]);
+        let mut engine = make_capturing_engine(
+            &session,
+            workflow,
+            factory,
+            // First call (mid-step WCB): Dismiss; second call (between steps): LaunchNext.
+            [NextAction::Dismiss, NextAction::LaunchNext],
+            cb_tx.clone(),
+        );
+
+        // Clone the sender BEFORE the engine moves into the async task.
+        let tx = cb_tx.lock().unwrap().clone().expect("cb_tx set on construction");
+
+        let engine_task = tokio::spawn(async move { engine.run_to_completion().await });
+
+        // Give the engine time to call launch_step() and enter the select! loop.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Send mid-step request — step "a" is still blocking.
+        tx.send(ControlBoardRequest::OpenControlBoard).unwrap();
+
+        // Let the engine process the OpenControlBoard and return Dismiss.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Cancel must NOT have been called (Dismiss is non-destructive).
+        assert!(
+            !cancel_flag.load(Ordering::Relaxed),
+            "cancel must not be called when user picks Dismiss"
+        );
+
+        // Now let step "a" complete naturally.
+        signal_completion(&completion1, 0);
+
+        let result = engine_task.await.unwrap().unwrap();
+        assert_eq!(result, WorkflowOutcome::Completed);
+    }
+
+    /// After Dismiss the engine must resume waiting on the same step.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mid_step_dismiss_resumes_waiting_on_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session(&tmp);
+        let workflow = make_workflow(
+            Some("wf-dismiss"),
+            Some("claude"),
+            vec![make_step("a", &[], None), make_step("b", &["a"], None)],
+        );
+
+        let (cancel_flag, completion) = make_blocking_entry();
+        let cb_tx: Arc<Mutex<Option<_>>> = Arc::new(Mutex::new(None));
+        let factory = BlockingFactory::new([(cancel_flag.clone(), completion.clone())]);
+        let mut engine = make_capturing_engine(
+            &session,
+            workflow,
+            factory,
+            [NextAction::Dismiss, NextAction::LaunchNext],
+            cb_tx.clone(),
+        );
+        let tx = cb_tx.lock().unwrap().clone().unwrap();
+
+        let engine_task = tokio::spawn(async move { engine.run_to_completion().await });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        tx.send(ControlBoardRequest::OpenControlBoard).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // After Dismiss, cancel must still be false — step still running.
+        assert!(!cancel_flag.load(Ordering::Relaxed), "step must still be running after Dismiss");
+
+        // Complete the step — engine should continue to step b and finish.
+        signal_completion(&completion, 0);
+        let result = engine_task.await.unwrap().unwrap();
+        assert_eq!(
+            result,
+            WorkflowOutcome::Completed,
+            "workflow must complete after step finishes naturally post-Dismiss"
+        );
+    }
+
+/// RestartCurrentStep mid-step cancels the container AFTER selection, then
+    /// launches a fresh container for the same step.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mid_step_restart_cancels_then_re_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session(&tmp);
+        let workflow = make_workflow(
+            Some("wf-restart-mid"),
+            Some("claude"),
+            vec![make_step("a", &[], None), make_step("b", &["a"], None)],
+        );
+
+        let (cancel_flag, completion1) = make_blocking_entry();
+        let cb_tx: Arc<Mutex<Option<_>>> = Arc::new(Mutex::new(None));
+        // Only one blocking slot; steps 2+ (re-run of a, then b) use instant.
+        let factory = BlockingFactory::new([(cancel_flag.clone(), completion1)]);
+        let execution_count = factory.execution_count.clone();
+        let mut engine = make_capturing_engine(
+            &session,
+            workflow,
+            factory,
+            // Restart, then advance past step a (second run), then b.
+            [NextAction::RestartCurrentStep, NextAction::LaunchNext],
+            cb_tx.clone(),
+        );
+        let tx = cb_tx.lock().unwrap().clone().unwrap();
+
+        let engine_task = tokio::spawn(async move { engine.run_to_completion().await });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Before sending request, cancel_flag must be false.
+        assert!(!cancel_flag.load(Ordering::Relaxed), "cancel must not fire before WCB opened");
+
+        tx.send(ControlBoardRequest::OpenControlBoard).unwrap();
+        // Give engine time to process RestartCurrentStep (which cancels the container).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Cancel MUST have been called (Restart is destructive).
+        assert!(
+            cancel_flag.load(Ordering::Relaxed),
+            "cancel must be called when user picks RestartCurrentStep"
+        );
+
+        let result = engine_task.await.unwrap().unwrap();
+        assert_eq!(result, WorkflowOutcome::Completed);
+        // First run of a (blocking) + restart of a (instant) + b (instant) = 3.
+        assert!(
+            execution_count.load(Ordering::Relaxed) >= 2,
+            "step a must run at least twice due to restart"
+        );
+    }
+
+    /// LaunchNext mid-step cancels the container and marks the step Succeeded
+    /// (force-advanced) before launching the next step.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mid_step_advance_cancels_then_marks_force_succeeded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session(&tmp);
+        let workflow = make_workflow(
+            Some("wf-advance-mid"),
+            Some("claude"),
+            vec![make_step("a", &[], None), make_step("b", &["a"], None)],
+        );
+
+        let (cancel_flag, completion1) = make_blocking_entry();
+        let cb_tx: Arc<Mutex<Option<_>>> = Arc::new(Mutex::new(None));
+        let factory = BlockingFactory::new([(cancel_flag.clone(), completion1)]);
+        let execution_count = factory.execution_count.clone();
+        let mut engine = make_capturing_engine(
+            &session,
+            workflow,
+            factory,
+            // LaunchNext mid-step (force-advance), no further prompts needed.
+            [NextAction::LaunchNext],
+            cb_tx.clone(),
+        );
+        let tx = cb_tx.lock().unwrap().clone().unwrap();
+
+        let engine_task = tokio::spawn(async move { engine.run_to_completion().await });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        tx.send(ControlBoardRequest::OpenControlBoard).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Cancel must have been called (LaunchNext is destructive mid-step).
+        assert!(cancel_flag.load(Ordering::Relaxed), "cancel must be called for LaunchNext mid-step");
+
+        let result = engine_task.await.unwrap().unwrap();
+        assert_eq!(result, WorkflowOutcome::Completed, "workflow must complete after force-advance");
+        // a (blocking, force-advanced) + b (instant) = 2 executions.
+        assert_eq!(
+            execution_count.load(Ordering::Relaxed),
+            2,
+            "exactly 2 executions: step a (cancelled) + step b"
+        );
+    }
+
+    /// CancelToPreviousStep mid-step cancels, then rewinds both steps to Pending.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mid_step_cancel_to_previous_rewinds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session(&tmp);
+        let workflow = make_workflow(
+            Some("wf-rewind"),
+            Some("claude"),
+            vec![
+                make_step("a", &[], None),
+                make_step("b", &["a"], None),
+                make_step("c", &["b"], None),
+            ],
+        );
+
+        // "a" runs and completes instantly, "b" runs and is mid-step open.
+        let (cancel_b, completion_b) = make_blocking_entry();
+        let cb_tx: Arc<Mutex<Option<_>>> = Arc::new(Mutex::new(None));
+        let factory = BlockingFactory::new([(cancel_b.clone(), completion_b)]);
+        let execution_count = factory.execution_count.clone();
+        let mut engine = make_capturing_engine(
+            &session,
+            workflow,
+            factory,
+            // Step a completes → LaunchNext → Step b starts (blocking).
+            // WCB mid-b → CancelToPreviousStep (cancel b, rewind to a).
+            // Step a re-runs → LaunchNext → Step b runs → LaunchNext → Step c.
+            [
+                NextAction::LaunchNext,
+                NextAction::CancelToPreviousStep,
+                NextAction::LaunchNext,
+                NextAction::LaunchNext,
+            ],
+            cb_tx.clone(),
+        );
+        let tx = cb_tx.lock().unwrap().clone().unwrap();
+
+        let engine_task = tokio::spawn(async move { engine.run_to_completion().await });
+
+        // Wait for step b to start running (steps a + b launches; b is blocking).
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        tx.send(ControlBoardRequest::OpenControlBoard).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // b must have been cancelled.
+        assert!(cancel_b.load(Ordering::Relaxed), "step b must be cancelled for CancelToPreviousStep");
+
+        let result = engine_task.await.unwrap().unwrap();
+        assert_eq!(result, WorkflowOutcome::Completed);
+        // a (instant) + b (blocking, cancelled) + a (re-run, instant) + b (re-run) + c = 5.
+        assert!(
+            execution_count.load(Ordering::Relaxed) >= 4,
+            "multiple executions expected after cancel-to-previous + re-run"
+        );
+    }
+
+    /// When the step finishes naturally while the WCB is open, the engine
+    /// detects this via `try_recv` and handles the user's now-stale action.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn step_completes_naturally_while_wcb_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session(&tmp);
+        let workflow = make_workflow(
+            Some("wf-natural-complete"),
+            Some("claude"),
+            vec![make_step("a", &[], None), make_step("b", &["a"], None)],
+        );
+
+        // Use a short-lived blocking backend that signals itself on open.
+        let (cancel_flag, completion) = make_blocking_entry();
+        let cb_tx: Arc<Mutex<Option<_>>> = Arc::new(Mutex::new(None));
+        let factory = BlockingFactory::new([(cancel_flag, completion.clone())]);
+        let mut engine = make_capturing_engine(
+            &session,
+            workflow,
+            factory,
+            // Dismiss: if step already done → engine handles gracefully.
+            // LaunchNext for the between-steps prompt after step a.
+            [NextAction::Dismiss, NextAction::LaunchNext],
+            cb_tx.clone(),
+        );
+        let tx = cb_tx.lock().unwrap().clone().unwrap();
+
+        let engine_task = tokio::spawn(async move { engine.run_to_completion().await });
+
+        // Give step a time to start.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Signal completion and immediately open control board.
+        signal_completion(&completion, 0);
+        // Let the backend thread process the signal.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The step may now be complete. Opening WCB and picking Dismiss
+        // should result in the engine recognizing the completion.
+        let _ = tx.send(ControlBoardRequest::OpenControlBoard);
+
+        let result = engine_task.await.unwrap().unwrap();
+        // Regardless of whether WCB fires before or after natural completion,
+        // the workflow must complete successfully.
+        assert_eq!(result, WorkflowOutcome::Completed);
+    }
+
+    /// After force-advancing a step (LaunchNext mid-step), resuming the
+    /// workflow must not re-run the already-succeeded step.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resume_from_force_succeeded_step_does_not_re_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session(&tmp);
+        let wf = make_workflow(
+            Some("wf-resume-force"),
+            Some("claude"),
+            vec![make_step("a", &[], None), make_step("b", &["a"], None)],
+        );
+
+        // First run: force-advance step "a" mid-step.
+        let (_, completion_a) = make_blocking_entry();
+        {
+            let cb_tx: Arc<Mutex<Option<_>>> = Arc::new(Mutex::new(None));
+            let factory = BlockingFactory::new([(Arc::new(AtomicBool::new(false)), completion_a)]);
+            let execution_count = factory.execution_count.clone();
+            let mut engine = make_capturing_engine(
+                &session,
+                wf.clone(),
+                factory,
+                [NextAction::LaunchNext], // LaunchNext mid-step → force-succeed a, then b runs
+                cb_tx.clone(),
+            );
+            let tx = cb_tx.lock().unwrap().clone().unwrap();
+            let engine_task = tokio::spawn(async move { engine.run_to_completion().await });
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            tx.send(ControlBoardRequest::OpenControlBoard).unwrap();
+            engine_task.await.unwrap().unwrap();
+            // a (cancelled) + b = 2.
+            assert_eq!(execution_count.load(Ordering::Relaxed), 2);
+        }
+
+        // Resume: only step b should run (a is Succeeded from force-advance).
+        let factory2 = FakeContainerExecutionFactory::always_success();
+        let factory2_arc = Arc::new(factory2);
+        struct Proxy(Arc<FakeContainerExecutionFactory>);
+        impl ContainerExecutionFactory for Proxy {
+            fn execution_for_step(&self, s: &WorkflowStep, sess: &Session, r: &WorkflowRuntimeContext) -> Result<ContainerExecution, EngineError> {
+                self.0.execution_for_step(s, sess, r)
+            }
+            fn inject_prompt(&self, e: &ContainerExecution, p: &str) -> Result<Option<()>, EngineError> {
+                self.0.inject_prompt(e, p)
+            }
+        }
+        let overlay2 = OverlayEngine::with_auth_resolver(
+            crate::data::fs::auth_paths::AuthPathResolver::at_home(session.git_root()),
+        );
+        let mut engine2 = WorkflowEngine::resume(
+            &session,
+            wf,
+            None,
+            Box::new(FakeWorkflowFrontend::new([])),
+            Box::new(Proxy(factory2_arc.clone())),
+            Arc::new(crate::engine::git::GitEngine::new()),
+            Arc::new(overlay2),
+        )
+        .await
+        .unwrap();
+        let result = engine2.run_to_completion().await.unwrap();
+        assert_eq!(result, WorkflowOutcome::Completed);
+        // Only step b should have run; step a was already Succeeded.
+        assert_eq!(
+            factory2_arc.execution_call_count.load(Ordering::Relaxed),
+            0,
+            "resuming must not re-run step a (already Succeeded from force-advance)"
+        );
+    }
+
+    // ── Auto-disabled step engine tests ───────────────────────────────────────
+
+    /// `should_auto_advance` defaults to `true` in `FakeWorkflowFrontend` but
+    /// can be overridden. Verify that a frontend returning `false` makes the
+    /// engine call `user_choose_next_action` even in yolo mode.
+    #[tokio::test]
+    async fn engine_skips_yolo_countdown_when_step_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session(&tmp);
+        let workflow = make_workflow(
+            Some("wf-auto-disabled"),
+            Some("claude"),
+            vec![make_step("a", &[], None), make_step("b", &["a"], None)],
+        );
+        let factory = FakeContainerExecutionFactory::always_success();
+
+        // A frontend that always returns false from should_auto_advance.
+        struct NoAutoFrontend(FakeWorkflowFrontend);
+        impl crate::engine::message::UserMessageSink for NoAutoFrontend {
+            fn write_message(&mut self, msg: crate::engine::message::UserMessage) {
+                self.0.write_message(msg);
+            }
+            fn replay_queued(&mut self) {}
+        }
+        impl WorkflowFrontend for NoAutoFrontend {
+            fn should_auto_advance(&self, _step_name: &str) -> bool {
+                false // always skip yolo, fall through to interactive prompt
+            }
+            fn user_choose_next_action(
+                &mut self,
+                s: &WorkflowState,
+                a: &AvailableActions,
+            ) -> Result<NextAction, EngineError> {
+                self.0.user_choose_next_action(s, a)
+            }
+            fn confirm_resume(&mut self, m: &ResumeMismatch) -> Result<bool, EngineError> {
+                self.0.confirm_resume(m)
+            }
+            fn user_choose_after_step_failure(
+                &mut self,
+                step: &WorkflowStep,
+                exit: &ContainerExitInfo,
+            ) -> Result<StepFailureChoice, EngineError> {
+                self.0.user_choose_after_step_failure(step, exit)
+            }
+            fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus) {
+                self.0.report_step_status(step, status);
+            }
+            fn report_step_output(&mut self, s: &WorkflowStep, o: StepOutput) {
+                self.0.report_step_output(s, o);
+            }
+            fn report_step_stuck(&mut self, s: &WorkflowStep) { self.0.report_step_stuck(s); }
+            fn report_step_unstuck(&mut self, s: &WorkflowStep) { self.0.report_step_unstuck(s); }
+            fn yolo_countdown_tick(&mut self, r: Duration) -> Result<YoloTickOutcome, EngineError> {
+                self.0.yolo_countdown_tick(r)
+            }
+            fn report_workflow_completed(&mut self, o: &WorkflowOutcome) {
+                self.0.report_workflow_completed(o);
+            }
+        }
+
+        let inner = FakeWorkflowFrontend::new([NextAction::LaunchNext]);
+        let frontend = NoAutoFrontend(inner);
+
+        let overlay = OverlayEngine::with_auth_resolver(
+            crate::data::fs::auth_paths::AuthPathResolver::at_home(session.git_root()),
+        );
+        let mut engine = WorkflowEngine::new(
+            &session,
+            workflow,
+            None,
+            Box::new(frontend),
+            Box::new(factory),
+            Arc::new(crate::engine::git::GitEngine::new()),
+            Arc::new(overlay),
+        )
+        .unwrap();
+        engine.set_yolo(true);
+
+        // With yolo=true but should_auto_advance=false, the engine must call
+        // user_choose_next_action (which returns LaunchNext) and complete.
+        let result = engine.run_to_completion().await.unwrap();
+        assert_eq!(
+            result,
+            WorkflowOutcome::Completed,
+            "workflow must complete even with yolo disabled per step"
+        );
+    }
+
+    /// Calling `should_auto_advance` on the default `FakeWorkflowFrontend`
+    /// returns `true` (the trait default). A custom frontend returning `false`
+    /// is exercised by the test above; this test guards the trait default.
+    #[test]
+    fn should_auto_advance_trait_default_returns_true() {
+        let frontend = FakeWorkflowFrontend::new([]);
+        // Default implementation returns true (auto-advance).
+        assert!(
+            frontend.should_auto_advance("any-step"),
+            "WorkflowFrontend::should_auto_advance must default to true"
         );
     }
 }

@@ -31,6 +31,66 @@ impl WorkflowFrontend for TuiCommandFrontend {
             .find(|(_, s)| matches!(s, crate::data::workflow_state::StepState::Running { .. }))
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "current step".to_string());
+
+        // H: Lightweight step confirm for the simple "advance to next step?" case.
+        // Show it when there's exactly one next step, no failures, and launch_next is available.
+        let has_failures = state.step_states.values().any(|s| {
+            matches!(s, crate::data::workflow_state::StepState::Failed { .. })
+        });
+        if available.can_launch_next && !has_failures {
+            // Only show lightweight dialog when exactly one step is pending.
+            let mut pending = state.step_states.iter()
+                .filter(|(_, s)| matches!(s, crate::data::workflow_state::StepState::Pending));
+            let first_pending = pending.next().map(|(name, _)| name.clone());
+            let is_single = first_pending.is_some() && pending.next().is_none();
+            if let Some(next_name) = first_pending.filter(|_| is_single) {
+                let response = self.ask_dialog(
+                    DialogRequest::WorkflowStepConfirm(
+                        crate::frontend::tui::dialogs::WorkflowStepConfirmState {
+                            completed_step: step_name.clone(),
+                            next_step: next_name,
+                        },
+                    ),
+                ).map_err(|e| EngineError::Other(e.to_string()))?;
+                return Ok(match response {
+                    DialogResponse::Char('>') => NextAction::LaunchNext,
+                    DialogResponse::Char('W') => {
+                        // User pressed Ctrl+W to escalate to full WCB — fall through below.
+                        // We can't easily fall through in Rust, so re-ask via WCB.
+                        let response2 = self.ask_dialog(DialogRequest::WorkflowControlBoard(
+                            WorkflowControlBoardState {
+                                step_name: step_name.clone(),
+                                can_launch_next: available.can_launch_next,
+                                can_continue_current: available.can_continue_in_current_container,
+                                can_restart: available.can_restart_current_step,
+                                can_go_back: available.can_cancel_to_previous_step,
+                                can_finish: available.can_finish_workflow,
+                                continue_unavailable_reason: available.continue_unavailable_reason.clone(),
+                                cancel_to_previous_unavailable_reason: available.cancel_to_previous_unavailable_reason.clone(),
+                                finish_workflow_unavailable_reason: available.finish_workflow_unavailable_reason.clone(),
+                                is_mid_step: available.is_mid_step,
+                            },
+                        )).map_err(|e| EngineError::Other(e.to_string()))?;
+                        match response2 {
+                            DialogResponse::Char('>') => NextAction::LaunchNext,
+                            DialogResponse::Char('v') => {
+                                let prompt = available.continue_prompt.clone().unwrap_or_default();
+                                NextAction::ContinueInCurrentContainer { prompt }
+                            }
+                            DialogResponse::Char('^') => NextAction::RestartCurrentStep,
+                            DialogResponse::Char('<') => NextAction::CancelToPreviousStep,
+                            DialogResponse::Char('f') => NextAction::FinishWorkflow,
+                            DialogResponse::Char('a') => NextAction::Abort,
+                            DialogResponse::Dismissed => NextAction::Pause,
+                            _ => NextAction::Pause,
+                        }
+                    }
+                    DialogResponse::Dismissed => NextAction::Pause,
+                    _ => NextAction::Pause,
+                });
+            }
+        }
+
         let response = self
             .ask_dialog(DialogRequest::WorkflowControlBoard(
                 WorkflowControlBoardState {
@@ -47,6 +107,7 @@ impl WorkflowFrontend for TuiCommandFrontend {
                     finish_workflow_unavailable_reason: available
                         .finish_workflow_unavailable_reason
                         .clone(),
+                    is_mid_step: available.is_mid_step,
                 },
             ))
             .map_err(|e| EngineError::Other(e.to_string()))?;
@@ -60,7 +121,8 @@ impl WorkflowFrontend for TuiCommandFrontend {
             DialogResponse::Char('<') => NextAction::CancelToPreviousStep,
             DialogResponse::Char('f') => NextAction::FinishWorkflow,
             DialogResponse::Char('a') => NextAction::Abort,
-            // Esc on the board pauses the workflow but keeps state for resume.
+            DialogResponse::Char('p') if available.is_mid_step => NextAction::Pause,
+            DialogResponse::Dismissed if available.is_mid_step => NextAction::Dismiss,
             DialogResponse::Dismissed => NextAction::Pause,
             _ => NextAction::Pause,
         })
@@ -184,11 +246,25 @@ impl WorkflowFrontend for TuiCommandFrontend {
             "Step '{}' appears stuck (no output for 30s)",
             step.name
         ));
+        if let Ok(mut guard) = self.workflow_view.lock() {
+            if let Some(view) = guard.as_mut() {
+                if let Some(s) = view.steps.iter_mut().find(|s| s.name == step.name) {
+                    s.stuck = true;
+                }
+            }
+        }
     }
 
     fn report_step_unstuck(&mut self, step: &WorkflowStep) {
         self.messages
             .info(format!("Step '{}' resumed producing output", step.name));
+        if let Ok(mut guard) = self.workflow_view.lock() {
+            if let Some(view) = guard.as_mut() {
+                if let Some(s) = view.steps.iter_mut().find(|s| s.name == step.name) {
+                    s.stuck = false;
+                }
+            }
+        }
     }
 
     fn yolo_countdown_tick(
@@ -245,6 +321,22 @@ impl WorkflowFrontend for TuiCommandFrontend {
         }
     }
 
+    fn should_auto_advance(&self, step_name: &str) -> bool {
+        let ws = self.workflow_view.lock().unwrap_or_else(|e| e.into_inner());
+        ws.as_ref()
+            .map(|v| !v.auto_disabled.contains(step_name))
+            .unwrap_or(true)
+    }
+
+    fn set_control_board_sender(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::engine::workflow::ControlBoardRequest>,
+    ) {
+        if let Ok(mut guard) = self.control_board_tx_shared.lock() {
+            *guard = Some(tx);
+        }
+    }
+
     fn report_workflow_progress(
         &mut self,
         steps: &[crate::engine::workflow::actions::WorkflowStepProgressInfo],
@@ -266,6 +358,7 @@ impl WorkflowFrontend for TuiCommandFrontend {
                     agent: Some(s.agent.clone()),
                     model: s.model.clone(),
                     depends_on: s.depends_on.clone(),
+                    stuck: false,
                 })
                 .collect();
             view.current_step = steps
@@ -332,6 +425,7 @@ mod tests {
         );
         let stdin_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
         let resize_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let control_board_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
         let frontend = TuiCommandFrontend::new(
             parsed,
             status_log,
@@ -345,6 +439,7 @@ mod tests {
             std::sync::Arc::new(std::sync::Mutex::new(None)),
             stdin_tx_shared,
             resize_tx_shared,
+            control_board_tx_shared,
         );
         (frontend, req_rx, resp_tx)
     }
@@ -460,5 +555,156 @@ mod tests {
         let result = frontend.confirm_resume(&mismatch).unwrap();
         handle.join().unwrap();
         assert!(!result);
+    }
+
+    // ─── Auto-advance disabled ────────────────────────────────────────────────
+
+    #[test]
+    fn should_auto_advance_returns_false_for_disabled_step() {
+        use crate::engine::workflow::frontend::WorkflowFrontend;
+        let (frontend, _req_rx, _resp_tx) = make_frontend();
+        // Add a step name to the auto_disabled set.
+        {
+            let mut guard = frontend.workflow_view.lock().unwrap();
+            let view = guard.get_or_insert_with(|| {
+                crate::frontend::tui::tabs::WorkflowViewState::default()
+            });
+            view.auto_disabled.insert("build".to_string());
+        }
+        assert!(
+            !frontend.should_auto_advance("build"),
+            "should_auto_advance must return false for a disabled step"
+        );
+        assert!(
+            frontend.should_auto_advance("test"),
+            "should_auto_advance must return true for a step not in auto_disabled"
+        );
+    }
+
+    // ─── Stuck flag propagation ───────────────────────────────────────────────
+
+    #[test]
+    fn report_step_stuck_sets_stuck_flag_on_view() {
+        use crate::engine::workflow::frontend::WorkflowFrontend;
+        let (mut frontend, _req_rx, _resp_tx) = make_frontend();
+        let step = dummy_step(); // name = "test-step"
+        // Seed the view with a step matching dummy_step's name.
+        {
+            let mut guard = frontend.workflow_view.lock().unwrap();
+            *guard = Some(crate::frontend::tui::tabs::WorkflowViewState {
+                steps: vec![crate::frontend::tui::tabs::WorkflowStepView {
+                    name: step.name.clone(),
+                    status: "running".into(),
+                    agent: None,
+                    model: None,
+                    depends_on: vec![],
+                    stuck: false,
+                }],
+                current_step: Some(step.name.clone()),
+                auto_disabled: Default::default(),
+            });
+        }
+        frontend.report_step_stuck(&step);
+        let guard = frontend.workflow_view.lock().unwrap();
+        let view = guard.as_ref().unwrap();
+        let step_view = view.steps.iter().find(|s| s.name == step.name).unwrap();
+        assert!(
+            step_view.stuck,
+            "report_step_stuck must set stuck=true on the matching WorkflowStepView"
+        );
+    }
+
+    // ─── Simple advance / parallel fan-out dialog routing ────────────────────
+
+    fn make_workflow_state_one_pending() -> crate::data::workflow_state::WorkflowState {
+        use crate::data::workflow_definition::WorkflowStep;
+        crate::data::workflow_state::WorkflowState::new(
+            "wf".into(),
+            &[
+                WorkflowStep { name: "build".into(), depends_on: vec![], prompt_template: "".into(), agent: None, model: None },
+                WorkflowStep { name: "test".into(), depends_on: vec!["build".into()], prompt_template: "".into(), agent: None, model: None },
+            ],
+            "hash".into(),
+            None,
+        )
+    }
+
+    fn make_workflow_state_two_pending() -> crate::data::workflow_state::WorkflowState {
+        use crate::data::workflow_definition::WorkflowStep;
+        crate::data::workflow_state::WorkflowState::new(
+            "wf".into(),
+            &[
+                WorkflowStep { name: "build".into(), depends_on: vec![], prompt_template: "".into(), agent: None, model: None },
+                WorkflowStep { name: "test-a".into(), depends_on: vec!["build".into()], prompt_template: "".into(), agent: None, model: None },
+                WorkflowStep { name: "test-b".into(), depends_on: vec!["build".into()], prompt_template: "".into(), agent: None, model: None },
+            ],
+            "hash".into(),
+            None,
+        )
+    }
+
+    fn make_available_launch_next() -> crate::engine::workflow::actions::AvailableActions {
+        crate::engine::workflow::actions::AvailableActions {
+            can_launch_next: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn simple_advance_shows_lightweight_dialog() {
+        use crate::engine::workflow::frontend::WorkflowFrontend;
+        use crate::data::workflow_state::StepState;
+
+        let (mut frontend, req_rx, resp_tx) = make_frontend();
+
+        let mut state = make_workflow_state_one_pending();
+        // Mark "build" as Succeeded so only "test" is Pending.
+        state.set_status("build", StepState::Succeeded);
+        let available = make_available_launch_next();
+
+        let handle = std::thread::spawn(move || {
+            let req = req_rx.recv().unwrap();
+            assert!(
+                matches!(req, crate::frontend::tui::dialogs::DialogRequest::WorkflowStepConfirm(_)),
+                "single-pending-step should show WorkflowStepConfirm, got {:?}", req
+            );
+            resp_tx.send(DialogResponse::Char('>')).unwrap();
+        });
+
+        let result = frontend.user_choose_next_action(&state, &available).unwrap();
+        handle.join().unwrap();
+        assert_eq!(
+            result,
+            crate::engine::workflow::actions::NextAction::LaunchNext,
+        );
+    }
+
+    #[test]
+    fn parallel_fan_out_falls_through_to_wcb() {
+        use crate::engine::workflow::frontend::WorkflowFrontend;
+        use crate::data::workflow_state::StepState;
+
+        let (mut frontend, req_rx, resp_tx) = make_frontend();
+
+        let mut state = make_workflow_state_two_pending();
+        // Mark "build" as Succeeded; test-a and test-b remain Pending.
+        state.set_status("build", StepState::Succeeded);
+        let available = make_available_launch_next();
+
+        let handle = std::thread::spawn(move || {
+            let req = req_rx.recv().unwrap();
+            assert!(
+                matches!(req, crate::frontend::tui::dialogs::DialogRequest::WorkflowControlBoard(_)),
+                "two pending steps should show WorkflowControlBoard, got {:?}", req
+            );
+            resp_tx.send(DialogResponse::Char('>')).unwrap();
+        });
+
+        let result = frontend.user_choose_next_action(&state, &available).unwrap();
+        handle.join().unwrap();
+        assert_eq!(
+            result,
+            crate::engine::workflow::actions::NextAction::LaunchNext,
+        );
     }
 }

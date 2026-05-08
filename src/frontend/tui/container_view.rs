@@ -74,10 +74,11 @@ pub fn render_container_maximized(
     // overflow inside vt100's `visible_rows()`.
     let (effective_scroll_offset, max_scrollback) = if tab.container_scroll_offset > 0 {
         let parser = &mut tab.vt100_parser;
+        let screen_rows = parser.screen().size().0 as usize;
         parser.set_scrollback(usize::MAX);
         let depth = parser.screen().scrollback();
         parser.set_scrollback(0);
-        let eff = tab.container_scroll_offset.min(depth);
+        let eff = tab.container_scroll_offset.min(depth).min(screen_rows);
         (eff, depth)
     } else {
         (0, 0)

@@ -203,6 +203,7 @@ impl App {
         tab.container_name_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
         tab.stdin_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
         tab.resize_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
+        tab.control_board_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
         let frontend = TuiCommandFrontend::new(
             parsed.clone(),
             tab.status_log.clone(),
@@ -216,6 +217,7 @@ impl App {
             tab.container_name_shared.clone(),
             tab.stdin_tx_shared.clone(),
             tab.resize_tx_shared.clone(),
+            tab.control_board_tx_shared.clone(),
         );
 
         // Store the receiving/sending ends in the tab.
@@ -465,6 +467,7 @@ impl App {
                                 ),
                                 cancel_to_previous_unavailable_reason: None,
                                 finish_workflow_unavailable_reason: None,
+                                is_mid_step: false,
                             },
                         ));
                 }
@@ -563,6 +566,9 @@ impl App {
                 }
                 DialogRequest::WorkflowYoloCountdown(state) => {
                     Dialog::WorkflowYoloCountdown(state)
+                }
+                DialogRequest::WorkflowStepConfirm(state) => {
+                    Dialog::WorkflowStepConfirm(state)
                 }
                 DialogRequest::AgentSetup(state) => {
                     Dialog::AgentSetup(state)

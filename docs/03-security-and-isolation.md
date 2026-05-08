@@ -48,6 +48,8 @@ The `--worktree` flag on `amux implement` runs the agent in an isolated Git work
 
 ### Post-run options (command mode)
 
+When a worktree run completes (or is aborted), the worktree is preserved on disk:
+
 ```
 Worktree branch `amux/work-item-0030` is ready. Merge into current branch? [y/n/s]
 ```
@@ -58,12 +60,15 @@ Worktree branch `amux/work-item-0030` is ready. Merge into current branch? [y/n/
 | `n` | Discard — remove worktree and delete branch |
 | `s` | Keep worktree and branch for manual review; prints the path |
 
+If you abort the workflow (Ctrl+C or the **Abort** action in the workflow control board), amux shows the same merge/discard dialog. The worktree is never automatically deleted on abort — your completed steps' changes are preserved and ready for review.
+
 ### Post-run dialog (TUI mode)
 
 ```
 ╭─── Worktree: Merge or Discard? ───────────────────────╮
 │                                                        │
 │  Branch 'amux/work-item-0030' completed.               │
+│  (or was aborted — changes preserved on disk)         │
 │                                                        │
 │  [m/y] Merge into current branch                       │
 │  [d]   Discard (delete branch + worktree)              │
@@ -71,6 +76,8 @@ Worktree branch `amux/work-item-0030` is ready. Merge into current branch? [y/n/
 │                                                        │
 ╰────────────────────────────────────────────────────────╯
 ```
+
+The same dialog appears whether the workflow completed successfully or was aborted. Your partially completed work is preserved, allowing you to review, manually continue, or discard as you choose.
 
 ### Interrupted runs
 

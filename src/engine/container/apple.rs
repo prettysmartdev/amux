@@ -617,6 +617,23 @@ impl ExecutionBackend for AppleExecution {
             .status();
         Ok(())
     }
+
+    fn cancel_handle(&self) -> Option<super::instance::CancelHandle> {
+        let name = self.container_name.clone();
+        Some(super::instance::CancelHandle::new(move || {
+            let _ = Command::new("container")
+                .args(["stop", &name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = Command::new("container")
+                .args(["rm", &name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            Ok(())
+        }))
+    }
 }
 
 /// Parse a memory-usage string like `"123.4MiB"`, `"1.2GB"`, `"512KB"` into

@@ -68,6 +68,9 @@ pub struct WorkflowStepView {
     /// renderer (steps with the same sorted `depends_on` set sit in the
     /// same topological column).
     pub depends_on: Vec<String>,
+    /// True when this step has been flagged as stuck by the engine's
+    /// `report_step_stuck` callback.
+    pub stuck: bool,
 }
 
 /// Cross-thread shared workflow view state.
@@ -103,6 +106,11 @@ pub type SharedStdinTx = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec
 
 /// Shared resize sender slot, same pattern as `SharedStdinTx`.
 pub type SharedResizeTx = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u16, u16)>>>>;
+
+/// Shared control board sender. The engine creates the channel and publishes
+/// the sender via `set_control_board_sender`; the TUI event loop reads it
+/// to send mid-step WCB requests.
+pub type SharedControlBoardTx = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::engine::workflow::ControlBoardRequest>>>>;
 
 #[derive(Debug, Clone)]
 pub struct YoloState {
@@ -185,6 +193,8 @@ pub struct Tab {
     pub status_log: SharedStatusLog,
     pub status_log_collapsed: bool,
     pub scroll_offset: usize,
+    pub workflow_strip_scroll_offset: usize,
+    pub last_strip_rect: Option<Rect>,
     pub mouse_selection: Option<TextSelection>,
     pub workflow_agent_fallbacks: HashMap<String, String>,
     pub auto_workflow_disabled_steps: HashSet<String>,
@@ -228,6 +238,8 @@ pub struct Tab {
     pub stdin_tx_shared: SharedStdinTx,
     /// Shared resize sender slot for workflow step transitions.
     pub resize_tx_shared: SharedResizeTx,
+    /// Shared control board sender for mid-step WCB requests.
+    pub control_board_tx_shared: SharedControlBoardTx,
 }
 
 impl Tab {
@@ -248,6 +260,8 @@ impl Tab {
             status_log: Arc::new(Mutex::new(Vec::new())),
             status_log_collapsed: false,
             scroll_offset: 0,
+            workflow_strip_scroll_offset: 0,
+            last_strip_rect: None,
             mouse_selection: None,
             workflow_agent_fallbacks: HashMap::new(),
             auto_workflow_disabled_steps: HashSet::new(),
@@ -270,6 +284,7 @@ impl Tab {
             container_name_shared: Arc::new(Mutex::new(None)),
             stdin_tx_shared: Arc::new(Mutex::new(None)),
             resize_tx_shared: Arc::new(Mutex::new(None)),
+            control_board_tx_shared: Arc::new(Mutex::new(None)),
         }
     }
 
