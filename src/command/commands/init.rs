@@ -149,9 +149,8 @@ impl Command for InitCommand {
     }
 }
 
-/// Build a throwaway session for the init wrapper. Real wiring routes
-/// through the `Dispatch::session` field; this placeholder lets the
-/// structural API compile until 0069 wires the real plumbing.
+/// Build a throwaway session for the init command. The init command runs
+/// before a repo is fully set up, so it cannot rely on `Dispatch::session`.
 fn build_throwaway_session() -> Result<crate::data::session::Session, CommandError> {
     let cwd = std::env::current_dir()
         .map_err(|e| CommandError::Other(format!("cwd unavailable: {e}")))?;

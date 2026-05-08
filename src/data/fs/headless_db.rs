@@ -223,14 +223,8 @@ impl SqliteSessionStore {
                 params![sid],
                 |r| r.get::<_, i64>(0),
             )? as usize;
-            conn.execute(
-                "DELETE FROM commands WHERE session_id = ?1",
-                params![sid],
-            )?;
-            conn.execute(
-                "DELETE FROM sessions WHERE id = ?1",
-                params![sid],
-            )?;
+            conn.execute("DELETE FROM commands WHERE session_id = ?1", params![sid])?;
+            conn.execute("DELETE FROM sessions WHERE id = ?1", params![sid])?;
             deleted.push((sid.clone(), cmd_count));
         }
         Ok(deleted)
@@ -327,7 +321,10 @@ impl SqliteSessionStore {
     }
 
     /// Borrow the underlying connection for ad-hoc reads.
-    pub fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> Result<R, DataError>) -> Result<R, DataError> {
+    pub fn with_conn<R>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<R, DataError>,
+    ) -> Result<R, DataError> {
         let conn = self.lock();
         f(&conn)
     }
@@ -356,7 +353,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // Open twice on the same directory — migrations must be idempotent.
         let store1 = SqliteSessionStore::open(tmp.path()).unwrap();
-        store1.insert_session("s1", "/work", "2024-01-01T00:00:00Z").unwrap();
+        store1
+            .insert_session("s1", "/work", "2024-01-01T00:00:00Z")
+            .unwrap();
         drop(store1);
 
         let store2 = SqliteSessionStore::open(tmp.path()).unwrap();
@@ -370,7 +369,9 @@ mod tests {
     #[test]
     fn session_insert_and_get() {
         let (_tmp, store) = make_store();
-        store.insert_session("s1", "/work", "2024-01-01T00:00:00Z").unwrap();
+        store
+            .insert_session("s1", "/work", "2024-01-01T00:00:00Z")
+            .unwrap();
 
         let record = store.get_session("s1").unwrap().expect("session not found");
         assert_eq!(record.id, "s1");
@@ -390,9 +391,15 @@ mod tests {
     #[test]
     fn list_sessions_returns_all_inserted() {
         let (_tmp, store) = make_store();
-        store.insert_session("s1", "/a", "2024-01-01T00:00:00Z").unwrap();
-        store.insert_session("s2", "/b", "2024-01-02T00:00:00Z").unwrap();
-        store.insert_session("s3", "/c", "2024-01-03T00:00:00Z").unwrap();
+        store
+            .insert_session("s1", "/a", "2024-01-01T00:00:00Z")
+            .unwrap();
+        store
+            .insert_session("s2", "/b", "2024-01-02T00:00:00Z")
+            .unwrap();
+        store
+            .insert_session("s3", "/c", "2024-01-03T00:00:00Z")
+            .unwrap();
 
         let records = store.list_sessions().unwrap();
         assert_eq!(records.len(), 3);
@@ -405,7 +412,9 @@ mod tests {
     #[test]
     fn close_session_changes_status_and_sets_closed_at() {
         let (_tmp, store) = make_store();
-        store.insert_session("s1", "/work", "2024-01-01T00:00:00Z").unwrap();
+        store
+            .insert_session("s1", "/work", "2024-01-01T00:00:00Z")
+            .unwrap();
 
         let closed = store.close_session("s1", "2024-01-02T00:00:00Z").unwrap();
         assert!(closed);
@@ -418,7 +427,9 @@ mod tests {
     #[test]
     fn close_session_already_closed_returns_false() {
         let (_tmp, store) = make_store();
-        store.insert_session("s1", "/work", "2024-01-01T00:00:00Z").unwrap();
+        store
+            .insert_session("s1", "/work", "2024-01-01T00:00:00Z")
+            .unwrap();
         store.close_session("s1", "2024-01-02T00:00:00Z").unwrap();
 
         // Closing again should return false (no rows updated).
@@ -431,8 +442,12 @@ mod tests {
         let (_tmp, store) = make_store();
         assert_eq!(store.count_active_sessions().unwrap(), 0);
 
-        store.insert_session("s1", "/a", "2024-01-01T00:00:00Z").unwrap();
-        store.insert_session("s2", "/b", "2024-01-02T00:00:00Z").unwrap();
+        store
+            .insert_session("s1", "/a", "2024-01-01T00:00:00Z")
+            .unwrap();
+        store
+            .insert_session("s2", "/b", "2024-01-02T00:00:00Z")
+            .unwrap();
         assert_eq!(store.count_active_sessions().unwrap(), 2);
 
         store.close_session("s1", "2024-01-03T00:00:00Z").unwrap();
@@ -442,8 +457,12 @@ mod tests {
     #[test]
     fn list_sessions_by_status_active() {
         let (_tmp, store) = make_store();
-        store.insert_session("s1", "/a", "2024-01-01T00:00:00Z").unwrap();
-        store.insert_session("s2", "/b", "2024-01-02T00:00:00Z").unwrap();
+        store
+            .insert_session("s1", "/a", "2024-01-01T00:00:00Z")
+            .unwrap();
+        store
+            .insert_session("s2", "/b", "2024-01-02T00:00:00Z")
+            .unwrap();
         store.close_session("s1", "2024-01-03T00:00:00Z").unwrap();
 
         let active = store.list_sessions_by_status(Some("active")).unwrap();
@@ -460,8 +479,12 @@ mod tests {
     #[test]
     fn command_insert_and_get() {
         let (_tmp, store) = make_store();
-        store.insert_session("s1", "/work", "2024-01-01T00:00:00Z").unwrap();
-        store.insert_command("c1", "s1", "chat", "[]", "/logs/c1.log").unwrap();
+        store
+            .insert_session("s1", "/work", "2024-01-01T00:00:00Z")
+            .unwrap();
+        store
+            .insert_command("c1", "s1", "chat", "[]", "/logs/c1.log")
+            .unwrap();
 
         let cmd = store.get_command("c1").unwrap().expect("command not found");
         assert_eq!(cmd.id, "c1");
@@ -475,10 +498,16 @@ mod tests {
     #[test]
     fn update_command_started_sets_status_running() {
         let (_tmp, store) = make_store();
-        store.insert_session("s1", "/work", "2024-01-01T00:00:00Z").unwrap();
-        store.insert_command("c1", "s1", "chat", "[]", "/logs/c1.log").unwrap();
+        store
+            .insert_session("s1", "/work", "2024-01-01T00:00:00Z")
+            .unwrap();
+        store
+            .insert_command("c1", "s1", "chat", "[]", "/logs/c1.log")
+            .unwrap();
 
-        store.update_command_started("c1", "2024-01-01T01:00:00Z").unwrap();
+        store
+            .update_command_started("c1", "2024-01-01T01:00:00Z")
+            .unwrap();
 
         let cmd = store.get_command("c1").unwrap().unwrap();
         assert_eq!(cmd.status, "running");
@@ -488,9 +517,15 @@ mod tests {
     #[test]
     fn update_command_finished_sets_status_and_exit_code() {
         let (_tmp, store) = make_store();
-        store.insert_session("s1", "/work", "2024-01-01T00:00:00Z").unwrap();
-        store.insert_command("c1", "s1", "chat", "[]", "/logs/c1.log").unwrap();
-        store.update_command_started("c1", "2024-01-01T01:00:00Z").unwrap();
+        store
+            .insert_session("s1", "/work", "2024-01-01T00:00:00Z")
+            .unwrap();
+        store
+            .insert_command("c1", "s1", "chat", "[]", "/logs/c1.log")
+            .unwrap();
+        store
+            .update_command_started("c1", "2024-01-01T01:00:00Z")
+            .unwrap();
 
         store
             .update_command_finished("c1", "done", Some(0), "2024-01-01T02:00:00Z")
@@ -505,11 +540,17 @@ mod tests {
     #[test]
     fn count_running_commands() {
         let (_tmp, store) = make_store();
-        store.insert_session("s1", "/work", "2024-01-01T00:00:00Z").unwrap();
+        store
+            .insert_session("s1", "/work", "2024-01-01T00:00:00Z")
+            .unwrap();
         assert_eq!(store.count_running_commands().unwrap(), 0);
 
-        store.insert_command("c1", "s1", "chat", "[]", "/logs/c1.log").unwrap();
-        store.update_command_started("c1", "2024-01-01T01:00:00Z").unwrap();
+        store
+            .insert_command("c1", "s1", "chat", "[]", "/logs/c1.log")
+            .unwrap();
+        store
+            .update_command_started("c1", "2024-01-01T01:00:00Z")
+            .unwrap();
         assert_eq!(store.count_running_commands().unwrap(), 1);
 
         store
@@ -521,13 +562,19 @@ mod tests {
     #[test]
     fn has_running_command_for_session() {
         let (_tmp, store) = make_store();
-        store.insert_session("s1", "/work", "2024-01-01T00:00:00Z").unwrap();
-        store.insert_command("c1", "s1", "chat", "[]", "/logs/c1.log").unwrap();
+        store
+            .insert_session("s1", "/work", "2024-01-01T00:00:00Z")
+            .unwrap();
+        store
+            .insert_command("c1", "s1", "chat", "[]", "/logs/c1.log")
+            .unwrap();
 
         // Pending counts as "in-flight".
         assert!(store.has_running_command_for_session("s1").unwrap());
         // Finish the command.
-        store.update_command_started("c1", "2024-01-01T01:00:00Z").unwrap();
+        store
+            .update_command_started("c1", "2024-01-01T01:00:00Z")
+            .unwrap();
         store
             .update_command_finished("c1", "done", Some(0), "2024-01-01T02:00:00Z")
             .unwrap();

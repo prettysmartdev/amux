@@ -78,7 +78,10 @@ impl GitEngine {
             .first()
             .and_then(|s| s.parse::<u32>().ok())
             .ok_or_else(|| EngineError::Git(format!("malformed git version: {ver_str}")))?;
-        let minor = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+        let minor = parts
+            .get(1)
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
         if major > 2 || (major == 2 && minor >= 5) {
             Ok(GitVersion { major, minor })
         } else {
@@ -139,11 +142,7 @@ impl GitEngine {
     }
 
     /// `~/.amux/worktrees/<repo-name>/wf-<name>/` for a named workflow.
-    pub fn worktree_path_named(
-        &self,
-        git_root: &Path,
-        name: &str,
-    ) -> Result<PathBuf, EngineError> {
+    pub fn worktree_path_named(&self, git_root: &Path, name: &str) -> Result<PathBuf, EngineError> {
         let p = WorktreePaths::from_home().map_err(EngineError::Data)?;
         Ok(p.for_workflow(git_root, name))
     }
@@ -256,7 +255,10 @@ impl GitEngine {
             .map_err(|e| EngineError::Git(format!("invoke `git add -A`: {e}")))?;
         if !add.status.success() {
             let stderr = String::from_utf8_lossy(&add.stderr);
-            return Err(EngineError::Git(format!("git add -A failed: {}", stderr.trim())));
+            return Err(EngineError::Git(format!(
+                "git add -A failed: {}",
+                stderr.trim()
+            )));
         }
         let commit = Command::new("git")
             .args(["commit", "-m", message])
@@ -368,7 +370,10 @@ impl GitEngine {
         let add = run_git_logged(&["add", "-A"], path, sink)?;
         if !add.status.success() {
             let stderr = String::from_utf8_lossy(&add.stderr);
-            return Err(EngineError::Git(format!("git add -A failed: {}", stderr.trim())));
+            return Err(EngineError::Git(format!(
+                "git add -A failed: {}",
+                stderr.trim()
+            )));
         }
         let commit = run_git_logged(&["commit", "-m", message], path, sink)?;
         if !commit.status.success() {
@@ -418,11 +423,7 @@ impl GitEngine {
         let wt_str = worktree_path
             .to_str()
             .ok_or_else(|| EngineError::Git("worktree path not UTF-8".into()))?;
-        let output = run_git_logged(
-            &["worktree", "remove", "--force", wt_str],
-            git_root,
-            sink,
-        )?;
+        let output = run_git_logged(&["worktree", "remove", "--force", wt_str], git_root, sink)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(EngineError::Git(format!(

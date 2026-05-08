@@ -10,9 +10,8 @@
 //! - [`frontend`] (Layer 3) — CLI / TUI / headless presentations of Layer 2.
 
 #![forbid(unsafe_code)]
-// Layer 1 / 2 / 3 carry types that are still being exercised across the
-// refactor; suppress dead-code warnings here so partial wiring does not
-// fail CI. Per WI 0072 this attribute is removed once oldsrc/ is deleted.
+// Suppress dead-code warnings until oldsrc/ is deleted and the only
+// binary entry point is src/main.rs.
 #![allow(dead_code)]
 
 pub mod command;

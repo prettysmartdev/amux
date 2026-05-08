@@ -1,8 +1,7 @@
 //! `ReadyFrontend` impl for the CLI.
 //!
-//! Per WI 0069 section 1, prompts on stdin for Dockerfile and legacy-migration
-//! decisions when stdin is a TTY; otherwise returns the safe defaults
-//! from section 7u.
+//! Prompts on stdin for Dockerfile and legacy-migration decisions when
+//! stdin is a TTY; otherwise returns the safe non-interactive defaults.
 
 use crate::data::session::AgentName;
 use crate::engine::container::frontend::ContainerFrontend;
@@ -88,10 +87,8 @@ impl ReadyFrontend for CliFrontend {
             rows.push((&agent_labels[i], status));
         }
 
-        let box_str = render_summary_box(
-            &format!("Ready Summary ({})", summary.runtime_name),
-            &rows,
-        );
+        let box_str =
+            render_summary_box(&format!("Ready Summary ({})", summary.runtime_name), &rows);
         // Write the summary box directly to stderr without the per-line
         // "amux:" prefix used for status updates — the box is multi-line
         // content that reads better unprefixed.
@@ -100,9 +97,10 @@ impl ReadyFrontend for CliFrontend {
             format!("\n{box_str}amux is ready.\n").as_bytes(),
         );
 
-        let has_missing = summary.non_default_agent_images.iter().any(|(_, s)| {
-            matches!(s, StepStatus::Warn(_))
-        });
+        let has_missing = summary
+            .non_default_agent_images
+            .iter()
+            .any(|(_, s)| matches!(s, StepStatus::Warn(_)));
         if has_missing {
             let _ = std::io::Write::write_all(
                 &mut std::io::stderr(),

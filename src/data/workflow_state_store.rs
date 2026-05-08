@@ -125,8 +125,14 @@ mod tests {
         let store = WorkflowStateStore::at_git_root(tmp.path());
         let path = store.filename_for(None, "my-workflow");
         let filename = path.file_name().unwrap().to_str().unwrap();
-        assert!(filename.ends_with("-my-workflow.json"), "filename={filename}");
-        assert!(!filename.contains("-0"), "should not have work_item segment: {filename}");
+        assert!(
+            filename.ends_with("-my-workflow.json"),
+            "filename={filename}"
+        );
+        assert!(
+            !filename.contains("-0"),
+            "should not have work_item segment: {filename}"
+        );
     }
 
     #[test]

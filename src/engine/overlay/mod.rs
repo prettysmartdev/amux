@@ -128,10 +128,7 @@ impl OverlayEngine {
     }
 
     /// Resolve a single user-supplied overlay spec into its canonical form.
-    pub fn resolve_user_overlay(
-        &self,
-        spec: &DirectorySpec,
-    ) -> Result<OverlaySpec, EngineError> {
+    pub fn resolve_user_overlay(&self, spec: &DirectorySpec) -> Result<OverlaySpec, EngineError> {
         if !Path::new(&spec.container).is_absolute() {
             return Err(EngineError::Other(format!(
                 "overlay container path '{}' must be absolute",
@@ -166,8 +163,8 @@ impl OverlayEngine {
         let home = self.auth_resolver.home();
         let paths = self.auth_resolver.resolve(agent.as_str());
         let mut out = Vec::new();
-        let container_home = detect_container_home(home, agent.as_str())
-            .unwrap_or_else(|| "/root".to_string());
+        let container_home =
+            detect_container_home(home, agent.as_str()).unwrap_or_else(|| "/root".to_string());
 
         match agent.as_str() {
             "claude" => {
@@ -187,9 +184,7 @@ impl OverlayEngine {
                     };
                     out.push(OverlaySpec {
                         host_path,
-                        container_path: PathBuf::from(format!(
-                            "{container_home}/.claude.json"
-                        )),
+                        container_path: PathBuf::from(format!("{container_home}/.claude.json")),
                         permission: OverlayPermission::ReadWrite,
                     });
                 } else {
@@ -209,9 +204,7 @@ impl OverlayEngine {
                     if host_path.exists() {
                         out.push(OverlaySpec {
                             host_path,
-                            container_path: PathBuf::from(format!(
-                                "{container_home}/.claude.json"
-                            )),
+                            container_path: PathBuf::from(format!("{container_home}/.claude.json")),
                             permission: OverlayPermission::ReadWrite,
                         });
                     }
@@ -242,9 +235,7 @@ impl OverlayEngine {
                         let _retained = self.retain_tempdir(tmp);
                         out.push(OverlaySpec {
                             host_path: path,
-                            container_path: PathBuf::from(format!(
-                                "{container_home}/.claude"
-                            )),
+                            container_path: PathBuf::from(format!("{container_home}/.claude")),
                             permission: OverlayPermission::ReadWrite,
                         });
                     }
@@ -290,9 +281,7 @@ impl OverlayEngine {
                 if dir.exists() {
                     out.push(OverlaySpec {
                         host_path: dir,
-                        container_path: PathBuf::from(format!(
-                            "{container_home}/.config/crush"
-                        )),
+                        container_path: PathBuf::from(format!("{container_home}/.config/crush")),
                         permission: OverlayPermission::ReadWrite,
                     });
                 }
@@ -345,9 +334,7 @@ fn sanitize_claude_config(src: &Path) -> Result<(tempfile::TempDir, PathBuf), st
         }
     }
 
-    let tmp_dir = tempfile::Builder::new()
-        .prefix("amux-claude-")
-        .tempdir()?;
+    let tmp_dir = tempfile::Builder::new().prefix("amux-claude-").tempdir()?;
     let dest = tmp_dir.path().join("claude.json");
     let body = serde_json::to_string_pretty(&value).unwrap_or(raw);
     std::fs::write(&dest, body)?;
@@ -576,7 +563,10 @@ mod tests {
         let agent = AgentName::new("claude").unwrap();
         let out = engine.agent_settings_overlays(&agent).unwrap();
         assert!(
-            out.iter().any(|o| o.container_path.to_string_lossy().ends_with("/.claude.json")),
+            out.iter().any(|o| o
+                .container_path
+                .to_string_lossy()
+                .ends_with("/.claude.json")),
             "expected synthesized .claude.json overlay for first-time user, got {out:?}"
         );
     }
@@ -677,7 +667,11 @@ mod tests {
         // One overlay for the config file.
         let config_overlay = overlays
             .iter()
-            .find(|o| o.container_path.to_string_lossy().ends_with("/.claude.json"))
+            .find(|o| {
+                o.container_path
+                    .to_string_lossy()
+                    .ends_with("/.claude.json")
+            })
             .expect("must have .claude.json overlay");
         // The sanitized file must not contain oauthAccount.
         let sanitized = std::fs::read_to_string(&config_overlay.host_path).unwrap();
@@ -701,7 +695,11 @@ mod tests {
         let overlays = engine.agent_settings_overlays(&agent).unwrap();
         let config_overlay = overlays
             .iter()
-            .find(|o| o.container_path.to_string_lossy().ends_with("/.claude.json"))
+            .find(|o| {
+                o.container_path
+                    .to_string_lossy()
+                    .ends_with("/.claude.json")
+            })
             .expect("must have .claude.json overlay");
         let sanitized = std::fs::read_to_string(&config_overlay.host_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&sanitized).unwrap();

@@ -1,7 +1,6 @@
 //! CLI frontend — argv-driven, stdout/stderr/stdin rendering.
 //!
-//! Per `aspec/architecture/2026-grand-architecture.md` and work item
-//! `0069-grand-architecture-layer-3-frontends-and-binary.md` §1.
+//! Per `aspec/architecture/2026-grand-architecture.md`.
 //!
 //! The entry point [`run`] is invoked by `main.rs` whenever clap parsing
 //! succeeds with a subcommand. It builds a [`CliFrontend`] over the parsed
@@ -327,7 +326,9 @@ pub(crate) fn error_exit_code(err: &CommandError) -> u8 {
 
         // Exit 3 — missing container runtime
         CommandError::Engine(crate::engine::error::EngineError::Container(_))
-        | CommandError::Engine(crate::engine::error::EngineError::ContainerRuntimeUnavailable { .. }) => 3,
+        | CommandError::Engine(crate::engine::error::EngineError::ContainerRuntimeUnavailable {
+            ..
+        }) => 3,
 
         // Exit 1 — remaining engine errors (catch-all for unlisted EngineError variants)
         CommandError::Engine(_) => 1,
@@ -370,10 +371,21 @@ mod tests {
     #[test]
     fn error_exit_code_usage_errors_are_2() {
         let usage_errors: &[CommandError] = &[
-            CommandError::UnknownCommand { path: path(&["bogus"]) },
-            CommandError::UnknownFlag { command: path(&["init"]), flag: "bad".into() },
-            CommandError::MissingRequiredFlag { command: path(&["init"]), flag: "agent".into() },
-            CommandError::MissingRequiredArgument { command: path(&["implement"]), argument: "work_item".into() },
+            CommandError::UnknownCommand {
+                path: path(&["bogus"]),
+            },
+            CommandError::UnknownFlag {
+                command: path(&["init"]),
+                flag: "bad".into(),
+            },
+            CommandError::MissingRequiredFlag {
+                command: path(&["init"]),
+                flag: "agent".into(),
+            },
+            CommandError::MissingRequiredArgument {
+                command: path(&["implement"]),
+                argument: "work_item".into(),
+            },
             CommandError::MutuallyExclusive {
                 command: path(&["chat"]),
                 a: "yolo".into(),
@@ -484,7 +496,9 @@ mod tests {
             CommandError::Aborted,
             CommandError::NotImplemented("x"),
             CommandError::Other("boom".into()),
-            CommandError::UnknownCommand { path: vec!["bad".into()] },
+            CommandError::UnknownCommand {
+                path: vec!["bad".into()],
+            },
         ];
         for err in errors {
             let s = format_error(err);
@@ -498,23 +512,32 @@ mod tests {
     #[test]
     fn format_error_aborted_message() {
         let s = format_error(&CommandError::Aborted);
-        assert!(s.contains("aborted") || s.contains("Aborted") || s.contains("130"),
-            "Aborted error should mention abort: {s:?}");
+        assert!(
+            s.contains("aborted") || s.contains("Aborted") || s.contains("130"),
+            "Aborted error should mention abort: {s:?}"
+        );
     }
 
     #[test]
     fn format_error_unknown_command_includes_path() {
-        let err = CommandError::UnknownCommand { path: vec!["foo".into(), "bar".into()] };
+        let err = CommandError::UnknownCommand {
+            path: vec!["foo".into(), "bar".into()],
+        };
         let s = format_error(&err);
-        assert!(s.contains("foo") || s.contains("bar"),
-            "UnknownCommand error should include the path: {s:?}");
+        assert!(
+            s.contains("foo") || s.contains("bar"),
+            "UnknownCommand error should include the path: {s:?}"
+        );
     }
 
     #[test]
     fn format_error_not_implemented_includes_message() {
         let err = CommandError::NotImplemented("headless");
         let s = format_error(&err);
-        assert!(s.contains("headless"), "NotImplemented error must include the message: {s:?}");
+        assert!(
+            s.contains("headless"),
+            "NotImplemented error must include the message: {s:?}"
+        );
     }
 
     // ─── TTY detection ────────────────────────────────────────────────────────

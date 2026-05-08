@@ -84,10 +84,7 @@ impl PtySession {
             let mut child = child;
             match child.wait() {
                 Ok(status) => {
-                    let code = status
-                        .exit_code()
-                        .try_into()
-                        .unwrap_or(1);
+                    let code = status.exit_code().try_into().unwrap_or(1);
                     let _ = tx_wait.send(PtyEvent::Exit(code));
                 }
                 Err(_) => {

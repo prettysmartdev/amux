@@ -54,13 +54,11 @@ impl ClawsFrontend for TuiCommandFrontend {
         // Claws launches a single interactive PTY container, so hand the
         // PTY-bridge channels straight to the engine.
         match self.container_io.take() {
-            Some(io) => {
-                Box::new(super::TuiContainerProxy::with_io(
-                    self.status_log.clone(),
-                    io,
-                    self.container_name_shared.clone(),
-                ))
-            }
+            Some(io) => Box::new(super::TuiContainerProxy::with_io(
+                self.status_log.clone(),
+                io,
+                self.container_name_shared.clone(),
+            )),
             None => Box::new(super::TuiContainerProxy::new(self.status_log.clone())),
         }
     }

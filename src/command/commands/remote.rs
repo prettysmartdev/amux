@@ -103,12 +103,12 @@ pub trait RemoteCommandFrontend: UserMessageSink + Send + Sync {
 
     /// Choose one of the user's saved working directories. Default: first.
     fn ask_saved_dir_picker(&mut self, dirs: &[String]) -> Result<String, CommandError> {
-        dirs.first().cloned().ok_or_else(|| {
-            CommandError::MissingRequiredArgument {
+        dirs.first()
+            .cloned()
+            .ok_or_else(|| CommandError::MissingRequiredArgument {
                 command: vec!["remote".into(), "session".into(), "start".into()],
                 argument: "dir".into(),
-            }
-        })
+            })
     }
 
     /// Choose which session to kill from a list. Default: first.
@@ -209,8 +209,7 @@ async fn run_remote_run(
 
     let addr = resolve_addr(session, flags.remote_addr.as_deref())?;
     let session_id = resolve_session_id(session, flags.session.as_deref())?;
-    let api_key =
-        RemoteClient::resolve_api_key(session, &addr, flags.api_key.as_deref())?;
+    let api_key = RemoteClient::resolve_api_key(session, &addr, flags.api_key.as_deref())?;
     let client = build_remote_client(engines, &addr, api_key.as_ref())?;
 
     let subcommand = &flags.command[0];
@@ -294,10 +293,12 @@ async fn run_session_start(
     flags: RemoteSessionStartFlags,
     frontend: &mut dyn UserMessageSink,
 ) -> Result<RemoteOutcome, CommandError> {
-    let dir = flags.dir.ok_or_else(|| CommandError::MissingRequiredArgument {
-        command: vec!["remote".into(), "session".into(), "start".into()],
-        argument: "dir".into(),
-    })?;
+    let dir = flags
+        .dir
+        .ok_or_else(|| CommandError::MissingRequiredArgument {
+            command: vec!["remote".into(), "session".into(), "start".into()],
+            argument: "dir".into(),
+        })?;
 
     // Detached-HEAD warning: surfaces a UserMessage but does not block.
     if engines.git_engine.is_detached_head(session.git_root()) {
@@ -308,15 +309,11 @@ async fn run_session_start(
     }
 
     let addr = resolve_addr(session, flags.remote_addr.as_deref())?;
-    let api_key =
-        RemoteClient::resolve_api_key(session, &addr, flags.api_key.as_deref())?;
+    let api_key = RemoteClient::resolve_api_key(session, &addr, flags.api_key.as_deref())?;
     let client = build_remote_client(engines, &addr, api_key.as_ref())?;
 
     let resp = client
-        .send_command(
-            &["sessions"],
-            &[("workdir", serde_json::json!(&dir))],
-        )
+        .send_command(&["sessions"], &[("workdir", serde_json::json!(&dir))])
         .await?;
 
     let session_id = resp.body["session_id"]
@@ -342,16 +339,15 @@ async fn run_session_kill(
     flags: RemoteSessionKillFlags,
     frontend: &mut dyn UserMessageSink,
 ) -> Result<RemoteOutcome, CommandError> {
-    let session_id = flags.session_id.ok_or_else(|| {
-        CommandError::MissingRequiredArgument {
+    let session_id = flags
+        .session_id
+        .ok_or_else(|| CommandError::MissingRequiredArgument {
             command: vec!["remote".into(), "session".into(), "kill".into()],
             argument: "session_id".into(),
-        }
-    })?;
+        })?;
 
     let addr = resolve_addr(session, flags.remote_addr.as_deref())?;
-    let api_key =
-        RemoteClient::resolve_api_key(session, &addr, flags.api_key.as_deref())?;
+    let api_key = RemoteClient::resolve_api_key(session, &addr, flags.api_key.as_deref())?;
     let client = build_remote_client(engines, &addr, api_key.as_ref())?;
 
     match client.delete(&["sessions", &session_id]).await {
@@ -396,12 +392,9 @@ mod tests {
             env: Some(EnvSnapshot::empty()),
             ..Default::default()
         };
-        let session = Session::open_at_git_root(
-            tmp.path().to_path_buf(),
-            tmp.path().to_path_buf(),
-            opts,
-        )
-        .unwrap();
+        let session =
+            Session::open_at_git_root(tmp.path().to_path_buf(), tmp.path().to_path_buf(), opts)
+                .unwrap();
         (tmp, session)
     }
 
@@ -414,12 +407,9 @@ mod tests {
             env: Some(env),
             ..Default::default()
         };
-        let session = Session::open_at_git_root(
-            tmp.path().to_path_buf(),
-            tmp.path().to_path_buf(),
-            opts,
-        )
-        .unwrap();
+        let session =
+            Session::open_at_git_root(tmp.path().to_path_buf(), tmp.path().to_path_buf(), opts)
+                .unwrap();
         (tmp, session)
     }
 

@@ -6,8 +6,8 @@ use serde::Serialize;
 use crate::command::commands::agent_auth::AgentAuthFrontend;
 use crate::command::commands::agent_setup::AgentSetupFrontend;
 use crate::command::commands::mount_scope::{MountScope, MountScopeFrontend};
-use crate::command::commands::{collect_all_overlay_specs, parse_overlay_spec};
 use crate::command::commands::Command;
+use crate::command::commands::{collect_all_overlay_specs, parse_overlay_spec};
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
 use crate::data::session::{AgentName, Session, SessionOpenOptions, StaticGitRootResolver};
@@ -98,8 +98,7 @@ impl Command for ChatCommand {
         });
 
         // 1b. Confirm mount scope when cwd differs from git root.
-        let cwd = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let _mount_path = match MountScope::resolve(&cwd, session.git_root(), frontend.as_mut()) {
             Ok(p) => p,
             Err(e) => {
@@ -213,9 +212,11 @@ impl Command for ChatCommand {
             }
         };
         if !env_overrides.is_empty() {
-            options.push(crate::engine::container::options::ContainerOption::AgentCredentials {
-                env_vars: env_overrides,
-            });
+            options.push(
+                crate::engine::container::options::ContainerOption::AgentCredentials {
+                    env_vars: env_overrides,
+                },
+            );
         }
         let _ = &mut run_opts; // silence unused-mut lint when no fields mutate later
 
@@ -279,13 +280,9 @@ pub(crate) async fn ensure_agent_setup(
         crate::command::commands::agent_setup::AgentFrontendAdapter::new(frontend.as_mut());
     let runtime = std::sync::Arc::clone(agent_engine.container_runtime_arc());
     agent_engine
-        .ensure_available(
-            session,
-            agent,
-            &config,
-            &mut adapter,
-            move |tag: &str| runtime.image_exists(tag),
-        )
+        .ensure_available(session, agent, &config, &mut adapter, move |tag: &str| {
+            runtime.image_exists(tag)
+        })
         .await
         .map_err(CommandError::from)
 }
@@ -309,7 +306,10 @@ pub(crate) fn resolve_agent(
 pub(crate) fn open_session_for_cwd(engines: &Engines) -> Result<Session, CommandError> {
     let cwd = std::env::current_dir()
         .map_err(|e| CommandError::Other(format!("cwd unavailable: {e}")))?;
-    let git_root = engines.git_engine.resolve_root(&cwd).unwrap_or_else(|_| cwd.clone());
+    let git_root = engines
+        .git_engine
+        .resolve_root(&cwd)
+        .unwrap_or_else(|_| cwd.clone());
     let resolver = StaticGitRootResolver::new(git_root);
     Session::open(cwd, &resolver, SessionOpenOptions::default()).map_err(CommandError::from)
 }
@@ -328,7 +328,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let session = make_session(tmp.path());
         let agent = resolve_agent(&Some("codex".to_string()), &session).unwrap();
-        assert_eq!(agent.as_str(), "codex", "explicit flag must win over session default");
+        assert_eq!(
+            agent.as_str(),
+            "codex",
+            "explicit flag must win over session default"
+        );
     }
 
     #[test]

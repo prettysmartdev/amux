@@ -59,9 +59,7 @@ impl OverlayPathResolver {
                         Some(std::path::Component::Normal(_)) => {
                             result.pop();
                         }
-                        Some(
-                            std::path::Component::RootDir | std::path::Component::Prefix(_),
-                        ) => {
+                        Some(std::path::Component::RootDir | std::path::Component::Prefix(_)) => {
                             // Cannot go above the filesystem root — discard `..`.
                         }
                         _ => result.push(".."),

@@ -71,3 +71,31 @@ wiremock = "0.6"
 # rebuilt from scratch alongside the new TUI in work item 0072. The
 # explicit `[[bench]]` block is omitted (and `autobenches = false` above
 # suppresses discovery) until that work lands.
+
+# ── New architecture integration tests (WI 0073) ─────────────────────────────
+# autotests = false suppresses the legacy tests/; these explicit entries
+# target the new src/ API only.
+
+[[test]]
+name = "data_layer"
+path = "tests/data_layer/main.rs"
+
+[[test]]
+name = "engine_tests"
+path = "tests/engine/main.rs"
+
+[[test]]
+name = "command_tests"
+path = "tests/command/main.rs"
+
+[[test]]
+name = "cli_parity"
+path = "tests/cli_parity/main.rs"
+
+[[test]]
+name = "headless_parity"
+path = "tests/headless_parity/main.rs"
+
+[[test]]
+name = "binary_smoke"
+path = "tests/binary_smoke/main.rs"

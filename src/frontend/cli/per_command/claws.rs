@@ -24,10 +24,7 @@ impl ClawsFrontend for CliFrontend {
     }
 
     fn ask_run_audit(&mut self) -> Result<bool, EngineError> {
-        Ok(yes_no(
-            "Run the nanoclaw audit container now?",
-            false,
-        ))
+        Ok(yes_no("Run the nanoclaw audit container now?", false))
     }
 
     fn report_phase(&mut self, _phase: &ClawsPhase) {
@@ -54,9 +51,8 @@ impl ClawsFrontend for CliFrontend {
         if commands.is_empty() {
             return Ok(true);
         }
-        let mut prompt = String::from(
-            "amux needs to run the following sudo commands to fix permissions:\n",
-        );
+        let mut prompt =
+            String::from("amux needs to run the following sudo commands to fix permissions:\n");
         for c in commands {
             prompt.push_str(&format!("  {c}\n"));
         }
@@ -74,10 +70,8 @@ impl ClawsFrontend for CliFrontend {
             ("Controller", &summary.controller),
         ];
         let box_str = render_summary_box("Claws Summary", &rows);
-        let _ = std::io::Write::write_all(
-            &mut std::io::stderr(),
-            format!("\n{box_str}").as_bytes(),
-        );
+        let _ =
+            std::io::Write::write_all(&mut std::io::stderr(), format!("\n{box_str}").as_bytes());
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
 }

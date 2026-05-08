@@ -22,8 +22,7 @@ pub fn dockerfile_url_for(agent: &str) -> String {
 /// cannot leave a corrupt file behind.
 fn atomic_write(dest: &Path, body: &[u8]) -> Result<(), EngineError> {
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| EngineError::io(parent.to_path_buf(), e))?;
+        std::fs::create_dir_all(parent).map_err(|e| EngineError::io(parent.to_path_buf(), e))?;
     }
     let tmp = dest.with_extension("tmp");
     std::fs::write(&tmp, body).map_err(|e| EngineError::io(tmp.clone(), e))?;
@@ -38,7 +37,11 @@ fn atomic_write(dest: &Path, body: &[u8]) -> Result<(), EngineError> {
 ///
 /// `project_base_tag` is substituted for `{{AMUX_BASE_IMAGE}}` in the
 /// downloaded (or bundled) Dockerfile content.
-pub async fn download_agent_dockerfile(agent: &str, dest: &Path, project_base_tag: &str) -> Result<(), EngineError> {
+pub async fn download_agent_dockerfile(
+    agent: &str,
+    dest: &Path,
+    project_base_tag: &str,
+) -> Result<(), EngineError> {
     let url = dockerfile_url_for(agent);
     let client_result = reqwest::Client::builder()
         .user_agent("amux")

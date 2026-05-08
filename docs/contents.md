@@ -18,7 +18,8 @@ A guide to using amux, the containerized multi-agent terminal multiplexer.
 | 07 | [Configuration](07-configuration.md) | Config files, runtime selection, all fields |
 | 08 | [Headless Mode](08-headless-mode.md) | HTTP server, sessions, commands, CI/automation, auditability |
 | 09 | [Remote Mode](09-remote-mode.md) | `remote run`, `remote session`, live log streaming, TUI pickers |
-| — | [Architecture](architecture.md) | Source layout, modules, design decisions |
+| 10 | [Architecture Overview](10-architecture-overview.md) | Four-layer design, layers 0–4, design principles, adding features |
+| — | [Architecture (Detailed)](architecture.md) | Source layout, modules, in-depth design decisions |
 
 ---
 

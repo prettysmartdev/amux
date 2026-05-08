@@ -37,20 +37,23 @@ pub fn render_frame(app: &mut App, frame: &mut Frame) {
     // Show the post-exit summary in the same slot as the minimized bar, but
     // only when the container is Hidden (i.e. the previous run finished and
     // we haven't started another).
-    let has_summary_bar = !has_minimized_container
-        && container_state == ContainerWindowState::Hidden
-        && has_summary;
+    let has_summary_bar =
+        !has_minimized_container && container_state == ContainerWindowState::Hidden && has_summary;
 
-    let extra_bar_height = if has_minimized_container || has_summary_bar { 3 } else { 0 };
+    let extra_bar_height = if has_minimized_container || has_summary_bar {
+        3
+    } else {
+        0
+    };
 
     let chunks = Layout::vertical([
-        Constraint::Length(3),                          // tab bar
-        Constraint::Min(5),                             // execution window
-        Constraint::Length(extra_bar_height),           // minimized OR summary
-        Constraint::Length(workflow_height),            // workflow strip
-        Constraint::Length(1),                          // status bar
-        Constraint::Length(3),                          // command box
-        Constraint::Length(1),                          // suggestion row
+        Constraint::Length(3),                // tab bar
+        Constraint::Min(5),                   // execution window
+        Constraint::Length(extra_bar_height), // minimized OR summary
+        Constraint::Length(workflow_height),  // workflow strip
+        Constraint::Length(1),                // status bar
+        Constraint::Length(3),                // command box
+        Constraint::Length(1),                // suggestion row
     ])
     .split(area);
 
@@ -252,11 +255,7 @@ fn render_execution_window(app: &App, area: Rect, frame: &mut Frame) {
 /// offset is computed against wrapped row count so `scroll_offset` is in
 /// "screen rows", not log entries — matches old amux's behavior where the
 /// scroll is anchored to the bottom and increasing offset moves toward older.
-fn render_output_content(
-    tab: &tabs::Tab,
-    area: Rect,
-    frame: &mut Frame,
-) {
+fn render_output_content(tab: &tabs::Tab, area: Rect, frame: &mut Frame) {
     let log = match tab.status_log.lock() {
         Ok(g) => g,
         Err(_) => return,
@@ -361,14 +360,12 @@ fn render_status_bar(app: &App, area: Rect, frame: &mut Frame) {
             )]
         }
         // Running + ExecWindow + no container
-        (
-            ExecutionPhase::Running { .. },
-            Focus::ExecutionWindow,
-            ContainerWindowState::Hidden,
-        ) => vec![Span::styled(
-            " Press Esc to deselect the window ",
-            Style::default().fg(Color::Yellow),
-        )],
+        (ExecutionPhase::Running { .. }, Focus::ExecutionWindow, ContainerWindowState::Hidden) => {
+            vec![Span::styled(
+                " Press Esc to deselect the window ",
+                Style::default().fg(Color::Yellow),
+            )]
+        }
         // Running + CommandBox
         (ExecutionPhase::Running { .. }, Focus::CommandBox, _) => {
             if workflow_active {
@@ -460,8 +457,16 @@ fn render_command_box(app: &App, area: Rect, frame: &mut Frame) {
     );
     let focused = app.focus == Focus::CommandBox && !is_running;
 
-    let border_color = if focused { Color::Cyan } else { Color::DarkGray };
-    let title = if focused { " command " } else { " command (inactive) " };
+    let border_color = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    let title = if focused {
+        " command "
+    } else {
+        " command (inactive) "
+    };
 
     let block = Block::default()
         .title(title)
@@ -515,19 +520,14 @@ fn render_command_box(app: &App, area: Rect, frame: &mut Frame) {
     let visible_width = inner.width.saturating_sub(2) as usize; // subtract prefix "> "
     let cursor_col = {
         let text_before_cursor = &app.command_input.text[..app.command_input.cursor];
-        unicode_width::UnicodeWidthStr::width(
-            text_before_cursor.replace('\n', "\u{21b5}").as_str(),
-        )
+        unicode_width::UnicodeWidthStr::width(text_before_cursor.replace('\n', "\u{21b5}").as_str())
     };
     let scroll_offset = if cursor_col >= visible_width {
         cursor_col - visible_width + 1
     } else {
         0
     };
-    let visible_text: String = display_text
-        .chars()
-        .skip(scroll_offset)
-        .collect();
+    let visible_text: String = display_text.chars().skip(scroll_offset).collect();
     let line = Line::from(vec![prefix, Span::raw(visible_text)]);
     frame.render_widget(Paragraph::new(line), inner);
 
@@ -550,13 +550,14 @@ fn render_command_box(app: &App, area: Rect, frame: &mut Frame) {
 /// - Otherwise: fall back to a `"  CWD: {path}"` line (or `"  Using
 ///   Worktree: {path}"` when the active tab is bound to a worktree).
 fn render_suggestion_row(app: &App, area: Rect, frame: &mut Frame) {
-    let show_suggestions =
-        app.focus == Focus::CommandBox && !app.suggestion_row.is_empty();
+    let show_suggestions = app.focus == Focus::CommandBox && !app.suggestion_row.is_empty();
 
     if show_suggestions {
         let mut spans: Vec<Span> = Vec::with_capacity(app.suggestion_row.len() * 2);
         let catalogue = crate::command::dispatch::catalogue::CommandCatalogue::get();
-        let command_path: Vec<&str> = app.command_input.text
+        let command_path: Vec<&str> = app
+            .command_input
+            .text
             .split_whitespace()
             .take_while(|t| !t.starts_with('-'))
             .collect();
@@ -580,8 +581,7 @@ fn render_suggestion_row(app: &App, area: Rect, frame: &mut Frame) {
                 }
             }
         }
-        let para =
-            Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray));
+        let para = Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(para, area);
         return;
     }
@@ -598,11 +598,8 @@ fn render_suggestion_row(app: &App, area: Rect, frame: &mut Frame) {
     let tab = app.active_tab();
     let working_dir = tab.session.working_dir();
     let git_root = tab.session.git_root();
-    let active_worktree: Option<std::path::PathBuf> = tab
-        .active_worktree_path
-        .lock()
-        .ok()
-        .and_then(|g| g.clone());
+    let active_worktree: Option<std::path::PathBuf> =
+        tab.active_worktree_path.lock().ok().and_then(|g| g.clone());
 
     let para = if let Some(wt) = active_worktree {
         let label = "  Using worktree: ";
@@ -654,51 +651,6 @@ fn truncate_middle(s: &str, max: usize) -> String {
     format!("{prefix}{ellipsis}{suffix}")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::truncate_middle;
-
-    #[test]
-    fn long_path_truncated_with_middle_ellipsis() {
-        // Path clearly longer than max → contains ellipsis character.
-        let long_path = "/home/user/projects/very-long-directory-name/another-long-part/file.txt";
-        let result = truncate_middle(long_path, 30);
-        assert!(
-            result.contains('\u{2026}'),
-            "long path must be truncated with '…', got: {result:?}"
-        );
-        assert!(
-            result.chars().count() <= 30,
-            "truncated string must be at most 30 chars, got {} chars: {result:?}",
-            result.chars().count()
-        );
-    }
-
-    #[test]
-    fn short_path_not_truncated() {
-        let short = "/home/user/foo";
-        let result = truncate_middle(short, 40);
-        assert_eq!(result, short, "path shorter than max must not be truncated");
-    }
-
-    #[test]
-    fn truncate_middle_exact_length_not_truncated() {
-        let s = "abcdefghij"; // 10 chars
-        let result = truncate_middle(s, 10);
-        assert_eq!(result, s, "string at exactly max chars must not be truncated");
-    }
-
-    #[test]
-    fn truncate_middle_preserves_prefix_and_suffix() {
-        let s = "start-middle-end";
-        let result = truncate_middle(s, 10);
-        // The result must start with the prefix chars and end with suffix chars.
-        assert!(result.starts_with("star"), "prefix must be preserved");
-        assert!(result.ends_with("end"), "suffix must be preserved");
-        assert!(result.contains('\u{2026}'));
-    }
-}
-
 /// Map message level to display color.
 fn status_level_color(level: &crate::engine::message::MessageLevel) -> Color {
     use crate::engine::message::MessageLevel;
@@ -734,29 +686,25 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 .max()
                 .unwrap_or(0) as u16;
             let title_w = unicode_width::UnicodeWidthStr::width(title.as_str()) as u16 + 4;
-            let width = max_body_w
-                .saturating_add(6)
-                .max(50)
-                .max(title_w)
-                .min(max_w);
+            let width = max_body_w.saturating_add(6).max(50).max(title_w).min(max_w);
             let inner_w = width.saturating_sub(4) as usize;
             let wrapped_lines: usize = body
                 .lines()
                 .map(|line| {
                     let w = unicode_width::UnicodeWidthStr::width(line);
-                    if inner_w == 0 || w == 0 { 1 } else { w.div_ceil(inner_w) }
+                    if inner_w == 0 || w == 0 {
+                        1
+                    } else {
+                        w.div_ceil(inner_w)
+                    }
                 })
                 .sum();
             let body_h = wrapped_lines as u16;
             let height = (body_h + 5).min(area.height.saturating_sub(2)).max(7);
             let dialog_area = dialogs::centered_fixed(width, height, area);
-            let inner =
-                dialogs::render_dialog_frame(title, Color::Yellow, dialog_area, frame);
+            let inner = dialogs::render_dialog_frame(title, Color::Yellow, dialog_area, frame);
             let text = format!("{body}\n\n  [y] Yes   [n] No   [Esc] Cancel");
-            frame.render_widget(
-                Paragraph::new(text).wrap(Wrap { trim: false }),
-                inner,
-            );
+            frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
         }
         dialogs::Dialog::TextInput {
             title,
@@ -769,9 +717,11 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             let dialog_h = prompt_lines + 9;
             let dialog_w = (area.width.saturating_sub(8)).clamp(50, 80);
             let dialog_area = dialogs::centered_fixed(dialog_w, dialog_h, area);
-            let inner =
-                dialogs::render_dialog_frame(title, Color::Cyan, dialog_area, frame);
-            let prompt_area = Rect { height: prompt_lines, ..inner };
+            let inner = dialogs::render_dialog_frame(title, Color::Cyan, dialog_area, frame);
+            let prompt_area = Rect {
+                height: prompt_lines,
+                ..inner
+            };
             frame.render_widget(
                 Paragraph::new(prompt.as_str()).style(Style::default().fg(Color::Gray)),
                 prompt_area,
@@ -786,7 +736,11 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 .border_style(Style::default().fg(Color::Cyan));
             let input_inner = input_block.inner(input_area);
             frame.render_widget(input_block, input_area);
-            let display_text: String = editor.text.chars().take(input_inner.width as usize).collect();
+            let display_text: String = editor
+                .text
+                .chars()
+                .take(input_inner.width as usize)
+                .collect();
             frame.render_widget(
                 Paragraph::new(display_text).style(Style::default().fg(Color::White)),
                 input_inner,
@@ -807,7 +761,8 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             }
             let text_before_cursor = &editor.text[..editor.cursor];
             let cursor_display_w = unicode_width::UnicodeWidthStr::width(text_before_cursor) as u16;
-            let cursor_x = input_inner.x + cursor_display_w.min(input_inner.width.saturating_sub(1));
+            let cursor_x =
+                input_inner.x + cursor_display_w.min(input_inner.width.saturating_sub(1));
             let cursor_y = input_inner.y;
             if cursor_x < input_inner.x + input_inner.width {
                 frame.set_cursor_position(Position::new(cursor_x, cursor_y));
@@ -819,11 +774,13 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             editor,
         } => {
             let dialog_area = dialogs::centered_rect(70, 60, area);
-            let inner =
-                dialogs::render_dialog_frame(title, Color::Cyan, dialog_area, frame);
+            let inner = dialogs::render_dialog_frame(title, Color::Cyan, dialog_area, frame);
             // Reserve the bottom row for a hint so it never gets clipped.
             let content_h = inner.height.saturating_sub(1);
-            let content_area = Rect { height: content_h, ..inner };
+            let content_area = Rect {
+                height: content_h,
+                ..inner
+            };
             let text = format!("{prompt}\n{}", editor.text);
             frame.render_widget(
                 Paragraph::new(text).wrap(Wrap { trim: false }),
@@ -835,10 +792,8 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 ..inner
             };
             frame.render_widget(
-                Paragraph::new(
-                    "  [Ctrl+Enter] submit   [Enter] newline   [Esc] cancel",
-                )
-                .style(Style::default().fg(Color::DarkGray)),
+                Paragraph::new("  [Ctrl+Enter] submit   [Enter] newline   [Esc] cancel")
+                    .style(Style::default().fg(Color::DarkGray)),
                 hint_area,
             );
             let lines_before: Vec<&str> = editor.text[..editor.cursor].split('\n').collect();
@@ -846,8 +801,7 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             let cursor_display_w = unicode_width::UnicodeWidthStr::width(*last_line) as u16;
             let prompt_lines = prompt.lines().count() as u16 + 1;
             let cursor_x = inner.x + cursor_display_w.min(inner.width.saturating_sub(1));
-            let cursor_y =
-                inner.y + prompt_lines + (lines_before.len() as u16).saturating_sub(1);
+            let cursor_y = inner.y + prompt_lines + (lines_before.len() as u16).saturating_sub(1);
             if cursor_x < inner.x + inner.width && cursor_y < inner.y + content_h {
                 frame.set_cursor_position(Position::new(cursor_x, cursor_y));
             }
@@ -872,11 +826,13 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             let body_h = items.len() as u16 + 1; // +1 for the hint row
             let height = (body_h + 4).min(area.height.saturating_sub(2)).max(7);
             let dialog_area = dialogs::centered_fixed(width, height, area);
-            let inner =
-                dialogs::render_dialog_frame(title, Color::Cyan, dialog_area, frame);
+            let inner = dialogs::render_dialog_frame(title, Color::Cyan, dialog_area, frame);
             // Reserve last row for the hint.
             let list_h = inner.height.saturating_sub(1);
-            let list_area = Rect { height: list_h, ..inner };
+            let list_area = Rect {
+                height: list_h,
+                ..inner
+            };
             // Window items so the selection stays visible when the list is
             // taller than the dialog.
             let visible = list_h as usize;
@@ -891,7 +847,9 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 .map(|(i, item)| {
                     let prefix = if i == *selected { "▸ " } else { "  " };
                     let style = if i == *selected {
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::Gray)
                     };
@@ -924,14 +882,11 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             let body_h = options.len() as u16 + 1; // +1 for hint
             let height = (body_h + 4).min(area.height.saturating_sub(2)).max(7);
             let dialog_area = dialogs::centered_fixed(width, height, area);
-            let inner =
-                dialogs::render_dialog_frame(title, Color::Yellow, dialog_area, frame);
+            let inner = dialogs::render_dialog_frame(title, Color::Yellow, dialog_area, frame);
             let mut lines: Vec<Line> = options
                 .iter()
                 .enumerate()
-                .map(|(i, (_key, label))| {
-                    Line::from(format!("  [{}] {label}", i + 1))
-                })
+                .map(|(i, (_key, label))| Line::from(format!("  [{}] {label}", i + 1)))
                 .collect();
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
@@ -964,8 +919,7 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             .max()
             .unwrap_or(0) as u16;
             let step_w =
-                unicode_width::UnicodeWidthStr::width(state.step_name.as_str()) as u16
-                    + 10;
+                unicode_width::UnicodeWidthStr::width(state.step_name.as_str()) as u16 + 10;
             let width = max_reason_w
                 .max(step_w)
                 .max(56)
@@ -977,17 +931,16 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             } else {
                 "Workflow Control"
             };
-            let inner = dialogs::render_dialog_frame(
-                title,
-                Color::Yellow,
-                dialog_area,
-                frame,
-            );
+            let inner = dialogs::render_dialog_frame(title, Color::Yellow, dialog_area, frame);
 
-            let arrow_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+            let arrow_style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
             let label_style = Style::default().fg(Color::White);
             let dimmed_style = Style::default().fg(Color::DarkGray);
-            let step_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+            let step_style = Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD);
             let cancel_style = Style::default().fg(Color::Red);
 
             let (right_arrow_style, right_label_style) = if state.can_launch_next {
@@ -1050,8 +1003,9 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             ]));
             if state.can_finish {
                 lines.push(Line::from(""));
-                let finish_style =
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+                let finish_style = Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD);
                 lines.push(Line::from(vec![
                     Span::raw("  "),
                     Span::styled("Ctrl+Enter", finish_style),
@@ -1083,9 +1037,8 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 .map(|l| unicode_width::UnicodeWidthStr::width(l.as_str()))
                 .max()
                 .unwrap_or(0) as u16;
-            let step_w = unicode_width::UnicodeWidthStr::width(state.step_name.as_str())
-                as u16
-                + 10; // "  Step: " prefix.
+            let step_w =
+                unicode_width::UnicodeWidthStr::width(state.step_name.as_str()) as u16 + 10; // "  Step: " prefix.
             let width = max_err_w
                 .max(step_w)
                 .saturating_add(6)
@@ -1095,12 +1048,7 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 .min(area.height.saturating_sub(4))
                 .max(9);
             let dialog_area = dialogs::centered_fixed(width, height, area);
-            let inner = dialogs::render_dialog_frame(
-                "Step failed",
-                Color::Red,
-                dialog_area,
-                frame,
-            );
+            let inner = dialogs::render_dialog_frame("Step failed", Color::Red, dialog_area, frame);
             let mut lines = vec![
                 Line::from(format!("  Step: {}", state.step_name)),
                 Line::from(""),
@@ -1125,27 +1073,18 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 "\u{1f918}"
             };
             let title = format!("{} Yolo in {}s", emoji, state.remaining_secs);
-            let step_w =
-                unicode_width::UnicodeWidthStr::width(state.step_name.as_str()) as u16;
+            let step_w = unicode_width::UnicodeWidthStr::width(state.step_name.as_str()) as u16;
             let width = step_w
                 .saturating_add(20)
                 .max(56)
                 .min(area.width.saturating_sub(4));
             let dialog_area = dialogs::centered_fixed(width, 9, area);
-            let inner = dialogs::render_dialog_frame(
-                &title,
-                Color::Magenta,
-                dialog_area,
-                frame,
-            );
+            let inner = dialogs::render_dialog_frame(&title, Color::Magenta, dialog_area, frame);
             let text = format!(
                 "  Step: {}\n  Auto-advancing in {}s\n\n  [Esc] Cancel   [Ctrl-W] Control board",
                 state.step_name, state.remaining_secs
             );
-            frame.render_widget(
-                Paragraph::new(text).wrap(Wrap { trim: false }),
-                inner,
-            );
+            frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
         }
         dialogs::Dialog::AgentSetup(state) => {
             let title = if state.image_only {
@@ -1153,8 +1092,7 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             } else {
                 format!("Set up {}?", state.agent_name)
             };
-            let title_w =
-                unicode_width::UnicodeWidthStr::width(title.as_str()) as u16 + 4;
+            let title_w = unicode_width::UnicodeWidthStr::width(title.as_str()) as u16 + 4;
             let fallback_w = state
                 .fallback_name
                 .as_deref()
@@ -1171,8 +1109,7 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 9
             };
             let dialog_area = dialogs::centered_fixed(width, height, area);
-            let inner =
-                dialogs::render_dialog_frame(&title, Color::Yellow, dialog_area, frame);
+            let inner = dialogs::render_dialog_frame(&title, Color::Yellow, dialog_area, frame);
             let mut lines = vec![Line::from(""), Line::from("  [y] Yes   [n] No")];
             if state.has_fallback {
                 if let Some(ref fb) = state.fallback_name {
@@ -1219,8 +1156,7 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 .unwrap_or(0) as u16
                 + 8;
             let agent_w =
-                unicode_width::UnicodeWidthStr::width(state.agent_name.as_str()) as u16
-                    + 12;
+                unicode_width::UnicodeWidthStr::width(state.agent_name.as_str()) as u16 + 12;
             let width = max_var_w
                 .max(agent_w)
                 .max(55)
@@ -1253,12 +1189,10 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             render_config_show(state, area, frame);
         }
         dialogs::Dialog::Loading { title } => {
-            let title_w =
-                unicode_width::UnicodeWidthStr::width(title.as_str()) as u16 + 4;
+            let title_w = unicode_width::UnicodeWidthStr::width(title.as_str()) as u16 + 4;
             let width = title_w.max(40).min(area.width.saturating_sub(4));
             let dialog_area = dialogs::centered_fixed(width, 6, area);
-            let inner =
-                dialogs::render_dialog_frame(title, Color::Cyan, dialog_area, frame);
+            let inner = dialogs::render_dialog_frame(title, Color::Cyan, dialog_area, frame);
             frame.render_widget(
                 Paragraph::new("  Loading...").style(Style::default().fg(Color::DarkGray)),
                 inner,
@@ -1275,12 +1209,8 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 + 4;
             let width = body_w.max(64).min(area.width.saturating_sub(4));
             let dialog_area = dialogs::centered_fixed(width, 8, area);
-            let inner = dialogs::render_dialog_frame(
-                "Step Complete",
-                Color::Green,
-                dialog_area,
-                frame,
-            );
+            let inner =
+                dialogs::render_dialog_frame("Step Complete", Color::Green, dialog_area, frame);
             let lines = vec![
                 Line::from(format!(
                     "  Step '{}' done. Advance to '{}'?",
@@ -1296,8 +1226,7 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
         }
         dialogs::Dialog::Custom { title, body, keys } => {
             let body_lines = body.lines().count() as u16;
-            let title_w =
-                unicode_width::UnicodeWidthStr::width(title.as_str()) as u16 + 4;
+            let title_w = unicode_width::UnicodeWidthStr::width(title.as_str()) as u16 + 4;
             // Use display width, not byte length, so wide chars/emoji size
             // the dialog correctly. Account for padding + borders.
             let max_body_width = body
@@ -1319,8 +1248,7 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 .min(area.height.saturating_sub(2))
                 .max(9);
             let dialog_area = dialogs::centered_fixed(width, height, area);
-            let inner =
-                dialogs::render_dialog_frame(title, Color::Yellow, dialog_area, frame);
+            let inner = dialogs::render_dialog_frame(title, Color::Yellow, dialog_area, frame);
             let mut lines: Vec<Line> = body.lines().map(Line::from).collect();
             lines.push(Line::from(""));
             for (ch, label) in keys {
@@ -1339,11 +1267,7 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
 }
 
 /// Render the config show dialog using a Ratatui `Table` widget.
-fn render_config_show(
-    state: &dialogs::ConfigShowState,
-    area: Rect,
-    frame: &mut Frame,
-) {
+fn render_config_show(state: &dialogs::ConfigShowState, area: Rect, frame: &mut Frame) {
     let popup_width = area.width.saturating_sub(4).min(110);
     let popup_height = area.height.saturating_sub(4).min(26);
     let popup = dialogs::centered_fixed(popup_width, popup_height, area);
@@ -1365,64 +1289,72 @@ fn render_config_show(
     let table_area = chunks[0];
     let hint_area = chunks[1];
 
-    let header_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let header = Row::new(vec![
         Cell::from("Field").style(header_style),
         Cell::from("Global").style(header_style),
         Cell::from("Repo").style(header_style),
         Cell::from("Effective").style(header_style),
-    ]).height(1);
+    ])
+    .height(1);
 
-    let rows: Vec<Row> = state.rows.iter().enumerate().map(|(i, row)| {
-        let is_selected = i == state.selected;
+    let rows: Vec<Row> = state
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let is_selected = i == state.selected;
 
-        let gval = if is_selected && state.editing && state.edit_column == 0 {
-            let ev = &state.editor.text;
-            let cursor = state.editor.cursor;
-            format!("{}|{}", &ev[..cursor], &ev[cursor..])
-        } else {
-            row.global.clone()
-        };
-        let rval = if is_selected && state.editing && state.edit_column == 1 {
-            let ev = &state.editor.text;
-            let cursor = state.editor.cursor;
-            format!("{}|{}", &ev[..cursor], &ev[cursor..])
-        } else {
-            row.repo.clone()
-        };
-
-        let (gcell, rcell) = if is_selected && !state.editing {
-            let col_style = Style::default().fg(Color::Black).bg(Color::White);
-            if state.edit_column == 0 {
-                (Cell::from(gval).style(col_style), Cell::from(rval))
+            let gval = if is_selected && state.editing && state.edit_column == 0 {
+                let ev = &state.editor.text;
+                let cursor = state.editor.cursor;
+                format!("{}|{}", &ev[..cursor], &ev[cursor..])
             } else {
-                (Cell::from(gval), Cell::from(rval).style(col_style))
-            }
-        } else if is_selected && state.editing {
-            let edit_style = Style::default().fg(Color::Black).bg(Color::Green);
-            if state.edit_column == 0 {
-                (Cell::from(gval).style(edit_style), Cell::from(rval))
+                row.global.clone()
+            };
+            let rval = if is_selected && state.editing && state.edit_column == 1 {
+                let ev = &state.editor.text;
+                let cursor = state.editor.cursor;
+                format!("{}|{}", &ev[..cursor], &ev[cursor..])
             } else {
-                (Cell::from(gval), Cell::from(rval).style(edit_style))
-            }
-        } else {
-            (Cell::from(gval), Cell::from(rval))
-        };
+                row.repo.clone()
+            };
 
-        let r = Row::new(vec![
-            Cell::from(row.field.as_str()),
-            gcell,
-            rcell,
-            Cell::from(row.effective.as_str()),
-        ]);
-        if is_selected {
-            r.style(Style::default().fg(Color::White).bg(Color::DarkGray))
-        } else if row.read_only {
-            r.style(Style::default().fg(Color::DarkGray))
-        } else {
-            r
-        }
-    }).collect();
+            let (gcell, rcell) = if is_selected && !state.editing {
+                let col_style = Style::default().fg(Color::Black).bg(Color::White);
+                if state.edit_column == 0 {
+                    (Cell::from(gval).style(col_style), Cell::from(rval))
+                } else {
+                    (Cell::from(gval), Cell::from(rval).style(col_style))
+                }
+            } else if is_selected && state.editing {
+                let edit_style = Style::default().fg(Color::Black).bg(Color::Green);
+                if state.edit_column == 0 {
+                    (Cell::from(gval).style(edit_style), Cell::from(rval))
+                } else {
+                    (Cell::from(gval), Cell::from(rval).style(edit_style))
+                }
+            } else {
+                (Cell::from(gval), Cell::from(rval))
+            };
+
+            let r = Row::new(vec![
+                Cell::from(row.field.as_str()),
+                gcell,
+                rcell,
+                Cell::from(row.effective.as_str()),
+            ]);
+            if is_selected {
+                r.style(Style::default().fg(Color::White).bg(Color::DarkGray))
+            } else if row.read_only {
+                r.style(Style::default().fg(Color::DarkGray))
+            } else {
+                r
+            }
+        })
+        .collect();
 
     let widths = [
         Constraint::Percentage(28),
@@ -1456,4 +1388,50 @@ fn render_config_show(
         ]));
     }
     frame.render_widget(Paragraph::new(hint_lines), hint_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_middle;
+
+    #[test]
+    fn long_path_truncated_with_middle_ellipsis() {
+        let long_path = "/home/user/projects/very-long-directory-name/another-long-part/file.txt";
+        let result = truncate_middle(long_path, 30);
+        assert!(
+            result.contains('\u{2026}'),
+            "long path must be truncated with '…', got: {result:?}"
+        );
+        assert!(
+            result.chars().count() <= 30,
+            "truncated string must be at most 30 chars, got {} chars: {result:?}",
+            result.chars().count()
+        );
+    }
+
+    #[test]
+    fn short_path_not_truncated() {
+        let short = "/home/user/foo";
+        let result = truncate_middle(short, 40);
+        assert_eq!(result, short, "path shorter than max must not be truncated");
+    }
+
+    #[test]
+    fn truncate_middle_exact_length_not_truncated() {
+        let s = "abcdefghij"; // 10 chars
+        let result = truncate_middle(s, 10);
+        assert_eq!(
+            result, s,
+            "string at exactly max chars must not be truncated"
+        );
+    }
+
+    #[test]
+    fn truncate_middle_preserves_prefix_and_suffix() {
+        let s = "start-middle-end";
+        let result = truncate_middle(s, 10);
+        assert!(result.starts_with("star"), "prefix must be preserved");
+        assert!(result.ends_with("end"), "suffix must be preserved");
+        assert!(result.contains('\u{2026}'));
+    }
 }

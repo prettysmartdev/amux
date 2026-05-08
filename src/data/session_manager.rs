@@ -174,10 +174,7 @@ mod tests {
     // ─── helpers ──────────────────────────────────────────────────────────────
 
     fn make_session(git_root: &std::path::Path, home_dir: &std::path::Path) -> Session {
-        let env = EnvSnapshot::with_overrides([(
-            AMUX_CONFIG_HOME,
-            home_dir.to_str().unwrap(),
-        )]);
+        let env = EnvSnapshot::with_overrides([(AMUX_CONFIG_HOME, home_dir.to_str().unwrap())]);
         let resolver = StaticGitRootResolver::new(git_root);
         let opts = SessionOpenOptions {
             env: Some(env),
@@ -326,7 +323,11 @@ mod tests {
         manager.update(id, |s| s.touch()).await.unwrap();
 
         let captured = store.captured_ids();
-        assert_eq!(captured.len(), 2, "upsert should be called on create AND update");
+        assert_eq!(
+            captured.len(),
+            2,
+            "upsert should be called on create AND update"
+        );
         assert_eq!(captured[0], id);
         assert_eq!(captured[1], id);
     }
@@ -365,7 +366,11 @@ mod tests {
         assert_eq!(ids.len(), N);
         // All IDs must be distinct.
         let unique: std::collections::HashSet<SessionId> = ids.into_iter().collect();
-        assert_eq!(unique.len(), N, "concurrent creates produced duplicate session IDs");
+        assert_eq!(
+            unique.len(),
+            N,
+            "concurrent creates produced duplicate session IDs"
+        );
         assert_eq!(manager.len().await, N);
     }
 
@@ -420,7 +425,11 @@ mod tests {
         // Phase 2: reopen the store and verify all 3 sessions are present.
         let store2 = SqliteSessionStore::open(db_tmp.path()).unwrap();
         let records = store2.list_sessions().unwrap();
-        assert_eq!(records.len(), 3, "expected 3 sessions in the reopened store");
+        assert_eq!(
+            records.len(),
+            3,
+            "expected 3 sessions in the reopened store"
+        );
 
         let record_ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
         for created_id in &created_ids {

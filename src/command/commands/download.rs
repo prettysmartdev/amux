@@ -157,8 +157,12 @@ impl Command for DownloadCommand {
                     level: MessageLevel::Info,
                     text: format!("download: fetching agent image for '{agent}'…"),
                 });
-                if let Err(e) = crate::engine::agent::download::download_agent_dockerfile(&agent, &dest, &project_tag)
-                    .await
+                if let Err(e) = crate::engine::agent::download::download_agent_dockerfile(
+                    &agent,
+                    &dest,
+                    &project_tag,
+                )
+                .await
                 {
                     let err = CommandError::Other(e.to_string());
                     frontend.write_message(UserMessage {
@@ -167,8 +171,9 @@ impl Command for DownloadCommand {
                     });
                     return Err(err);
                 }
-                let bytes_written =
-                    std::fs::metadata(&dest).map(|m| m.len() as usize).unwrap_or(0);
+                let bytes_written = std::fs::metadata(&dest)
+                    .map(|m| m.len() as usize)
+                    .unwrap_or(0);
                 DownloadOutcome {
                     asset: self.asset,
                     bytes_written,
@@ -191,7 +196,10 @@ mod tests {
 
     #[test]
     fn parse_recognises_aspec_aliases() {
-        assert_eq!(DownloadAsset::parse("aspec"), Some(DownloadAsset::AspecTarball));
+        assert_eq!(
+            DownloadAsset::parse("aspec"),
+            Some(DownloadAsset::AspecTarball)
+        );
         assert_eq!(
             DownloadAsset::parse("aspec-tarball"),
             Some(DownloadAsset::AspecTarball)

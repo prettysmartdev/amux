@@ -248,18 +248,8 @@ const ROOT: CommandSpec = CommandSpec {
         },
     ],
     subcommands: &[
-        &INIT,
-        &READY,
-        &IMPLEMENT,
-        &CHAT,
-        &SPECS,
-        &CLAWS,
-        &STATUS,
-        &CONFIG,
-        &EXEC,
-        &HEADLESS,
-        &REMOTE,
-        &NEW,
+        &INIT, &READY, &IMPLEMENT, &CHAT, &SPECS, &CLAWS, &STATUS, &CONFIG, &EXEC, &HEADLESS,
+        &REMOTE, &NEW,
     ],
 };
 
@@ -681,7 +671,12 @@ const HEADLESS: CommandSpec = CommandSpec {
     long_help: None,
     arguments: &[],
     flags: &[],
-    subcommands: &[&HEADLESS_START, &HEADLESS_KILL, &HEADLESS_LOGS, &HEADLESS_STATUS],
+    subcommands: &[
+        &HEADLESS_START,
+        &HEADLESS_KILL,
+        &HEADLESS_LOGS,
+        &HEADLESS_STATUS,
+    ],
 };
 
 const HEADLESS_START: CommandSpec = CommandSpec {
@@ -1515,8 +1510,18 @@ mod tests {
     fn every_top_level_legacy_command_is_present() {
         let cat = CommandCatalogue::get();
         for name in [
-            "init", "ready", "implement", "chat", "specs", "claws", "status",
-            "config", "exec", "headless", "remote", "new",
+            "init",
+            "ready",
+            "implement",
+            "chat",
+            "specs",
+            "claws",
+            "status",
+            "config",
+            "exec",
+            "headless",
+            "remote",
+            "new",
         ] {
             assert!(cat.lookup(&[name]).is_some(), "missing top-level '{name}'");
         }
@@ -1527,7 +1532,10 @@ mod tests {
         let cat = CommandCatalogue::get();
         let run = cat.lookup(&["remote", "run"]).unwrap();
         assert_eq!(run.arguments.len(), 1);
-        assert!(matches!(run.arguments[0].kind, ArgumentKind::TrailingVarArgs));
+        assert!(matches!(
+            run.arguments[0].kind,
+            ArgumentKind::TrailingVarArgs
+        ));
     }
 
     // ─── Data-table tests ─────────────────────────────────────────────────────
@@ -1543,56 +1551,306 @@ mod tests {
     }
 
     const FLAG_TABLE: &[FlagCheck] = &[
-        FlagCheck { path: &["init"], flag: "agent", is_bool: false, is_optional: true },
-        FlagCheck { path: &["init"], flag: "aspec", is_bool: true, is_optional: true },
-        FlagCheck { path: &["ready"], flag: "refresh", is_bool: true, is_optional: true },
-        FlagCheck { path: &["ready"], flag: "build", is_bool: true, is_optional: true },
-        FlagCheck { path: &["ready"], flag: "no-cache", is_bool: true, is_optional: true },
-        FlagCheck { path: &["ready"], flag: "non-interactive", is_bool: true, is_optional: true },
-        FlagCheck { path: &["ready"], flag: "allow-docker", is_bool: true, is_optional: true },
-        FlagCheck { path: &["ready"], flag: "json", is_bool: true, is_optional: true },
-        FlagCheck { path: &["chat"], flag: "non-interactive", is_bool: true, is_optional: true },
-        FlagCheck { path: &["chat"], flag: "plan", is_bool: true, is_optional: true },
-        FlagCheck { path: &["chat"], flag: "yolo", is_bool: true, is_optional: true },
-        FlagCheck { path: &["chat"], flag: "auto", is_bool: true, is_optional: true },
-        FlagCheck { path: &["chat"], flag: "allow-docker", is_bool: true, is_optional: true },
-        FlagCheck { path: &["chat"], flag: "mount-ssh", is_bool: true, is_optional: true },
-        FlagCheck { path: &["chat"], flag: "agent", is_bool: false, is_optional: true },
-        FlagCheck { path: &["chat"], flag: "model", is_bool: false, is_optional: true },
-        FlagCheck { path: &["chat"], flag: "overlay", is_bool: false, is_optional: true },
-        FlagCheck { path: &["exec", "workflow"], flag: "yolo", is_bool: true, is_optional: true },
-        FlagCheck { path: &["exec", "workflow"], flag: "auto", is_bool: true, is_optional: true },
-        FlagCheck { path: &["exec", "workflow"], flag: "worktree", is_bool: true, is_optional: true },
-        FlagCheck { path: &["exec", "workflow"], flag: "work-item", is_bool: false, is_optional: true },
-        FlagCheck { path: &["exec", "workflow"], flag: "plan", is_bool: true, is_optional: true },
-        FlagCheck { path: &["exec", "prompt"], flag: "yolo", is_bool: true, is_optional: true },
-        FlagCheck { path: &["exec", "prompt"], flag: "overlay", is_bool: false, is_optional: true },
-        FlagCheck { path: &["status"], flag: "watch", is_bool: true, is_optional: true },
-        FlagCheck { path: &["config", "set"], flag: "global", is_bool: true, is_optional: true },
-        FlagCheck { path: &["headless", "start"], flag: "port", is_bool: false, is_optional: true },
-        FlagCheck { path: &["headless", "start"], flag: "workdirs", is_bool: false, is_optional: true },
-        FlagCheck { path: &["headless", "start"], flag: "background", is_bool: true, is_optional: true },
-        FlagCheck { path: &["headless", "start"], flag: "refresh-key", is_bool: true, is_optional: true },
-        FlagCheck { path: &["headless", "start"], flag: "dangerously-skip-auth", is_bool: true, is_optional: true },
-        FlagCheck { path: &["remote", "run"], flag: "follow", is_bool: true, is_optional: true },
-        FlagCheck { path: &["remote", "run"], flag: "api-key", is_bool: false, is_optional: true },
-        FlagCheck { path: &["remote", "run"], flag: "remote-addr", is_bool: false, is_optional: true },
-        FlagCheck { path: &["remote", "session", "start"], flag: "api-key", is_bool: false, is_optional: true },
-        FlagCheck { path: &["remote", "session", "kill"], flag: "remote-addr", is_bool: false, is_optional: true },
-        FlagCheck { path: &["new", "workflow"], flag: "format", is_bool: false, is_optional: true },
-        FlagCheck { path: &["new", "workflow"], flag: "interview", is_bool: true, is_optional: true },
-        FlagCheck { path: &["new", "workflow"], flag: "global", is_bool: true, is_optional: true },
-        FlagCheck { path: &["new", "skill"], flag: "interview", is_bool: true, is_optional: true },
-        FlagCheck { path: &["new", "skill"], flag: "global", is_bool: true, is_optional: true },
-        FlagCheck { path: &["new", "spec"], flag: "interview", is_bool: true, is_optional: true },
-        FlagCheck { path: &["specs", "new"], flag: "interview", is_bool: true, is_optional: true },
-        FlagCheck { path: &["specs", "amend"], flag: "non-interactive", is_bool: true, is_optional: true },
-        FlagCheck { path: &["specs", "amend"], flag: "allow-docker", is_bool: true, is_optional: true },
-        FlagCheck { path: &["implement"], flag: "worktree", is_bool: true, is_optional: true },
-        FlagCheck { path: &["implement"], flag: "workflow", is_bool: false, is_optional: true },
-        FlagCheck { path: &["implement"], flag: "yolo", is_bool: true, is_optional: true },
-        FlagCheck { path: &["implement"], flag: "auto", is_bool: true, is_optional: true },
-        FlagCheck { path: &["implement"], flag: "plan", is_bool: true, is_optional: true },
+        FlagCheck {
+            path: &["init"],
+            flag: "agent",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["init"],
+            flag: "aspec",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["ready"],
+            flag: "refresh",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["ready"],
+            flag: "build",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["ready"],
+            flag: "no-cache",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["ready"],
+            flag: "non-interactive",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["ready"],
+            flag: "allow-docker",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["ready"],
+            flag: "json",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["chat"],
+            flag: "non-interactive",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["chat"],
+            flag: "plan",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["chat"],
+            flag: "yolo",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["chat"],
+            flag: "auto",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["chat"],
+            flag: "allow-docker",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["chat"],
+            flag: "mount-ssh",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["chat"],
+            flag: "agent",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["chat"],
+            flag: "model",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["chat"],
+            flag: "overlay",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["exec", "workflow"],
+            flag: "yolo",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["exec", "workflow"],
+            flag: "auto",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["exec", "workflow"],
+            flag: "worktree",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["exec", "workflow"],
+            flag: "work-item",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["exec", "workflow"],
+            flag: "plan",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["exec", "prompt"],
+            flag: "yolo",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["exec", "prompt"],
+            flag: "overlay",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["status"],
+            flag: "watch",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["config", "set"],
+            flag: "global",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["headless", "start"],
+            flag: "port",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["headless", "start"],
+            flag: "workdirs",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["headless", "start"],
+            flag: "background",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["headless", "start"],
+            flag: "refresh-key",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["headless", "start"],
+            flag: "dangerously-skip-auth",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["remote", "run"],
+            flag: "follow",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["remote", "run"],
+            flag: "api-key",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["remote", "run"],
+            flag: "remote-addr",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["remote", "session", "start"],
+            flag: "api-key",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["remote", "session", "kill"],
+            flag: "remote-addr",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["new", "workflow"],
+            flag: "format",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["new", "workflow"],
+            flag: "interview",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["new", "workflow"],
+            flag: "global",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["new", "skill"],
+            flag: "interview",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["new", "skill"],
+            flag: "global",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["new", "spec"],
+            flag: "interview",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["specs", "new"],
+            flag: "interview",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["specs", "amend"],
+            flag: "non-interactive",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["specs", "amend"],
+            flag: "allow-docker",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["implement"],
+            flag: "worktree",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["implement"],
+            flag: "workflow",
+            is_bool: false,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["implement"],
+            flag: "yolo",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["implement"],
+            flag: "auto",
+            is_bool: true,
+            is_optional: true,
+        },
+        FlagCheck {
+            path: &["implement"],
+            flag: "plan",
+            is_bool: true,
+            is_optional: true,
+        },
     ];
 
     #[test]
@@ -1614,7 +1872,8 @@ mod tests {
                 matches!(flag.kind, FlagKind::Bool),
                 case.is_bool,
                 "is_bool mismatch for '{}' on {:?}",
-                case.flag, case.path
+                case.flag,
+                case.path
             );
         }
     }
@@ -1666,7 +1925,10 @@ mod tests {
         let yolo = chat.find_flag("yolo").unwrap();
         assert!(plan.conflicts_with("yolo"), "plan must conflict with yolo");
         assert!(yolo.conflicts_with("plan"), "yolo must conflict with plan");
-        assert!(!plan.conflicts_with("non-interactive"), "plan must NOT conflict with non-interactive");
+        assert!(
+            !plan.conflicts_with("non-interactive"),
+            "plan must NOT conflict with non-interactive"
+        );
     }
 
     #[test]
@@ -1677,7 +1939,8 @@ mod tests {
             assert!(
                 matches!(flag.frontends, FrontendVisibility::CliOnly),
                 "headless start flag '{}' must be CliOnly, got {:?}",
-                flag.long, flag.frontends
+                flag.long,
+                flag.frontends
             );
         }
     }

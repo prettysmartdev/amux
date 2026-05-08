@@ -38,7 +38,10 @@ impl ContainerRuntime {
                 }
             }
             Some(other) => {
-                eprintln!("amux: warning: unknown runtime '{}', falling back to Docker", other);
+                eprintln!(
+                    "amux: warning: unknown runtime '{}', falling back to Docker",
+                    other
+                );
                 Backend::Docker
             }
         };

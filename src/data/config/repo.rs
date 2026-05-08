@@ -41,7 +41,10 @@ pub struct RemoteConfig {
 pub struct HeadlessConfig {
     #[serde(rename = "workDirs", skip_serializing_if = "Option::is_none")]
     pub work_dirs: Option<Vec<String>>,
-    #[serde(rename = "alwaysNonInteractive", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "alwaysNonInteractive",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub always_non_interactive: Option<bool>,
 }
 
@@ -84,7 +87,10 @@ pub struct RepoConfig {
     pub auto_agent_auth_accepted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_scrollback_lines: Option<usize>,
-    #[serde(rename = "yoloDisallowedTools", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "yoloDisallowedTools",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub yolo_disallowed_tools: Option<Vec<String>>,
     #[serde(rename = "envPassthrough", skip_serializing_if = "Option::is_none")]
     pub env_passthrough: Option<Vec<String>>,
@@ -128,8 +134,8 @@ impl RepoConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| DataError::io(parent, e))?;
         }
-        let content =
-            serde_json::to_string_pretty(self).map_err(|e| DataError::ConfigSerialize { source: e })?;
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| DataError::ConfigSerialize { source: e })?;
         std::fs::write(&path, content).map_err(|e| DataError::io(&path, e))
     }
 
@@ -142,8 +148,7 @@ impl RepoConfig {
         if !legacy.exists() || current.exists() {
             return Ok(false);
         }
-        let content =
-            std::fs::read_to_string(&legacy).map_err(|e| DataError::io(&legacy, e))?;
+        let content = std::fs::read_to_string(&legacy).map_err(|e| DataError::io(&legacy, e))?;
         if let Some(parent) = current.parent() {
             std::fs::create_dir_all(parent).map_err(|e| DataError::io(parent, e))?;
         }
@@ -188,8 +193,10 @@ impl RepoConfig {
 
     /// Resolve the work item template path, falling back to `<work_items_dir>/0000-template.md`.
     pub fn work_items_template_or_default(&self, git_root: &Path) -> PathBuf {
-        self.work_items_template(git_root)
-            .unwrap_or_else(|| self.work_items_dir_or_default(git_root).join("0000-template.md"))
+        self.work_items_template(git_root).unwrap_or_else(|| {
+            self.work_items_dir_or_default(git_root)
+                .join("0000-template.md")
+        })
     }
 
     /// Replace the `workItems` config block. The chained `save(git_root)` call
@@ -278,7 +285,10 @@ mod tests {
         std::fs::write(new_dir.join(REPO_CONFIG_FILENAME), r#"{"agent":"new"}"#).unwrap();
 
         let migrated = RepoConfig::migrate_legacy(tmp.path()).unwrap();
-        assert!(!migrated, "migration should be a no-op when new file already exists");
+        assert!(
+            !migrated,
+            "migration should be a no-op when new file already exists"
+        );
         // Legacy file should still be there.
         assert!(RepoConfig::legacy_path(tmp.path()).exists());
     }
@@ -329,7 +339,12 @@ mod tests {
     fn path_is_inside_amux_subdir() {
         let tmp = make_git_root();
         let p = RepoConfig::path(tmp.path());
-        assert_eq!(p, tmp.path().join(REPO_CONFIG_SUBDIR).join(REPO_CONFIG_FILENAME));
+        assert_eq!(
+            p,
+            tmp.path()
+                .join(REPO_CONFIG_SUBDIR)
+                .join(REPO_CONFIG_FILENAME)
+        );
     }
 
     #[test]

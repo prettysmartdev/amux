@@ -16,7 +16,10 @@ use crate::command::error::CommandError;
 use crate::engine::container::frontend::ContainerIo;
 use crate::engine::message::{UserMessage, UserMessageSink};
 use crate::frontend::tui::dialogs::{DialogRequest, DialogResponse};
-use crate::frontend::tui::tabs::{SharedActiveWorktreePath, SharedContainerName, SharedControlBoardTx, SharedPtyResetFlag, SharedResizeTx, SharedStdinTx, SharedWorkflowViewState, SharedYoloCtrlW, SharedYoloState};
+use crate::frontend::tui::tabs::{
+    SharedActiveWorktreePath, SharedContainerName, SharedControlBoardTx, SharedPtyResetFlag,
+    SharedResizeTx, SharedStdinTx, SharedWorkflowViewState, SharedYoloCtrlW, SharedYoloState,
+};
 use crate::frontend::tui::user_message::{SharedStatusLog, TuiUserMessageSink};
 
 /// TUI frontend struct. Implements every per-command frontend trait.
@@ -53,10 +56,12 @@ pub struct TuiCommandFrontend {
     /// Shared slot for the stdin sender. When a new workflow step creates
     /// fresh stdin channels, the new sender is placed here so the TUI event
     /// loop can pick it up and forward keystrokes to the new container.
-    pub(crate) stdin_tx_shared: std::sync::Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
+    pub(crate) stdin_tx_shared:
+        std::sync::Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
     /// Shared slot for the resize sender, same pattern as stdin_tx_shared.
     #[allow(clippy::type_complexity)]
-    pub(crate) resize_tx_shared: std::sync::Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u16, u16)>>>>,
+    pub(crate) resize_tx_shared:
+        std::sync::Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u16, u16)>>>>,
     /// Shared slot for the control board sender. The engine publishes the
     /// sender here via `set_control_board_sender`; the TUI event loop reads
     /// it to send mid-step WCB requests.
@@ -181,16 +186,20 @@ impl UserMessageSink for TuiCommandFrontend {
 // ─── CommandFrontend ──────────────────────────────────────────────────────
 
 impl CommandFrontend for TuiCommandFrontend {
-    fn flag_bool(
-        &self,
-        _command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<bool>, CommandError> {
+    fn flag_bool(&self, _command_path: &[&str], flag: &str) -> Result<Option<bool>, CommandError> {
         match self.parsed.flags.get(flag) {
             Some(FlagValue::Bool(v)) => Ok(Some(*v)),
             Some(_) => Ok(Some(true)),
             None => {
-                if self.is_known_bool_flag(&self.parsed.path.iter().map(|s| s.as_str()).collect::<Vec<_>>(), flag) {
+                if self.is_known_bool_flag(
+                    &self
+                        .parsed
+                        .path
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>(),
+                    flag,
+                ) {
                     Ok(Some(false))
                 } else {
                     Ok(None)
@@ -233,37 +242,26 @@ impl CommandFrontend for TuiCommandFrontend {
         }
     }
 
-    fn flag_enum(
-        &self,
-        command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<String>, CommandError> {
+    fn flag_enum(&self, command_path: &[&str], flag: &str) -> Result<Option<String>, CommandError> {
         self.flag_string(command_path, flag)
     }
 
-    fn flag_u16(
-        &self,
-        _command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<u16>, CommandError> {
+    fn flag_u16(&self, _command_path: &[&str], flag: &str) -> Result<Option<u16>, CommandError> {
         match self.parsed.flags.get(flag) {
-            Some(FlagValue::String(v)) => v
-                .parse::<u16>()
-                .map(Some)
-                .map_err(|_| CommandError::InvalidFlagValue {
-                    command: self.parsed.path.clone(),
-                    flag: flag.to_string(),
-                    reason: format!("'{v}' is not a valid u16"),
-                }),
+            Some(FlagValue::String(v)) => {
+                v.parse::<u16>()
+                    .map(Some)
+                    .map_err(|_| CommandError::InvalidFlagValue {
+                        command: self.parsed.path.clone(),
+                        flag: flag.to_string(),
+                        reason: format!("'{v}' is not a valid u16"),
+                    })
+            }
             _ => Ok(None),
         }
     }
 
-    fn argument(
-        &self,
-        _command_path: &[&str],
-        name: &str,
-    ) -> Result<Option<String>, CommandError> {
+    fn argument(&self, _command_path: &[&str], name: &str) -> Result<Option<String>, CommandError> {
         match self.parsed.arguments.get(name) {
             Some(ArgValue::Single(v)) => Ok(Some(v.clone())),
             Some(ArgValue::Multi(v)) => Ok(Some(v.join(" "))),
@@ -271,11 +269,7 @@ impl CommandFrontend for TuiCommandFrontend {
         }
     }
 
-    fn arguments(
-        &self,
-        _command_path: &[&str],
-        name: &str,
-    ) -> Result<Vec<String>, CommandError> {
+    fn arguments(&self, _command_path: &[&str], name: &str) -> Result<Vec<String>, CommandError> {
         match self.parsed.arguments.get(name) {
             Some(ArgValue::Multi(v)) => Ok(v.clone()),
             Some(ArgValue::Single(v)) => Ok(vec![v.clone()]),

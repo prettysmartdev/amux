@@ -1,7 +1,7 @@
 //! Command input area — wraps `TextEdit` for the command box.
 
-use crate::command::dispatch::Dispatch;
 use crate::command::dispatch::parsed_input::ParsedCommandBoxInput;
+use crate::command::dispatch::Dispatch;
 use crate::command::error::CommandError;
 use crate::frontend::tui::command_frontend::TuiCommandFrontend;
 
@@ -39,12 +39,7 @@ pub fn format_parse_error(err: &CommandError) -> String {
 fn find_suggestion(input: &str) -> Option<String> {
     use crate::command::dispatch::catalogue::CommandCatalogue;
     let cat = CommandCatalogue::get();
-    let names: Vec<&str> = cat
-        .root()
-        .subcommands
-        .iter()
-        .map(|s| s.name)
-        .collect();
+    let names: Vec<&str> = cat.root().subcommands.iter().map(|s| s.name).collect();
 
     let mut best: Option<(&str, usize)> = None;
     for name in &names {
@@ -115,7 +110,10 @@ mod tests {
             msg.contains("did you mean"),
             "close match must show 'did you mean', got: {msg}"
         );
-        assert!(msg.contains("chat"), "suggestion must include 'chat', got: {msg}");
+        assert!(
+            msg.contains("chat"),
+            "suggestion must include 'chat', got: {msg}"
+        );
     }
 
     #[test]
@@ -138,13 +136,19 @@ mod tests {
             flag: "bogus".to_string(),
         };
         let msg = format_parse_error(&err);
-        assert!(msg.contains("bogus"), "must mention the unknown flag, got: {msg}");
+        assert!(
+            msg.contains("bogus"),
+            "must mention the unknown flag, got: {msg}"
+        );
     }
 
     #[test]
     fn format_parse_error_command_box_parse_passes_through_message() {
         let err = CommandError::CommandBoxParse("tokenize failed: bad input".to_string());
         let msg = format_parse_error(&err);
-        assert!(msg.contains("tokenize failed"), "must include original message, got: {msg}");
+        assert!(
+            msg.contains("tokenize failed"),
+            "must include original message, got: {msg}"
+        );
     }
 }

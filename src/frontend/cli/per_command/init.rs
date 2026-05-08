@@ -1,8 +1,8 @@
 //! `InitFrontend` impl for the CLI.
 //!
-//! Per WI 0069 §1, the CLI prompts on stdin (when it is a TTY) for aspec
-//! replacement, audit, and work-items config; otherwise it returns the
-//! safe defaults from §7u.
+//! The CLI prompts on stdin (when it is a TTY) for aspec replacement,
+//! audit, and work-items config; otherwise it returns the safe
+//! non-interactive defaults.
 
 use crate::data::config::repo::WorkItemsConfig;
 use crate::engine::container::frontend::ContainerFrontend;
@@ -46,7 +46,9 @@ impl InitFrontend for CliFrontend {
         if !stdin_is_tty() {
             return Ok(None);
         }
-        eprintln!("amux: Configure a work items directory? (path relative to repo root, empty to skip)");
+        eprintln!(
+            "amux: Configure a work items directory? (path relative to repo root, empty to skip)"
+        );
         let mut buf = String::new();
         if std::io::stdin().read_line(&mut buf).is_err() {
             return Ok(None);

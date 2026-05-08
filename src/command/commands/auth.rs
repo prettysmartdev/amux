@@ -85,6 +85,9 @@ impl Command for AuthCommand {
             }
         }
         frontend.replay_queued();
-        Ok(AuthOutcome { accepted, persisted })
+        Ok(AuthOutcome {
+            accepted,
+            persisted,
+        })
     }
 }

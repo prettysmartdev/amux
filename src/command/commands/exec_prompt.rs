@@ -7,8 +7,8 @@ use crate::command::commands::agent_auth::AgentAuthFrontend;
 use crate::command::commands::agent_setup::AgentSetupFrontend;
 use crate::command::commands::chat::{open_session_for_cwd, resolve_agent};
 use crate::command::commands::mount_scope::MountScopeFrontend;
-use crate::command::commands::{collect_all_overlay_specs, parse_overlay_spec};
 use crate::command::commands::Command;
+use crate::command::commands::{collect_all_overlay_specs, parse_overlay_spec};
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
 use crate::data::session::{AgentName, Session};
@@ -65,13 +65,9 @@ async fn ensure_exec_prompt_agent_setup(
         crate::command::commands::agent_setup::AgentFrontendAdapter::new(frontend.as_mut());
     let runtime = std::sync::Arc::clone(agent_engine.container_runtime_arc());
     agent_engine
-        .ensure_available(
-            session,
-            agent,
-            &config,
-            &mut adapter,
-            move |tag: &str| runtime.image_exists(tag),
-        )
+        .ensure_available(session, agent, &config, &mut adapter, move |tag: &str| {
+            runtime.image_exists(tag)
+        })
         .await
         .map_err(CommandError::from)
 }
@@ -215,9 +211,11 @@ impl Command for ExecPromptCommand {
             }
         };
         if !credentials.env_vars.is_empty() {
-            options.push(crate::engine::container::options::ContainerOption::AgentCredentials {
-                env_vars: credentials.env_vars,
-            });
+            options.push(
+                crate::engine::container::options::ContainerOption::AgentCredentials {
+                    env_vars: credentials.env_vars,
+                },
+            );
         }
 
         let instance = match self.engines.runtime.build(options) {

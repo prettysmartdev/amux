@@ -1,15 +1,14 @@
 //! `CliFrontend` — the single Layer 3 struct that implements every
 //! per-command frontend trait for the CLI execution mode.
 //!
-//! Per WI 0069 §1, the CLI frontend is intentionally small: it pulls flag
-//! values from a parsed `clap::ArgMatches`, queues `UserMessage`s while a
-//! container PTY owns the terminal, and prompts on stdin for the small
-//! number of interactive decisions that the catalogue requires.
+//! The CLI frontend is intentionally small: it pulls flag values from a
+//! parsed `clap::ArgMatches`, queues `UserMessage`s while a container PTY
+//! owns the terminal, and prompts on stdin for the small number of
+//! interactive decisions that the catalogue requires.
 //!
 //! The full per-command rendering (dialog widgets, progress UIs, etc.) is
-//! implemented by the TUI in WI 0070; the CLI uses safe non-interactive
-//! defaults for any interactive Q&A when stdin is not a TTY, matching the
-//! headless defaults table from WI 0069 §7u.
+//! handled by the TUI; the CLI uses safe non-interactive defaults for any
+//! interactive Q&A when stdin is not a TTY.
 
 use std::path::PathBuf;
 
@@ -17,15 +16,15 @@ use clap::ArgMatches;
 
 use crate::command::commands::status::StatusCommandFrontend;
 use crate::command::commands::{
-    auth::AuthCommandFrontend, config::ConfigCommandFrontend,
-    download::DownloadCommandFrontend, new::NewCommandFrontend,
+    auth::AuthCommandFrontend,
+    config::ConfigCommandFrontend,
+    download::DownloadCommandFrontend,
+    new::NewCommandFrontend,
     remote::RemoteCommandFrontend,
     specs::{SpecsCommandFrontend, WorkItemKind},
 };
+use crate::command::dispatch::catalogue::{ArgumentKind, CommandCatalogue, FlagKind};
 use crate::command::dispatch::CommandFrontend;
-use crate::command::dispatch::catalogue::{
-    ArgumentKind, CommandCatalogue, FlagKind,
-};
 use crate::command::error::CommandError;
 use crate::engine::container::frontend::ContainerFrontend;
 use crate::engine::message::{UserMessage, UserMessageSink};
@@ -122,11 +121,7 @@ impl UserMessageSink for CliFrontend {
 // ─── CommandFrontend ───────────────────────────────────────────────────────
 
 impl CommandFrontend for CliFrontend {
-    fn flag_bool(
-        &self,
-        command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<bool>, CommandError> {
+    fn flag_bool(&self, command_path: &[&str], flag: &str) -> Result<Option<bool>, CommandError> {
         let Some(m) = self.matches_for(command_path) else {
             return Ok(None);
         };
@@ -152,11 +147,7 @@ impl CommandFrontend for CliFrontend {
         Ok(m.get_one::<String>(flag).cloned())
     }
 
-    fn flag_strings(
-        &self,
-        command_path: &[&str],
-        flag: &str,
-    ) -> Result<Vec<String>, CommandError> {
+    fn flag_strings(&self, command_path: &[&str], flag: &str) -> Result<Vec<String>, CommandError> {
         let Some(m) = self.matches_for(command_path) else {
             return Ok(Vec::new());
         };
@@ -176,31 +167,19 @@ impl CommandFrontend for CliFrontend {
         Ok(m.get_one::<String>(flag).map(PathBuf::from))
     }
 
-    fn flag_enum(
-        &self,
-        command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<String>, CommandError> {
+    fn flag_enum(&self, command_path: &[&str], flag: &str) -> Result<Option<String>, CommandError> {
         // Enum flags are stored as strings in our clap projection.
         self.flag_string(command_path, flag)
     }
 
-    fn flag_u16(
-        &self,
-        command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<u16>, CommandError> {
+    fn flag_u16(&self, command_path: &[&str], flag: &str) -> Result<Option<u16>, CommandError> {
         let Some(m) = self.matches_for(command_path) else {
             return Ok(None);
         };
         Ok(m.get_one::<u16>(flag).copied())
     }
 
-    fn argument(
-        &self,
-        command_path: &[&str],
-        name: &str,
-    ) -> Result<Option<String>, CommandError> {
+    fn argument(&self, command_path: &[&str], name: &str) -> Result<Option<String>, CommandError> {
         let Some(m) = self.matches_for(command_path) else {
             return Ok(None);
         };
@@ -225,11 +204,7 @@ impl CommandFrontend for CliFrontend {
         Ok(m.get_one::<String>(name).cloned())
     }
 
-    fn arguments(
-        &self,
-        command_path: &[&str],
-        name: &str,
-    ) -> Result<Vec<String>, CommandError> {
+    fn arguments(&self, command_path: &[&str], name: &str) -> Result<Vec<String>, CommandError> {
         let Some(m) = self.matches_for(command_path) else {
             return Ok(Vec::new());
         };
@@ -293,7 +268,10 @@ impl ConfigCommandFrontend for CliFrontend {
     fn present_config_table(
         &mut self,
         _rows: &[crate::command::commands::config::ConfigFieldRow],
-    ) -> Result<Option<crate::command::commands::config::ConfigEditRequest>, crate::command::error::CommandError> {
+    ) -> Result<
+        Option<crate::command::commands::config::ConfigEditRequest>,
+        crate::command::error::CommandError,
+    > {
         Ok(None)
     }
 }
@@ -420,8 +398,7 @@ impl StatusCommandFrontend for CliFrontend {
 /// Process-global flag flipped to `true` when SIGINT arrives. Only consulted
 /// by `StatusCommandFrontend::should_continue_watching` for the CLI; other
 /// frontends manage their own interrupt semantics.
-static WATCH_INTERRUPTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static WATCH_INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the SIGINT-watcher task has been spawned yet (it must be spawned
 /// inside an async runtime, and we only want one instance).
@@ -604,13 +581,14 @@ mod tests {
         let cat = CommandCatalogue::get();
         let clap_cmd = cat.build_clap_command();
         for (i, case) in cases.iter().enumerate() {
-            let m = clap_cmd.clone().try_get_matches_from(case.argv).unwrap_or_else(|e| {
-                panic!("case {i}: failed to parse {:?}: {e}", case.argv)
-            });
+            let m = clap_cmd
+                .clone()
+                .try_get_matches_from(case.argv)
+                .unwrap_or_else(|e| panic!("case {i}: failed to parse {:?}: {e}", case.argv));
             let frontend = CliFrontend::new(m);
-            let got = frontend.flag_bool(case.path, case.flag).unwrap_or_else(|e| {
-                panic!("case {i}: flag_bool error: {e}")
-            });
+            let got = frontend
+                .flag_bool(case.path, case.flag)
+                .unwrap_or_else(|e| panic!("case {i}: flag_bool error: {e}"));
             assert_eq!(got, case.expected, "case {i}: argv={:?}", case.argv);
         }
     }
@@ -762,9 +740,7 @@ mod tests {
             .try_get_matches_from(["amux", "headless", "start", "--port", "1234"])
             .unwrap();
         let frontend = CliFrontend::new(m);
-        let v = frontend
-            .flag_u16(&["headless", "start"], "port")
-            .unwrap();
+        let v = frontend.flag_u16(&["headless", "start"], "port").unwrap();
         assert_eq!(v, Some(1234u16));
     }
 
@@ -776,9 +752,7 @@ mod tests {
             .unwrap();
         let frontend = CliFrontend::new(m);
         // Default for `--port` on `headless start` is 9876.
-        let v = frontend
-            .flag_u16(&["headless", "start"], "port")
-            .unwrap();
+        let v = frontend.flag_u16(&["headless", "start"], "port").unwrap();
         assert_eq!(v, Some(9876u16));
     }
 
@@ -787,9 +761,7 @@ mod tests {
         let cmd = CommandCatalogue::get().build_clap_command();
         let m = cmd.try_get_matches_from(["amux", "status"]).unwrap();
         let frontend = CliFrontend::new(m);
-        let v = frontend
-            .flag_u16(&["headless", "start"], "port")
-            .unwrap();
+        let v = frontend.flag_u16(&["headless", "start"], "port").unwrap();
         assert_eq!(v, None);
     }
 
@@ -802,9 +774,7 @@ mod tests {
             .try_get_matches_from(["amux", "implement", "0069"])
             .unwrap();
         let frontend = CliFrontend::new(m);
-        let v = frontend
-            .argument(&["implement"], "work_item")
-            .unwrap();
+        let v = frontend.argument(&["implement"], "work_item").unwrap();
         assert_eq!(v, Some("0069".to_string()));
     }
 
@@ -835,9 +805,7 @@ mod tests {
         let cmd = CommandCatalogue::get().build_clap_command();
         let m = cmd.try_get_matches_from(["amux", "status"]).unwrap();
         let frontend = CliFrontend::new(m);
-        let v = frontend
-            .argument(&["implement"], "work_item")
-            .unwrap();
+        let v = frontend.argument(&["implement"], "work_item").unwrap();
         assert_eq!(v, None);
     }
 
@@ -859,9 +827,7 @@ mod tests {
         let cmd = CommandCatalogue::get().build_clap_command();
         let m = cmd.try_get_matches_from(["amux", "status"]).unwrap();
         let frontend = CliFrontend::new(m);
-        let v = frontend
-            .arguments(&["remote", "run"], "command")
-            .unwrap();
+        let v = frontend.arguments(&["remote", "run"], "command").unwrap();
         assert!(v.is_empty());
     }
 
@@ -884,10 +850,7 @@ mod tests {
             ])
             .unwrap();
         let frontend = CliFrontend::new(m);
-        assert_eq!(
-            frontend.flag_bool(&["chat"], "yolo").unwrap(),
-            Some(true)
-        );
+        assert_eq!(frontend.flag_bool(&["chat"], "yolo").unwrap(), Some(true));
         assert_eq!(
             frontend.flag_string(&["chat"], "agent").unwrap(),
             Some("gemini".to_string())

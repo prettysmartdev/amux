@@ -38,10 +38,7 @@ impl ReadyFrontend for TuiCommandFrontend {
         ))
     }
 
-    fn ask_migrate_legacy_layout(
-        &mut self,
-        agent_name: &AgentName,
-    ) -> Result<bool, EngineError> {
+    fn ask_migrate_legacy_layout(&mut self, agent_name: &AgentName) -> Result<bool, EngineError> {
         let response = self
             .ask_dialog(DialogRequest::YesNo {
                 title: "Migrate layout?".into(),
@@ -92,21 +89,20 @@ impl ReadyFrontend for TuiCommandFrontend {
             rows.push((&agent_labels[i], status));
         }
 
-        let box_str = render_summary_box(
-            &format!("Ready Summary ({})", summary.runtime_name),
-            &rows,
-        );
+        let box_str =
+            render_summary_box(&format!("Ready Summary ({})", summary.runtime_name), &rows);
         for line in box_str.lines() {
             let s: String = line.to_string();
             self.messages.info(s);
         }
 
-        let has_missing = summary.non_default_agent_images.iter().any(|(_, s)| {
-            matches!(s, crate::engine::step_status::StepStatus::Warn(_))
-        });
+        let has_missing = summary
+            .non_default_agent_images
+            .iter()
+            .any(|(_, s)| matches!(s, crate::engine::step_status::StepStatus::Warn(_)));
         if has_missing {
             self.messages.info(
-                "Tip: run \"ready --build\" to build all available agent images.".to_string()
+                "Tip: run \"ready --build\" to build all available agent images.".to_string(),
             );
         }
 
@@ -129,8 +125,7 @@ mod tests {
         let (resp_tx, resp_rx) = std::sync::mpsc::channel::<DialogResponse>();
         let (stdout_tx, _stdout_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        let (_resize_tx, resize_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(u16, u16)>();
+        let (_resize_tx, resize_rx) = tokio::sync::mpsc::unbounded_channel::<(u16, u16)>();
         let container_io = crate::engine::container::frontend::ContainerIo {
             stdout: stdout_tx,
             stdin_tx,
@@ -146,12 +141,8 @@ mod tests {
         };
         let workflow_view = std::sync::Arc::new(std::sync::Mutex::new(None));
         let yolo_state = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let yolo_ctrl_w = std::sync::Arc::new(
-            std::sync::atomic::AtomicBool::new(false),
-        );
-        let pty_reset_flag = std::sync::Arc::new(
-            std::sync::atomic::AtomicBool::new(false),
-        );
+        let yolo_ctrl_w = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pty_reset_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let frontend = TuiCommandFrontend::new(
             parsed,
             status_log,

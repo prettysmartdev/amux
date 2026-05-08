@@ -2,9 +2,8 @@
 
 use async_trait::async_trait;
 
-use crate::command::commands::headless::HeadlessCommandFrontend;
+use crate::command::commands::headless::{HeadlessCommandFrontend, HeadlessServeConfig};
 use crate::command::error::CommandError;
-use crate::frontend::headless::HeadlessServeConfig;
 use crate::frontend::tui::command_frontend::TuiCommandFrontend;
 
 #[async_trait]

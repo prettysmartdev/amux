@@ -12,12 +12,31 @@ use crate::frontend::tui::text_edit::TextEdit;
 /// A dialog request sent from the command thread to the event loop.
 #[derive(Debug)]
 pub enum DialogRequest {
-    YesNo { title: String, body: String },
-    YesNoCancel { title: String, body: String },
-    TextInput { title: String, prompt: String, default_text: Option<String> },
-    MultilineInput { title: String, prompt: String },
-    ListPicker { title: String, items: Vec<String> },
-    KindSelect { title: String, options: Vec<(String, String)> },
+    YesNo {
+        title: String,
+        body: String,
+    },
+    YesNoCancel {
+        title: String,
+        body: String,
+    },
+    TextInput {
+        title: String,
+        prompt: String,
+        default_text: Option<String>,
+    },
+    MultilineInput {
+        title: String,
+        prompt: String,
+    },
+    ListPicker {
+        title: String,
+        items: Vec<String>,
+    },
+    KindSelect {
+        title: String,
+        options: Vec<(String, String)>,
+    },
     WorkflowControlBoard(WorkflowControlBoardState),
     WorkflowStepError(WorkflowStepErrorState),
     WorkflowYoloCountdown(WorkflowYoloCountdownState),
@@ -31,9 +50,17 @@ pub enum DialogRequest {
     /// workflow is running. `y` aborts the workflow (kills the container,
     /// returns the current step to Pending), `n`/`Esc` keeps it running.
     WorkflowCancelConfirm,
-    ConfigShow { rows: Vec<ConfigShowRow> },
-    Loading { title: String },
-    Custom { title: String, body: String, keys: Vec<(char, String)> },
+    ConfigShow {
+        rows: Vec<ConfigShowRow>,
+    },
+    Loading {
+        title: String,
+    },
+    Custom {
+        title: String,
+        body: String,
+        keys: Vec<(char, String)>,
+    },
 }
 
 /// A dialog response returned from the event loop to the command thread.
@@ -50,12 +77,33 @@ pub enum DialogResponse {
 
 /// The active dialog state stored in `App`.
 pub enum Dialog {
-    YesNo { title: String, body: String },
-    YesNoCancel { title: String, body: String },
-    TextInput { title: String, prompt: String, editor: TextEdit },
-    MultilineInput { title: String, prompt: String, editor: TextEdit },
-    ListPicker { title: String, items: Vec<String>, selected: usize },
-    KindSelect { title: String, options: Vec<(String, String)> },
+    YesNo {
+        title: String,
+        body: String,
+    },
+    YesNoCancel {
+        title: String,
+        body: String,
+    },
+    TextInput {
+        title: String,
+        prompt: String,
+        editor: TextEdit,
+    },
+    MultilineInput {
+        title: String,
+        prompt: String,
+        editor: TextEdit,
+    },
+    ListPicker {
+        title: String,
+        items: Vec<String>,
+        selected: usize,
+    },
+    KindSelect {
+        title: String,
+        options: Vec<(String, String)>,
+    },
     WorkflowControlBoard(WorkflowControlBoardState),
     WorkflowStepError(WorkflowStepErrorState),
     WorkflowYoloCountdown(WorkflowYoloCountdownState),
@@ -67,8 +115,14 @@ pub enum Dialog {
     CloseTabConfirm,
     WorkflowCancelConfirm,
     ConfigShow(ConfigShowState),
-    Loading { title: String },
-    Custom { title: String, body: String, keys: Vec<(char, String)> },
+    Loading {
+        title: String,
+    },
+    Custom {
+        title: String,
+        body: String,
+        keys: Vec<(char, String)>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -172,12 +226,7 @@ pub fn centered_fixed(cols: u16, rows: u16, area: Rect) -> Rect {
 /// Render a dialog frame with the given title and border color.
 /// Returns the padded inner area (1-cell horizontal padding, 1-row vertical
 /// padding inside the border) so dialog content doesn't touch the frame.
-pub fn render_dialog_frame(
-    title: &str,
-    color: Color,
-    area: Rect,
-    frame: &mut Frame,
-) -> Rect {
+pub fn render_dialog_frame(title: &str, color: Color, area: Rect, frame: &mut Frame) -> Rect {
     frame.render_widget(Clear, area);
     let block = Block::default()
         .title(format!(" {title} "))
@@ -200,12 +249,7 @@ pub fn render_dialog_frame(
 /// Sizes dynamically: width grows to fit the longest body line (clamped to a
 /// usable range) and height grows to fit the body, a blank-line separator,
 /// and the hint row. Body wraps so content is never silently clipped.
-pub fn render_yes_no(
-    title: &str,
-    body: &str,
-    area: Rect,
-    frame: &mut Frame,
-) {
+pub fn render_yes_no(title: &str, body: &str, area: Rect, frame: &mut Frame) {
     let max_w = area.width.saturating_sub(6).max(40);
     let max_body_w = body
         .lines()
@@ -221,7 +265,11 @@ pub fn render_yes_no(
         .lines()
         .map(|line| {
             let w = unicode_width::UnicodeWidthStr::width(line);
-            if inner_w == 0 || w == 0 { 1 } else { w.div_ceil(inner_w) }
+            if inner_w == 0 || w == 0 {
+                1
+            } else {
+                w.div_ceil(inner_w)
+            }
         })
         .sum();
     let body_h = wrapped_lines as u16;
@@ -254,7 +302,8 @@ pub fn render_close_tab_confirm(area: Rect, frame: &mut Frame) {
     let width = 60u16.min(area.width.saturating_sub(4).max(40));
     let dialog_area = centered_fixed(width, 9, area);
     let inner = render_dialog_frame("Close tab?", Color::Yellow, dialog_area, frame);
-    let text = "  Press Ctrl-C again to quit amux\n  Press Ctrl-T to close this tab\n\n  [Esc] cancel";
+    let text =
+        "  Press Ctrl-C again to quit amux\n  Press Ctrl-T to close this tab\n\n  [Esc] cancel";
     frame.render_widget(
         Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: false }),
         inner,
@@ -366,7 +415,10 @@ mod tests {
             render_quit_confirm(area, frame);
         });
         let lower = output.to_lowercase();
-        assert!(lower.contains("quit"), "expected 'quit' in output:\n{output}");
+        assert!(
+            lower.contains("quit"),
+            "expected 'quit' in output:\n{output}"
+        );
     }
 
     #[test]
@@ -374,8 +426,14 @@ mod tests {
         let output = render_to_string(80, 24, |area, frame| {
             render_yes_no("Test?", "Test body", area, frame);
         });
-        assert!(output.contains("[y]"), "expected '[y]' in output:\n{output}");
-        assert!(output.contains("[n]"), "expected '[n]' in output:\n{output}");
+        assert!(
+            output.contains("[y]"),
+            "expected '[y]' in output:\n{output}"
+        );
+        assert!(
+            output.contains("[n]"),
+            "expected '[n]' in output:\n{output}"
+        );
     }
 
     #[test]
@@ -383,8 +441,17 @@ mod tests {
         let output = render_to_string(80, 24, |area, frame| {
             render_close_tab_confirm(area, frame);
         });
-        assert!(output.contains("Ctrl-C"), "expected 'Ctrl-C' in output:\n{output}");
-        assert!(output.contains("Ctrl-T"), "expected 'Ctrl-T' in output:\n{output}");
-        assert!(output.contains("Esc"), "expected 'Esc' in output:\n{output}");
+        assert!(
+            output.contains("Ctrl-C"),
+            "expected 'Ctrl-C' in output:\n{output}"
+        );
+        assert!(
+            output.contains("Ctrl-T"),
+            "expected 'Ctrl-T' in output:\n{output}"
+        );
+        assert!(
+            output.contains("Esc"),
+            "expected 'Esc' in output:\n{output}"
+        );
     }
 }

@@ -161,7 +161,8 @@ impl ReadyEngine {
                     self.summary.aspec_folder = StepStatus::Warn("aspec/ folder not found".into());
                     frontend.write_message(crate::engine::message::UserMessage {
                         level: crate::engine::message::MessageLevel::Warning,
-                        text: "aspec/ folder not found in git root; run `amux init` to create it.".to_string(),
+                        text: "aspec/ folder not found in git root; run `amux init` to create it."
+                            .to_string(),
                     });
                 }
                 // Modern repo config: .amux/config.json
@@ -177,10 +178,12 @@ impl ReadyEngine {
                         });
                     }
                 } else {
-                    self.summary.work_items_config = StepStatus::Warn(".amux/config.json not found".into());
+                    self.summary.work_items_config =
+                        StepStatus::Warn(".amux/config.json not found".into());
                     frontend.write_message(crate::engine::message::UserMessage {
                         level: crate::engine::message::MessageLevel::Warning,
-                        text: ".amux/config.json not found; run `amux init` to create it.".to_string(),
+                        text: ".amux/config.json not found; run `amux init` to create it."
+                            .to_string(),
                     });
                 }
 
@@ -285,10 +288,8 @@ impl ReadyEngine {
                         Err(e) => {
                             let msg = e.to_string();
                             self.summary.base_image = StepStatus::Failed(msg.clone());
-                            frontend.report_step_status(
-                                "Build base image",
-                                StepStatus::Failed(msg),
-                            );
+                            frontend
+                                .report_step_status("Build base image", StepStatus::Failed(msg));
                         }
                     }
                     ReadyPhase::BuildingAgentImage
@@ -423,25 +424,27 @@ impl ReadyEngine {
                     if all_ok {
                         // All non-default agents have valid images → single consolidated row.
                         frontend.report_step_status("Other agents", StepStatus::Done);
-                        self.summary.non_default_agent_images.push((
-                            "Other agents".to_string(),
-                            StepStatus::Done,
-                        ));
+                        self.summary
+                            .non_default_agent_images
+                            .push(("Other agents".to_string(), StepStatus::Done));
                     } else {
                         // Report only the missing agents individually as warnings.
                         for (name, tag) in &missing_agents {
                             let status = StepStatus::Warn(format!("image missing: {tag}"));
-                            frontend.report_step_status(
-                                &format!("Agent: {name}"),
-                                status.clone(),
-                            );
-                            self.summary.non_default_agent_images.push((name.clone(), status));
+                            frontend.report_step_status(&format!("Agent: {name}"), status.clone());
+                            self.summary
+                                .non_default_agent_images
+                                .push((name.clone(), status));
                         }
                         frontend.write_message(crate::engine::message::UserMessage {
                             level: crate::engine::message::MessageLevel::Warning,
                             text: format!(
                                 "Missing agent images: {}",
-                                missing_agents.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+                                missing_agents
+                                    .iter()
+                                    .map(|(n, _)| n.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             ),
                         });
                     }
@@ -464,11 +467,7 @@ impl ReadyEngine {
                     "cline" => ("cline", vec!["task", greeting]),
                     _ => (agent_name, vec!["--print", greeting]),
                 };
-                match tokio::process::Command::new(cmd)
-                    .args(&args)
-                    .output()
-                    .await
-                {
+                match tokio::process::Command::new(cmd).args(&args).output().await {
                     Ok(output) if output.status.success() => {
                         let response = String::from_utf8_lossy(&output.stdout)
                             .lines()
@@ -533,7 +532,9 @@ impl ReadyEngine {
                     if !templates::dockerfile_matches_template(&content) {
                         frontend.write_message(crate::engine::message::UserMessage {
                             level: crate::engine::message::MessageLevel::Warning,
-                            text: "Dockerfile.dev has been customised; audit may overwrite changes.".into(),
+                            text:
+                                "Dockerfile.dev has been customised; audit may overwrite changes."
+                                    .into(),
                         });
                     }
                 }
@@ -555,7 +556,11 @@ impl ReadyEngine {
                         env_passthrough: self.options.env_passthrough.clone(),
                         directory_overlays: vec![],
                     };
-                    match self.agent_engine.build_options(&self.session, &self.options.agent, &run_opts) {
+                    match self.agent_engine.build_options(
+                        &self.session,
+                        &self.options.agent,
+                        &run_opts,
+                    ) {
                         Err(e) => {
                             self.summary.audit = StepStatus::Failed(e.to_string());
                         }
@@ -577,9 +582,10 @@ impl ReadyEngine {
                                             if exit.exit_code == 0 {
                                                 self.summary.audit = StepStatus::Done;
                                             } else {
-                                                self.summary.audit = StepStatus::Failed(
-                                                    format!("audit exited with code {}", exit.exit_code),
-                                                );
+                                                self.summary.audit = StepStatus::Failed(format!(
+                                                    "audit exited with code {}",
+                                                    exit.exit_code
+                                                ));
                                             }
                                         }
                                     },
@@ -620,10 +626,8 @@ impl ReadyEngine {
                             Ok(()) => {
                                 self.summary.base_image = StepStatus::Done;
                                 self.summary.image_rebuild = StepStatus::Done;
-                                frontend.report_step_status(
-                                    "Rebuilding after audit",
-                                    StepStatus::Done,
-                                );
+                                frontend
+                                    .report_step_status("Rebuilding after audit", StepStatus::Done);
                             }
                             Err(e) => {
                                 let msg = e.to_string();
@@ -644,11 +648,16 @@ impl ReadyEngine {
                                     let name = entry.file_name();
                                     let name_str = name.to_string_lossy().to_string();
                                     if name_str.starts_with("Dockerfile.") {
-                                        let agent = name_str.strip_prefix("Dockerfile.").unwrap_or("");
+                                        let agent =
+                                            name_str.strip_prefix("Dockerfile.").unwrap_or("");
                                         if !agent.is_empty() {
-                                            let agent_tag = crate::data::image_tags::agent_image_tag(&git_root, agent);
+                                            let agent_tag =
+                                                crate::data::image_tags::agent_image_tag(
+                                                    &git_root, agent,
+                                                );
                                             let mut agent_sink = |line: &str| {
-                                                frontend.report_step_status(line, StepStatus::Running);
+                                                frontend
+                                                    .report_step_status(line, StepStatus::Running);
                                             };
                                             let _ = self.container_runtime.build_image(
                                                 &agent_tag,
@@ -728,7 +737,9 @@ mod tests {
 
     use super::*;
     use crate::data::session::{SessionOpenOptions, StaticGitRootResolver};
-    use crate::engine::container::frontend::{ContainerFrontend, ContainerProgress, ContainerStatus};
+    use crate::engine::container::frontend::{
+        ContainerFrontend, ContainerProgress, ContainerStatus,
+    };
     use crate::engine::error::EngineError;
     use crate::engine::message::{UserMessage, UserMessageSink};
     use crate::engine::overlay::OverlayEngine;
@@ -765,9 +776,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ContainerFrontend for FakeContainerFrontend {
-        fn write_stdout(&mut self, _bytes: &[u8]) -> Result<(), EngineError> { Ok(()) }
-        fn write_stderr(&mut self, _bytes: &[u8]) -> Result<(), EngineError> { Ok(()) }
-        async fn read_stdin(&mut self, _buf: &mut [u8]) -> Result<usize, EngineError> { Ok(0) }
+        fn write_stdout(&mut self, _bytes: &[u8]) -> Result<(), EngineError> {
+            Ok(())
+        }
+        fn write_stderr(&mut self, _bytes: &[u8]) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn read_stdin(&mut self, _buf: &mut [u8]) -> Result<usize, EngineError> {
+            Ok(0)
+        }
         fn report_status(&mut self, _status: ContainerStatus) {}
         fn report_progress(&mut self, _progress: ContainerProgress) {}
         fn resize_pty(&mut self, _cols: u16, _rows: u16) {}
@@ -787,10 +804,7 @@ mod tests {
             Ok(self.run_audit)
         }
 
-        fn ask_migrate_legacy_layout(
-            &mut self,
-            _agent: &AgentName,
-        ) -> Result<bool, EngineError> {
+        fn ask_migrate_legacy_layout(&mut self, _agent: &AgentName) -> Result<bool, EngineError> {
             Ok(self.migrate_legacy)
         }
 
@@ -820,11 +834,7 @@ mod tests {
         // attempt a network download during tests.
         let amux_dir = tmp.path().join(".amux");
         std::fs::create_dir_all(&amux_dir).unwrap();
-        std::fs::write(
-            amux_dir.join("Dockerfile.claude"),
-            "FROM scratch\n",
-        )
-        .unwrap();
+        std::fs::write(amux_dir.join("Dockerfile.claude"), "FROM scratch\n").unwrap();
         let resolver = StaticGitRootResolver::new(tmp.path());
         let session = Arc::new(
             crate::data::session::Session::open(
@@ -938,7 +948,7 @@ mod tests {
         // Step to AwaitingDockerfileDecision, then accept to move to CreatingDockerfile.
         engine2.step(&mut frontend).await.unwrap(); // Preflight → AwaitingDockerfileDecision
         engine2.step(&mut frontend).await.unwrap(); // AwaitingDockerfileDecision → CreatingDockerfile
-        // Execute CreatingDockerfile phase.
+                                                    // Execute CreatingDockerfile phase.
         engine2.step(&mut frontend).await.unwrap(); // CreatingDockerfile → AwaitingLegacyMigrationDecision
         let dockerfile = tmp.path().join("Dockerfile.dev");
         assert!(
@@ -1007,11 +1017,19 @@ mod tests {
         engine.step(&mut frontend).await.unwrap(); // MigratingLegacyLayout → BuildingBaseImage
 
         let backup = tmp.path().join("Dockerfile.dev.bak");
-        assert!(backup.exists(), "MigratingLegacyLayout must create a .bak backup");
+        assert!(
+            backup.exists(),
+            "MigratingLegacyLayout must create a .bak backup"
+        );
         let backup_content = std::fs::read_to_string(&backup).unwrap();
-        assert_eq!(backup_content, "FROM legacy\n", "backup must contain original content");
+        assert_eq!(
+            backup_content, "FROM legacy\n",
+            "backup must contain original content"
+        );
         let new_content = std::fs::read_to_string(&dockerfile).unwrap();
-        assert_ne!(new_content, "FROM legacy\n", "Dockerfile.dev must be overwritten");
+        assert_ne!(
+            new_content, "FROM legacy\n",
+            "Dockerfile.dev must be overwritten"
+        );
     }
-
 }

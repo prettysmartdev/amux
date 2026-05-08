@@ -10,9 +10,7 @@ use crate::data::config::effective::EffectiveConfig;
 use crate::data::image_tags::{agent_image_tag, project_image_tag};
 use crate::data::repo_dockerfile_paths::RepoDockerfilePaths;
 use crate::data::session::{AgentName, Session};
-use crate::engine::container::options::{
-    ContainerOption, EnvVar, ImageRef, PlanMode, YoloMode,
-};
+use crate::engine::container::options::{ContainerOption, EnvVar, ImageRef, PlanMode, YoloMode};
 use crate::engine::container::ContainerRuntime;
 use crate::engine::error::EngineError;
 use crate::engine::overlay::{DirectorySpec, OverlayEngine, OverlayRequest};
@@ -59,7 +57,10 @@ pub struct AgentEngine {
 }
 
 impl AgentEngine {
-    pub fn new(overlay_engine: Arc<OverlayEngine>, container_runtime: Arc<ContainerRuntime>) -> Self {
+    pub fn new(
+        overlay_engine: Arc<OverlayEngine>,
+        container_runtime: Arc<ContainerRuntime>,
+    ) -> Self {
         Self {
             overlay_engine,
             container_runtime,
@@ -101,7 +102,13 @@ impl AgentEngine {
         // Ensure Dockerfile.<agent> is present.
         if !agent_dockerfile.exists() {
             frontend.report_step_status("Downloading Dockerfile", StepStatus::Running);
-            match download::download_agent_dockerfile(agent.as_str(), &agent_dockerfile, &project_tag).await {
+            match download::download_agent_dockerfile(
+                agent.as_str(),
+                &agent_dockerfile,
+                &project_tag,
+            )
+            .await
+            {
                 Ok(()) => frontend.report_step_status("Downloading Dockerfile", StepStatus::Done),
                 Err(e) => {
                     frontend.report_step_status(
@@ -144,10 +151,7 @@ impl AgentEngine {
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    frontend.report_step_status(
-                        "Building image",
-                        StepStatus::Failed(msg.clone()),
-                    );
+                    frontend.report_step_status("Building image", StepStatus::Failed(msg.clone()));
                     return Err(e);
                 }
             }
@@ -218,7 +222,9 @@ impl AgentEngine {
             }
         }
         if !run.disallowed_tools.is_empty() {
-            options.push(ContainerOption::DisallowedTools(run.disallowed_tools.clone()));
+            options.push(ContainerOption::DisallowedTools(
+                run.disallowed_tools.clone(),
+            ));
             if let Some(flag) = matrix.disallowed_tools_flag {
                 options.push(ContainerOption::DisallowedToolsFlag(flag.to_string()));
             }
@@ -231,7 +237,10 @@ impl AgentEngine {
                 mode_flags.push(flag.to_string());
             }
         }
-        if matches!(run.auto, Some(crate::engine::container::options::AutoMode::Enabled)) {
+        if matches!(
+            run.auto,
+            Some(crate::engine::container::options::AutoMode::Enabled)
+        ) {
             if let Some(flags) = matrix.auto_flag {
                 mode_flags.extend(flags.iter().map(|s| s.to_string()));
             }
@@ -272,18 +281,22 @@ impl AgentEngine {
 
         // Per-agent static env vars.
         if agent.as_str() == "copilot" {
-            options.push(ContainerOption::EnvLiteral(crate::engine::container::options::EnvLiteral {
-                key: "COPILOT_OFFLINE".into(),
-                value: "true".into(),
-            }));
+            options.push(ContainerOption::EnvLiteral(
+                crate::engine::container::options::EnvLiteral {
+                    key: "COPILOT_OFFLINE".into(),
+                    value: "true".into(),
+                },
+            ));
         }
 
         // Mount the project source into the container's working directory.
-        options.push(ContainerOption::Overlay(crate::engine::container::options::OverlaySpec {
-            host_path: session.git_root().to_path_buf(),
-            container_path: std::path::PathBuf::from("/workspace"),
-            permission: crate::engine::container::options::OverlayPermission::ReadWrite,
-        }));
+        options.push(ContainerOption::Overlay(
+            crate::engine::container::options::OverlaySpec {
+                host_path: session.git_root().to_path_buf(),
+                container_path: std::path::PathBuf::from("/workspace"),
+                permission: crate::engine::container::options::OverlayPermission::ReadWrite,
+            },
+        ));
 
         // Overlays — agent settings + user-supplied dirs.
         let request = OverlayRequest {
@@ -317,7 +330,6 @@ pub(crate) fn image_exists_locally(tag: &str) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -377,7 +389,8 @@ mod tests {
             "Image option must be present"
         );
         assert!(
-            opts.iter().any(|o| matches!(o, ContainerOption::Entrypoint(_))),
+            opts.iter()
+                .any(|o| matches!(o, ContainerOption::Entrypoint(_))),
             "Entrypoint option must be present"
         );
     }
@@ -391,9 +404,9 @@ mod tests {
             .build_options(&session, &agent, &AgentRunOptions::default())
             .unwrap();
         assert!(opts.iter().any(|o| matches!(o, ContainerOption::Image(_))));
-        assert!(
-            opts.iter().any(|o| matches!(o, ContainerOption::Entrypoint(_)))
-        );
+        assert!(opts
+            .iter()
+            .any(|o| matches!(o, ContainerOption::Entrypoint(_))));
     }
 
     #[test]
@@ -460,10 +473,13 @@ mod tests {
             ..Default::default()
         };
         let opts = engine.build_options(&session, &agent, &run).unwrap();
-        let has_flag = opts.iter().any(|o| {
-            matches!(o, ContainerOption::NonInteractivePrintFlag(f) if f == "--print")
-        });
-        assert!(has_flag, "NonInteractivePrintFlag --print must be present for claude");
+        let has_flag = opts
+            .iter()
+            .any(|o| matches!(o, ContainerOption::NonInteractivePrintFlag(f) if f == "--print"));
+        assert!(
+            has_flag,
+            "NonInteractivePrintFlag --print must be present for claude"
+        );
     }
 
     #[test]
@@ -476,9 +492,9 @@ mod tests {
             ..Default::default()
         };
         let opts = engine.build_options(&session, &agent, &run).unwrap();
-        let has_flag = opts.iter().any(|o| {
-            matches!(o, ContainerOption::NonInteractivePrintFlag(f) if f == "run")
-        });
+        let has_flag = opts
+            .iter()
+            .any(|o| matches!(o, ContainerOption::NonInteractivePrintFlag(f) if f == "run"));
         assert!(
             has_flag,
             "NonInteractivePrintFlag 'run' must be present for crush"
@@ -512,7 +528,10 @@ mod tests {
 
     impl FakeAgentFrontend {
         fn new() -> Self {
-            Self { statuses: Vec::new(), container_call_count: 0 }
+            Self {
+                statuses: Vec::new(),
+                container_call_count: 0,
+            }
         }
     }
 
@@ -528,9 +547,15 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl crate::engine::container::frontend::ContainerFrontend for FakeContainerFrontend {
-        fn write_stdout(&mut self, _: &[u8]) -> Result<(), EngineError> { Ok(()) }
-        fn write_stderr(&mut self, _: &[u8]) -> Result<(), EngineError> { Ok(()) }
-        async fn read_stdin(&mut self, _: &mut [u8]) -> Result<usize, EngineError> { Ok(0) }
+        fn write_stdout(&mut self, _: &[u8]) -> Result<(), EngineError> {
+            Ok(())
+        }
+        fn write_stderr(&mut self, _: &[u8]) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn read_stdin(&mut self, _: &mut [u8]) -> Result<usize, EngineError> {
+            Ok(0)
+        }
         fn report_status(&mut self, _: crate::engine::container::frontend::ContainerStatus) {}
         fn report_progress(&mut self, _: crate::engine::container::frontend::ContainerProgress) {}
         fn resize_pty(&mut self, _: u16, _: u16) {}
@@ -540,7 +565,9 @@ mod tests {
         fn report_step_status(&mut self, step: &str, status: StepStatus) {
             self.statuses.push((step.to_string(), status));
         }
-        fn container_frontend(&mut self) -> Box<dyn crate::engine::container::frontend::ContainerFrontend> {
+        fn container_frontend(
+            &mut self,
+        ) -> Box<dyn crate::engine::container::frontend::ContainerFrontend> {
             self.container_call_count += 1;
             Box::new(FakeContainerFrontend)
         }
@@ -575,7 +602,8 @@ mod tests {
         let mut frontend = FakeAgentFrontend::new();
 
         // Write a fake Dockerfile so the file-presence check passes.
-        let paths = crate::data::repo_dockerfile_paths::RepoDockerfilePaths::new(session.git_root());
+        let paths =
+            crate::data::repo_dockerfile_paths::RepoDockerfilePaths::new(session.git_root());
         let dockerfile = paths.agent_dockerfile("claude");
         if let Some(parent) = dockerfile.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -587,7 +615,10 @@ mod tests {
             .ensure_available(&session, &agent, &config, &mut frontend, |_| true)
             .await;
 
-        assert!(result.is_ok(), "must succeed when all images present, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "must succeed when all images present, got {result:?}"
+        );
         assert!(
             frontend.statuses.is_empty(),
             "no status reports expected when already up-to-date"
@@ -608,7 +639,8 @@ mod tests {
         let mut frontend = FakeAgentFrontend::new();
 
         // Write a fake Dockerfile so the file-presence check passes.
-        let paths = crate::data::repo_dockerfile_paths::RepoDockerfilePaths::new(session.git_root());
+        let paths =
+            crate::data::repo_dockerfile_paths::RepoDockerfilePaths::new(session.git_root());
         let dockerfile = paths.agent_dockerfile("claude");
         if let Some(parent) = dockerfile.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -618,7 +650,9 @@ mod tests {
         let project_tag = crate::data::image_tags::project_image_tag(session.git_root());
         // Project image exists; agent image does not.
         let result = engine
-            .ensure_available(&session, &agent, &config, &mut frontend, |tag| tag == project_tag)
+            .ensure_available(&session, &agent, &config, &mut frontend, |tag| {
+                tag == project_tag
+            })
             .await;
 
         // The build step MUST fire — runtime.build_image gets invoked. In a
@@ -633,7 +667,10 @@ mod tests {
             .iter()
             .filter(|(s, _)| s == "Building image")
             .collect();
-        assert!(!statuses.is_empty(), "Building image status must have fired");
+        assert!(
+            !statuses.is_empty(),
+            "Building image status must have fired"
+        );
         assert_eq!(
             frontend.container_call_count, 1,
             "container_frontend must be called once for the build step"
@@ -653,7 +690,9 @@ mod tests {
         let project_tag = crate::data::image_tags::project_image_tag(session.git_root());
         // Project image present; Dockerfile absent → triggers download attempt.
         let result = engine
-            .ensure_available(&session, &agent, &config, &mut frontend, |tag| tag == project_tag)
+            .ensure_available(&session, &agent, &config, &mut frontend, |tag| {
+                tag == project_tag
+            })
             .await;
 
         // In a test environment the download will fail (no network or the URL

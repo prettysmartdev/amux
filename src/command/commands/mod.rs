@@ -36,9 +36,7 @@ pub use command_trait::Command;
 /// `host:container` or `host:container:perm` (where perm is `ro` or `rw`).
 ///
 /// Returns the parsed `DirectorySpec` or a descriptive error string on failure.
-pub fn parse_overlay_spec(
-    spec: &str,
-) -> Result<crate::engine::overlay::DirectorySpec, String> {
+pub fn parse_overlay_spec(spec: &str) -> Result<crate::engine::overlay::DirectorySpec, String> {
     use crate::engine::container::options::OverlayPermission;
     use crate::engine::overlay::DirectorySpec;
 
@@ -119,9 +117,7 @@ fn split_top_level_commas(input: &str) -> Vec<&str> {
 }
 
 /// Parse a single typed overlay expression like `dir(/host:/container:ro)`.
-fn parse_single_typed_overlay(
-    expr: &str,
-) -> Result<crate::engine::overlay::DirectorySpec, String> {
+fn parse_single_typed_overlay(expr: &str) -> Result<crate::engine::overlay::DirectorySpec, String> {
     let open = expr
         .find('(')
         .ok_or_else(|| format!("malformed overlay expression (missing '('): '{expr}'"))?;
@@ -129,7 +125,9 @@ fn parse_single_typed_overlay(
         .rfind(')')
         .ok_or_else(|| format!("malformed overlay expression (missing ')'): '{expr}'"))?;
     if close <= open {
-        return Err(format!("malformed overlay expression (parentheses out of order): '{expr}'"));
+        return Err(format!(
+            "malformed overlay expression (parentheses out of order): '{expr}'"
+        ));
     }
     let tag = expr[..open].trim();
     let args = expr[open + 1..close].trim();
@@ -149,7 +147,9 @@ fn parse_dir_overlay_args(
     use crate::engine::overlay::DirectorySpec;
 
     if args.is_empty() {
-        return Err(format!("empty arguments in overlay expression: '{full_expr}'"));
+        return Err(format!(
+            "empty arguments in overlay expression: '{full_expr}'"
+        ));
     }
     let parts: Vec<&str> = args.splitn(3, ':').collect();
     let (host_str, container_str, perm_str) = match parts.len() {
@@ -165,9 +165,7 @@ fn parse_dir_overlay_args(
             }
         }
         _ => {
-            return Err(format!(
-                "expected 'host:container[:perm]' in '{full_expr}'"
-            ));
+            return Err(format!("expected 'host:container[:perm]' in '{full_expr}'"));
         }
     };
     let host = host_str.trim();

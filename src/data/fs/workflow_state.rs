@@ -234,7 +234,10 @@ mod tests {
         // The hash prefix should differ because the git roots differ.
         let name1 = path1.file_name().unwrap().to_str().unwrap();
         let name2 = path2.file_name().unwrap().to_str().unwrap();
-        assert_ne!(name1, name2, "different git roots should yield different state filenames");
+        assert_ne!(
+            name1, name2,
+            "different git roots should yield different state filenames"
+        );
     }
 
     // ─── validate_resume_compatibility ───────────────────────────────────────

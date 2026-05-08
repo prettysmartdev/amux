@@ -74,7 +74,10 @@ pub async fn run(_matches: clap::ArgMatches, ctx: RuntimeContext) -> ExitCode {
         );
     } else {
         let mut flags = std::collections::BTreeMap::new();
-        flags.insert("watch".to_string(), crate::command::dispatch::parsed_input::FlagValue::Bool(true));
+        flags.insert(
+            "watch".to_string(),
+            crate::command::dispatch::parsed_input::FlagValue::Bool(true),
+        );
         app.spawn_command(
             "status --watch",
             ParsedCommandBoxInput {
@@ -98,7 +101,11 @@ pub async fn run(_matches: clap::ArgMatches, ctx: RuntimeContext) -> ExitCode {
 fn run_event_loop(app: &mut App) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -117,7 +124,10 @@ fn run_event_loop(app: &mut App) -> io::Result<()> {
 }
 
 /// The main event loop: render → tick → poll → handle input → repeat.
-fn main_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
+fn main_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> io::Result<()> {
     loop {
         if app.should_quit {
             break;
@@ -277,10 +287,18 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         Action::WorkflowControl => {
             // Guard: act when a workflow is active (has steps) OR a yolo
             // countdown is running (current_step may be None between steps).
-            let workflow_active = app.active_tab().workflow_state.lock().ok()
+            let workflow_active = app
+                .active_tab()
+                .workflow_state
+                .lock()
+                .ok()
                 .and_then(|g| g.as_ref().map(|v| !v.steps.is_empty()))
                 .unwrap_or(false);
-            let yolo_active = app.active_tab().yolo_state.lock().ok()
+            let yolo_active = app
+                .active_tab()
+                .yolo_state
+                .lock()
+                .ok()
                 .and_then(|g| g.is_some().then_some(true))
                 .unwrap_or(false);
             if !workflow_active && !yolo_active {
@@ -291,7 +309,9 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
                 // BEFORE clearing yolo_state so the engine's next tick reads
                 // the atomic first and returns ShowControlBoard rather than
                 // tripping the "yolo_state cleared by user" Cancel path.
-                app.active_tab().yolo_ctrl_w.store(true, std::sync::atomic::Ordering::Relaxed);
+                app.active_tab()
+                    .yolo_ctrl_w
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 if let Ok(mut guard) = app.active_tab().yolo_state.lock() {
                     *guard = None;
                 }
@@ -308,13 +328,19 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
             } else {
                 // No dialog open and workflow is active: check if a step is
                 // running and send a mid-step control board request.
-                let step_running = app.active_tab().workflow_state.lock().ok()
+                let step_running = app
+                    .active_tab()
+                    .workflow_state
+                    .lock()
+                    .ok()
                     .and_then(|g| g.as_ref().and_then(|v| v.current_step.clone()))
                     .is_some();
                 if step_running {
                     if let Ok(guard) = app.active_tab().control_board_tx_shared.lock() {
                         if let Some(tx) = guard.as_ref() {
-                            let _ = tx.send(crate::engine::workflow::ControlBoardRequest::OpenControlBoard);
+                            let _ = tx.send(
+                                crate::engine::workflow::ControlBoardRequest::OpenControlBoard,
+                            );
                         }
                     }
                 }
@@ -560,8 +586,7 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent) {
                     screen.set_scrollback(0);
                     depth
                 };
-                tab.container_scroll_offset =
-                    (tab.container_scroll_offset + 5).min(max_scroll);
+                tab.container_scroll_offset = (tab.container_scroll_offset + 5).min(max_scroll);
             } else {
                 tab.scroll_offset = tab.scroll_offset.saturating_add(5);
             }
@@ -581,8 +606,7 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent) {
             }
             let tab = app.active_tab_mut();
             if tab.container_window_state == ContainerWindowState::Maximized {
-                tab.container_scroll_offset =
-                    tab.container_scroll_offset.saturating_sub(5);
+                tab.container_scroll_offset = tab.container_scroll_offset.saturating_sub(5);
             } else {
                 tab.scroll_offset = tab.scroll_offset.saturating_sub(5);
             }
@@ -659,10 +683,7 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent) {
 /// Why: the vt100 grid mutates with live PTY output. When the user starts a
 /// drag selection, they need the copied text to reflect what they *saw* —
 /// not the cells' current values.
-fn capture_vt100_snapshot(
-    parser: &mut vt100::Parser,
-    scroll_offset: usize,
-) -> Vec<Vec<String>> {
+fn capture_vt100_snapshot(parser: &mut vt100::Parser, scroll_offset: usize) -> Vec<Vec<String>> {
     let screen = parser.screen_mut();
     if scroll_offset > 0 {
         screen.set_scrollback(scroll_offset);
@@ -748,7 +769,9 @@ fn handle_resize(app: &mut App, cols: u16, rows: u16) {
         tab.mouse_selection = None;
         if tab.container_window_state != ContainerWindowState::Hidden {
             let (inner_cols, inner_rows) = compute_container_inner_size(cols, rows);
-            tab.vt100_parser.screen_mut().set_size(inner_rows, inner_cols);
+            tab.vt100_parser
+                .screen_mut()
+                .set_size(inner_rows, inner_cols);
             // Forward the new size to the container's PTY master so its
             // SIGWINCH handler reflows TUI apps inside the container.
             if let Some(ref tx) = tab.container_resize_tx {
@@ -958,7 +981,11 @@ fn handle_dialog_submit(app: &mut App) {
                 let row = &state.rows[state.selected];
                 let field = row.field.clone();
                 let value = state.editor.text.clone();
-                let scope = if state.edit_column == 0 { "global" } else { "repo" };
+                let scope = if state.edit_column == 0 {
+                    "global"
+                } else {
+                    "repo"
+                };
                 let edit_str = format!("{}\t{}\t{}", field, value, scope);
                 app.send_dialog_response(DialogResponse::Text(edit_str));
                 app.active_dialog = None;
@@ -1057,7 +1084,9 @@ fn handle_dialog_delete(app: &mut App) {
 /// Handle arrow-key scrolling in list-based dialogs.
 fn handle_dialog_scroll(app: &mut App, direction: i32) {
     match &mut app.active_dialog {
-        Some(Dialog::ListPicker { items, selected, .. }) => {
+        Some(Dialog::ListPicker {
+            items, selected, ..
+        }) => {
             let len = items.len();
             if len == 0 {
                 return;
@@ -1277,7 +1306,10 @@ fn handle_new_tab_path(app: &mut App, path: &str) {
         );
     } else {
         let mut flags = std::collections::BTreeMap::new();
-        flags.insert("watch".to_string(), crate::command::dispatch::parsed_input::FlagValue::Bool(true));
+        flags.insert(
+            "watch".to_string(),
+            crate::command::dispatch::parsed_input::FlagValue::Bool(true),
+        );
         app.spawn_command(
             "status --watch",
             crate::command::dispatch::parsed_input::ParsedCommandBoxInput {
@@ -1309,20 +1341,24 @@ mod tests {
     fn make_engines() -> crate::command::dispatch::Engines {
         let runtime = Arc::new(crate::engine::container::ContainerRuntime::docker());
         let overlay = Arc::new(crate::engine::overlay::OverlayEngine::with_auth_resolver(
-            crate::data::fs::auth_paths::AuthPathResolver::at_home(
-                std::path::PathBuf::from("/tmp"),
-            ),
+            crate::data::fs::auth_paths::AuthPathResolver::at_home(std::path::PathBuf::from(
+                "/tmp",
+            )),
         ));
         let git_engine = Arc::new(crate::engine::git::GitEngine::new());
-        let agent_engine =
-            Arc::new(crate::engine::agent::AgentEngine::new(overlay.clone(), runtime.clone()));
+        let agent_engine = Arc::new(crate::engine::agent::AgentEngine::new(
+            overlay.clone(),
+            runtime.clone(),
+        ));
         let auth_engine = Arc::new(crate::engine::auth::AuthEngine::with_paths(
             crate::data::fs::auth_paths::AuthPathResolver::at_home("/tmp"),
             crate::data::fs::headless_paths::HeadlessPaths::at_root("/tmp"),
         ));
         let workflow_state_store = {
             let tmp = tempfile::tempdir().unwrap();
-            Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(tmp.path()))
+            Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(
+                tmp.path(),
+            ))
         };
         crate::command::dispatch::Engines {
             runtime,
@@ -1337,7 +1373,12 @@ mod tests {
     fn make_session() -> Session {
         let tmp = tempfile::tempdir().unwrap();
         let resolver = StaticGitRootResolver::new(tmp.path());
-        Session::open(tmp.path().to_path_buf(), &resolver, SessionOpenOptions::default()).unwrap()
+        Session::open(
+            tmp.path().to_path_buf(),
+            &resolver,
+            SessionOpenOptions::default(),
+        )
+        .unwrap()
     }
 
     fn make_app() -> App {
@@ -1347,7 +1388,13 @@ mod tests {
         let session_manager = Arc::new(RwLock::new(SessionManager::in_memory()));
         let session = make_session();
         let tab = Tab::new(session);
-        App::new(catalogue, engines, session_manager, tab, rt.handle().clone())
+        App::new(
+            catalogue,
+            engines,
+            session_manager,
+            tab,
+            rt.handle().clone(),
+        )
     }
 
     fn press_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
@@ -1759,7 +1806,10 @@ mod tests {
         let mut app = make_app();
         // input is empty by default
         press_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(app.tabs[app.active_tab].execution_phase, ExecutionPhase::Idle);
+        assert_eq!(
+            app.tabs[app.active_tab].execution_phase,
+            ExecutionPhase::Idle
+        );
     }
 
     // ─── Toggle status log ────────────────────────────────────────────────────
@@ -1866,9 +1916,14 @@ mod tests {
     fn char_input_blocked_while_running() {
         let mut app = make_app();
         app.tabs[app.active_tab].execution_phase =
-            crate::frontend::tui::tabs::ExecutionPhase::Running { command: "chat".into() };
+            crate::frontend::tui::tabs::ExecutionPhase::Running {
+                command: "chat".into(),
+            };
         press_char(&mut app, 'x');
-        assert_eq!(app.command_input.text, "", "command box must be locked while running");
+        assert_eq!(
+            app.command_input.text, "",
+            "command box must be locked while running"
+        );
     }
 
     #[test]
@@ -1876,9 +1931,14 @@ mod tests {
         let mut app = make_app();
         app.command_input.set_text("abc");
         app.tabs[app.active_tab].execution_phase =
-            crate::frontend::tui::tabs::ExecutionPhase::Running { command: "chat".into() };
+            crate::frontend::tui::tabs::ExecutionPhase::Running {
+                command: "chat".into(),
+            };
         press_key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
-        assert_eq!(app.command_input.text, "abc", "backspace must be blocked while running");
+        assert_eq!(
+            app.command_input.text, "abc",
+            "backspace must be blocked while running"
+        );
     }
 
     #[test]
@@ -1886,8 +1946,9 @@ mod tests {
         use crate::frontend::tui::tabs::ExecutionPhase;
         let mut app = make_app();
         app.command_input.set_text("status");
-        app.tabs[app.active_tab].execution_phase =
-            ExecutionPhase::Running { command: "chat".into() };
+        app.tabs[app.active_tab].execution_phase = ExecutionPhase::Running {
+            command: "chat".into(),
+        };
         press_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         // Phase should still be Running, not a new command
         assert!(matches!(
@@ -1956,7 +2017,9 @@ mod tests {
         let mut app = make_app();
         app.focus = Focus::ExecutionWindow;
         app.tabs[app.active_tab].execution_phase =
-            crate::frontend::tui::tabs::ExecutionPhase::Running { command: "chat".into() };
+            crate::frontend::tui::tabs::ExecutionPhase::Running {
+                command: "chat".into(),
+            };
         press_char(&mut app, 'x');
         assert_eq!(
             app.focus,
@@ -2073,7 +2136,9 @@ mod tests {
 
         press_key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
 
-        let msg = cb_rx.try_recv().expect("control board tx must receive a message");
+        let msg = cb_rx
+            .try_recv()
+            .expect("control board tx must receive a message");
         assert!(
             matches!(msg, ControlBoardRequest::OpenControlBoard),
             "Ctrl+W during a running step must send OpenControlBoard"
@@ -2082,7 +2147,7 @@ mod tests {
 
     #[test]
     fn ctrl_w_in_step_confirm_escalates_to_wcb() {
-        use crate::frontend::tui::tabs::{WorkflowViewState, WorkflowStepView};
+        use crate::frontend::tui::tabs::{WorkflowStepView, WorkflowViewState};
         use std::collections::HashSet;
 
         let mut app = make_app();
@@ -2121,9 +2186,14 @@ mod tests {
             "StepConfirm dialog must close on Ctrl+W"
         );
         // The frontend must have received Char('W') so it can open the full WCB.
-        let resp = rx.try_recv().expect("dialog_response_tx must receive a message");
+        let resp = rx
+            .try_recv()
+            .expect("dialog_response_tx must receive a message");
         assert!(
-            matches!(resp, crate::frontend::tui::dialogs::DialogResponse::Char('W')),
+            matches!(
+                resp,
+                crate::frontend::tui::dialogs::DialogResponse::Char('W')
+            ),
             "escalation must send Char('W') to trigger full WCB"
         );
     }
@@ -2158,7 +2228,10 @@ mod tests {
             "pressing Enter on a read-only ConfigShow row must update the status bar"
         );
         // The dialog should remain open.
-        assert!(app.active_dialog.is_some(), "dialog must stay open after read-only toast");
+        assert!(
+            app.active_dialog.is_some(),
+            "dialog must stay open after read-only toast"
+        );
     }
 
     // ─── ContainerWindow cycle / resize ──────────────────────────────────────
@@ -2214,7 +2287,7 @@ mod tests {
         app.active_tab_mut().container_window_state =
             crate::frontend::tui::tabs::ContainerWindowState::Hidden;
         app.active_tab_mut().container_resize_tx = None; // no channel
-        // Cycling from Hidden → Maximized — the resize send should not panic.
+                                                         // Cycling from Hidden → Maximized — the resize send should not panic.
         press_key(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
         assert_eq!(
             app.active_tab().container_window_state,
@@ -2226,23 +2299,25 @@ mod tests {
 
     #[test]
     fn scroll_down_reveals_hidden_parallel_steps() {
+        use crate::frontend::tui::tabs::{WorkflowStepView, WorkflowViewState};
         use crossterm::event::{MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
-        use crate::frontend::tui::tabs::{WorkflowViewState, WorkflowStepView};
         use std::collections::HashSet;
 
         let mut app = make_app();
 
         // Seed a workflow with many parallel steps so the strip would have overflow.
         let view = WorkflowViewState {
-            steps: (0..6).map(|i| WorkflowStepView {
-                name: format!("step-{i}"),
-                status: "pending".into(),
-                agent: None,
-                model: None,
-                depends_on: vec![],
-                stuck: false,
-            }).collect(),
+            steps: (0..6)
+                .map(|i| WorkflowStepView {
+                    name: format!("step-{i}"),
+                    status: "pending".into(),
+                    agent: None,
+                    model: None,
+                    depends_on: vec![],
+                    stuck: false,
+                })
+                .collect(),
             current_step: None,
             auto_disabled: HashSet::new(),
         };
@@ -2265,16 +2340,17 @@ mod tests {
             },
         );
         assert_eq!(
-            app.active_tab().workflow_strip_scroll_offset, 1,
+            app.active_tab().workflow_strip_scroll_offset,
+            1,
             "scroll down inside strip must increment workflow_strip_scroll_offset"
         );
     }
 
     #[test]
     fn scroll_clamped_at_bounds() {
+        use crate::frontend::tui::tabs::{WorkflowStepView, WorkflowViewState};
         use crossterm::event::{MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
-        use crate::frontend::tui::tabs::{WorkflowViewState, WorkflowStepView};
         use std::collections::HashSet;
 
         let mut app = make_app();
@@ -2306,7 +2382,8 @@ mod tests {
             },
         );
         assert_eq!(
-            app.active_tab().workflow_strip_scroll_offset, 0,
+            app.active_tab().workflow_strip_scroll_offset,
+            0,
             "scrolling up at offset=0 must not underflow"
         );
     }

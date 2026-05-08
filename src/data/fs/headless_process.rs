@@ -144,7 +144,11 @@ pub fn pid_is_amux(pid: u32) -> bool {
     std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("amux"))
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .to_lowercase()
+                .contains("amux")
+        })
         .unwrap_or(false)
 }
 
@@ -395,7 +399,10 @@ mod tests {
         let pid_path = tmp.path().join("foreign.pid");
         write_pid(&pid_path, 1).unwrap();
         let result = check_already_running(&pid_path).unwrap();
-        assert!(result.is_none(), "unrelated alive PID must be treated as stale");
+        assert!(
+            result.is_none(),
+            "unrelated alive PID must be treated as stale"
+        );
         assert!(!pid_path.exists(), "stale PID file must be removed");
     }
 

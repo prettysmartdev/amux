@@ -115,7 +115,9 @@ impl InitEngine {
                         Err(e) => {
                             frontend.write_message(crate::engine::message::UserMessage {
                                 level: crate::engine::message::MessageLevel::Warning,
-                                text: format!("aspec download failed: {e}; using empty aspec directory"),
+                                text: format!(
+                                    "aspec download failed: {e}; using empty aspec directory"
+                                ),
                             });
                         }
                     }
@@ -157,7 +159,9 @@ impl InitEngine {
                     if let Err(e) = dl {
                         frontend.write_message(crate::engine::message::UserMessage {
                             level: crate::engine::message::MessageLevel::Warning,
-                            text: format!("agent Dockerfile download failed: {e}; continuing without it"),
+                            text: format!(
+                                "agent Dockerfile download failed: {e}; continuing without it"
+                            ),
                         });
                     }
                 }
@@ -229,8 +233,10 @@ impl InitEngine {
                     Err(e) => {
                         let msg = e.to_string();
                         self.summary.image_build = StepStatus::Failed(msg.clone());
-                        frontend
-                            .report_step_status("Build base image", StepStatus::Failed(msg.clone()));
+                        frontend.report_step_status(
+                            "Build base image",
+                            StepStatus::Failed(msg.clone()),
+                        );
                         // Skip audit; nothing to audit without a base image.
                         self.summary.audit = StepStatus::Skipped;
                         self.summary.agent_image_build = StepStatus::Skipped;
@@ -267,7 +273,8 @@ impl InitEngine {
                         Err(e) => {
                             let msg = e.to_string();
                             self.summary.agent_image_build = StepStatus::Failed(msg.clone());
-                            frontend.report_step_status("Build agent image", StepStatus::Failed(msg));
+                            frontend
+                                .report_step_status("Build agent image", StepStatus::Failed(msg));
                         }
                     }
                 } else {
@@ -313,43 +320,42 @@ impl InitEngine {
                             text: format!("skipping audit: {e}"),
                         });
                     }
-                    Ok(options) => {
-                        match self.container_runtime.build(options) {
-                            Err(e) => {
-                                self.summary.audit = StepStatus::Skipped;
-                                frontend.write_message(crate::engine::message::UserMessage {
-                                    level: crate::engine::message::MessageLevel::Warning,
-                                    text: format!("skipping audit: {e}"),
-                                });
-                            }
-                            Ok(instance) => {
-                                let container_fe = frontend.container_frontend();
-                                match instance.run_with_frontend(container_fe) {
-                                    Err(e) => {
-                                        self.summary.audit = StepStatus::Skipped;
-                                        frontend.write_message(crate::engine::message::UserMessage {
-                                            level: crate::engine::message::MessageLevel::Warning,
-                                            text: format!("skipping audit: {e}"),
-                                        });
-                                    }
-                                    Ok(mut exec) => match exec.wait().await {
-                                        Err(e) => {
-                                            self.summary.audit = StepStatus::Failed(e.to_string());
-                                        }
-                                        Ok(exit) => {
-                                            if exit.exit_code == 0 {
-                                                self.summary.audit = StepStatus::Done;
-                                            } else {
-                                                self.summary.audit = StepStatus::Failed(
-                                                    format!("audit exited with code {}", exit.exit_code),
-                                                );
-                                            }
-                                        }
-                                    },
+                    Ok(options) => match self.container_runtime.build(options) {
+                        Err(e) => {
+                            self.summary.audit = StepStatus::Skipped;
+                            frontend.write_message(crate::engine::message::UserMessage {
+                                level: crate::engine::message::MessageLevel::Warning,
+                                text: format!("skipping audit: {e}"),
+                            });
+                        }
+                        Ok(instance) => {
+                            let container_fe = frontend.container_frontend();
+                            match instance.run_with_frontend(container_fe) {
+                                Err(e) => {
+                                    self.summary.audit = StepStatus::Skipped;
+                                    frontend.write_message(crate::engine::message::UserMessage {
+                                        level: crate::engine::message::MessageLevel::Warning,
+                                        text: format!("skipping audit: {e}"),
+                                    });
                                 }
+                                Ok(mut exec) => match exec.wait().await {
+                                    Err(e) => {
+                                        self.summary.audit = StepStatus::Failed(e.to_string());
+                                    }
+                                    Ok(exit) => {
+                                        if exit.exit_code == 0 {
+                                            self.summary.audit = StepStatus::Done;
+                                        } else {
+                                            self.summary.audit = StepStatus::Failed(format!(
+                                                "audit exited with code {}",
+                                                exit.exit_code
+                                            ));
+                                        }
+                                    }
+                                },
                             }
                         }
-                    }
+                    },
                 }
                 // Issue 12: After the audit, rebuild images if audit succeeded.
                 InitPhase::RebuildingAfterAudit
@@ -454,7 +460,6 @@ impl InitEngine {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -462,7 +467,9 @@ mod tests {
     use super::*;
     use crate::data::config::repo::WorkItemsConfig;
     use crate::data::session::{SessionOpenOptions, StaticGitRootResolver};
-    use crate::engine::container::frontend::{ContainerFrontend, ContainerProgress, ContainerStatus};
+    use crate::engine::container::frontend::{
+        ContainerFrontend, ContainerProgress, ContainerStatus,
+    };
     use crate::engine::message::{UserMessage, UserMessageSink};
     use crate::engine::overlay::OverlayEngine;
     use crate::engine::step_status::StepStatus;
@@ -494,9 +501,15 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ContainerFrontend for FakeContainerFrontend {
-        fn write_stdout(&mut self, _: &[u8]) -> Result<(), EngineError> { Ok(()) }
-        fn write_stderr(&mut self, _: &[u8]) -> Result<(), EngineError> { Ok(()) }
-        async fn read_stdin(&mut self, _: &mut [u8]) -> Result<usize, EngineError> { Ok(0) }
+        fn write_stdout(&mut self, _: &[u8]) -> Result<(), EngineError> {
+            Ok(())
+        }
+        fn write_stderr(&mut self, _: &[u8]) -> Result<(), EngineError> {
+            Ok(())
+        }
+        async fn read_stdin(&mut self, _: &mut [u8]) -> Result<usize, EngineError> {
+            Ok(0)
+        }
         fn report_status(&mut self, _: ContainerStatus) {}
         fn report_progress(&mut self, _: ContainerProgress) {}
         fn resize_pty(&mut self, _: u16, _: u16) {}
@@ -764,7 +777,10 @@ mod tests {
 
         // The .amux dir must not exist before Preflight runs.
         let amux_dir = tmp.path().join(".amux");
-        assert!(!amux_dir.exists(), ".amux dir must not exist before Preflight");
+        assert!(
+            !amux_dir.exists(),
+            ".amux dir must not exist before Preflight"
+        );
 
         let mut frontend = FakeInitFrontend {
             replace_aspec: false,

@@ -5,9 +5,8 @@
 //! (Layers 1 + 2):
 //!
 //! - [`cli`]    — argv-driven, stdout/stderr/stdin rendering.
-//! - [`tui`]    — Ratatui-based interactive terminal UI (placeholder; see
-//!   work item 0070).
-//! - [`headless`] — HTTP server (placeholder; see work item 0071).
+//! - [`tui`]    — Ratatui-based interactive terminal UI.
+//! - [`headless`] — HTTP server for programmatic / remote access.
 //!
 //! Frontends contain NO business logic; every behavioral decision lives in
 //! Layer 2.

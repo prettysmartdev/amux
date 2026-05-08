@@ -27,7 +27,9 @@ impl RepoDockerfilePaths {
 
     /// `<git_root>/.amux/Dockerfile.<agent>` — per-agent layered Dockerfile.
     pub fn agent_dockerfile(&self, agent: &str) -> PathBuf {
-        self.git_root.join(".amux").join(format!("Dockerfile.{agent}"))
+        self.git_root
+            .join(".amux")
+            .join(format!("Dockerfile.{agent}"))
     }
 
     /// `<git_root>/aspec/` — spec and work-items directory.

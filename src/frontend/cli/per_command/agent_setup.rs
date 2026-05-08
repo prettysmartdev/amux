@@ -1,6 +1,6 @@
 //! `AgentSetupFrontend` impl for the CLI.
 //!
-//! Per WI 0069 §7u (headless defaults), the safe non-interactive default is
+//! The safe non-interactive default is
 //! `Setup` (proceed with download/build). The CLI prompts on stdin only
 //! when stdin is a TTY; otherwise it returns the safe default.
 
@@ -50,12 +50,13 @@ impl AgentSetupFrontend for CliFrontend {
     }
 
     fn record_fallback(&mut self, _requested: &AgentName, fallback: &AgentName) {
-        // Per-step fallback caching is a TUI-only concern (see WI 0069
-        // §7f). The CLI never re-prompts within a single invocation.
+        // Per-step fallback caching is a TUI-only concern. The CLI never
+        // re-prompts within a single invocation.
         let level = MessageLevel::Info;
-        self.messages.write_message(crate::engine::message::UserMessage {
-            level,
-            text: format!("falling back to agent {}", fallback.as_str()),
-        });
+        self.messages
+            .write_message(crate::engine::message::UserMessage {
+                level,
+                text: format!("falling back to agent {}", fallback.as_str()),
+            });
     }
 }

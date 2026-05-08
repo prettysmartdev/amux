@@ -138,11 +138,7 @@ impl ContainerFrontend for NoopContainerFrontend {
     ) -> Result<usize, crate::engine::error::EngineError> {
         Ok(0)
     }
-    fn report_status(
-        &mut self,
-        _status: crate::engine::container::frontend::ContainerStatus,
-    ) {
-    }
+    fn report_status(&mut self, _status: crate::engine::container::frontend::ContainerStatus) {}
     fn report_progress(
         &mut self,
         _progress: crate::engine::container::frontend::ContainerProgress,
@@ -208,9 +204,7 @@ impl Command for SpecsCommand {
                     }
                 };
                 let git_root = session.git_root().to_path_buf();
-                let work_items_dir = session
-                    .repo_config()
-                    .work_items_dir_or_default(&git_root);
+                let work_items_dir = session.repo_config().work_items_dir_or_default(&git_root);
                 // Look up the file for the requested work-item number.
                 let n: u32 = f.work_item.trim_start_matches('0').parse().unwrap_or(0);
                 let prefix = format!("{:04}-", n);
@@ -248,7 +242,11 @@ impl Command for SpecsCommand {
                 };
                 frontend.write_message(UserMessage {
                     level: MessageLevel::Info,
-                    text: format!("specs amend: reviewing work item {:04} with agent '{}'", n, agent.as_str()),
+                    text: format!(
+                        "specs amend: reviewing work item {:04} with agent '{}'",
+                        n,
+                        agent.as_str()
+                    ),
                 });
                 let prompt = render_amend_prompt(n);
                 let run_opts = AgentRunOptions {
@@ -337,9 +335,7 @@ pub(crate) async fn create_new_spec(
         }
     };
     let git_root = session.git_root().to_path_buf();
-    let work_items_dir = session
-        .repo_config()
-        .work_items_dir_or_default(&git_root);
+    let work_items_dir = session.repo_config().work_items_dir_or_default(&git_root);
     let template_path = session
         .repo_config()
         .work_items_template_or_default(&git_root);
@@ -350,7 +346,10 @@ pub(crate) async fn create_new_spec(
         };
         frontend.write_message(UserMessage {
             level: MessageLevel::Error,
-            text: format!("specs new: spec template missing at {}", template_path.display()),
+            text: format!(
+                "specs new: spec template missing at {}",
+                template_path.display()
+            ),
         });
         return Err(err);
     }
@@ -363,7 +362,10 @@ pub(crate) async fn create_new_spec(
             ));
             frontend.write_message(UserMessage {
                 level: MessageLevel::Error,
-                text: format!("specs new: failed to read spec template {}: {e}", template_path.display()),
+                text: format!(
+                    "specs new: failed to read spec template {}: {e}",
+                    template_path.display()
+                ),
             });
             return Err(err);
         }
@@ -375,7 +377,9 @@ pub(crate) async fn create_new_spec(
         text: format!("specs new: creating work item {:04}", next_n),
     });
     let kind = frontend.ask_spec_kind().unwrap_or(WorkItemKind::Task);
-    let title = frontend.ask_spec_title().unwrap_or_else(|_| "Untitled".into());
+    let title = frontend
+        .ask_spec_title()
+        .unwrap_or_else(|_| "Untitled".into());
     let summary = frontend.ask_spec_summary().unwrap_or_default();
     let slug = slugify(&title);
     let filename = format!("{:04}-{slug}.md", next_n);
@@ -390,7 +394,10 @@ pub(crate) async fn create_new_spec(
             ));
             frontend.write_message(UserMessage {
                 level: MessageLevel::Error,
-                text: format!("specs new: failed to create work-items dir {}: {e}", work_items_dir.display()),
+                text: format!(
+                    "specs new: failed to create work-items dir {}: {e}",
+                    work_items_dir.display()
+                ),
             });
             return Err(err);
         }
@@ -404,7 +411,10 @@ pub(crate) async fn create_new_spec(
             let err = CommandError::Other(format!("writing work item {}: {e}", dest.display()));
             frontend.write_message(UserMessage {
                 level: MessageLevel::Error,
-                text: format!("specs new: failed to write work item {}: {e}", dest.display()),
+                text: format!(
+                    "specs new: failed to write work item {}: {e}",
+                    dest.display()
+                ),
             });
             return Err(err);
         }
@@ -421,10 +431,7 @@ pub(crate) async fn create_new_spec(
                 return Err(e);
             }
         };
-        let credentials = match engines
-            .auth_engine
-            .resolve_agent_auth(&session, &agent)
-        {
+        let credentials = match engines.auth_engine.resolve_agent_auth(&session, &agent) {
             Ok(c) => c,
             Err(e) => {
                 frontend.write_message(UserMessage {
@@ -669,11 +676,11 @@ mod tests {
     }
 
     fn make_engines_with_root(root: &std::path::Path) -> crate::command::dispatch::Engines {
-        use std::sync::Arc;
-        use crate::engine::overlay::OverlayEngine;
-        use crate::engine::container::ContainerRuntime;
         use crate::data::fs::auth_paths::AuthPathResolver;
         use crate::data::fs::headless_paths::HeadlessPaths;
+        use crate::engine::container::ContainerRuntime;
+        use crate::engine::overlay::OverlayEngine;
+        use std::sync::Arc;
         let overlay = Arc::new(OverlayEngine::with_auth_resolver(
             AuthPathResolver::at_home(root),
         ));
@@ -692,7 +699,9 @@ mod tests {
             overlay_engine: overlay,
             auth_engine,
             agent_engine,
-            workflow_state_store: Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(root)),
+            workflow_state_store: Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(
+                root,
+            )),
         }
     }
 
@@ -717,12 +726,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let engines = make_engines_with_root(tmp.path());
         let cmd = super::SpecsCommand::new(
-            super::SpecsSubcommand::New(super::SpecsNewFlags { interview: false, non_interactive: false }),
+            super::SpecsSubcommand::New(super::SpecsNewFlags {
+                interview: false,
+                non_interactive: false,
+            }),
             engines,
         );
         let result = with_cwd(tmp.path(), || async {
             cmd.run_with_frontend(Box::new(FakeSpecsFrontend)).await
-        }).await;
+        })
+        .await;
         assert!(result.is_err(), "must error when template is missing");
     }
 
@@ -736,16 +749,23 @@ mod tests {
         std::fs::write(
             &template,
             "# Work Item: [Feature | Bug | Task]\n\nTitle: title\n\n- summary\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let engines = make_engines_with_root(tmp.path());
         let cmd = super::SpecsCommand::new(
-            super::SpecsSubcommand::New(super::SpecsNewFlags { interview: false, non_interactive: false }),
+            super::SpecsSubcommand::New(super::SpecsNewFlags {
+                interview: false,
+                non_interactive: false,
+            }),
             engines,
         );
         let outcome = with_cwd(tmp.path(), || async {
-            cmd.run_with_frontend(Box::new(FakeSpecsFrontend)).await.unwrap()
-        }).await;
+            cmd.run_with_frontend(Box::new(FakeSpecsFrontend))
+                .await
+                .unwrap()
+        })
+        .await;
         if let super::SpecsOutcome::New(n) = outcome {
             let path = n.created_path.expect("created_path must be Some");
             assert!(
@@ -753,9 +773,18 @@ mod tests {
                 "created file must exist on disk: {path}"
             );
             let content = std::fs::read_to_string(&path).unwrap();
-            assert!(content.contains("My Test Spec"), "title must be substituted: {content}");
-            assert!(content.contains("# Work Item: Task"), "kind must be substituted: {content}");
-            assert!(content.contains("A one-line summary."), "summary must be substituted: {content}");
+            assert!(
+                content.contains("My Test Spec"),
+                "title must be substituted: {content}"
+            );
+            assert!(
+                content.contains("# Work Item: Task"),
+                "kind must be substituted: {content}"
+            );
+            assert!(
+                content.contains("A one-line summary."),
+                "summary must be substituted: {content}"
+            );
         } else {
             panic!("unexpected outcome variant");
         }
@@ -772,16 +801,24 @@ mod tests {
         let work_items = tmp.path().join("aspec").join("work-items");
         std::fs::create_dir_all(&work_items).unwrap();
         let template = work_items.join("0000-template.md");
-        std::fs::write(&template, "# Work Item: [Feature | Bug | Task]\n\nTitle: title\n").unwrap();
+        std::fs::write(
+            &template,
+            "# Work Item: [Feature | Bug | Task]\n\nTitle: title\n",
+        )
+        .unwrap();
 
         let engines = make_engines_with_root(tmp.path());
         let cmd = super::SpecsCommand::new(
-            super::SpecsSubcommand::New(super::SpecsNewFlags { interview: true, non_interactive: false }),
+            super::SpecsSubcommand::New(super::SpecsNewFlags {
+                interview: true,
+                non_interactive: false,
+            }),
             engines,
         );
         let _ = with_cwd(tmp.path(), || async {
             cmd.run_with_frontend(Box::new(FakeSpecsFrontend)).await
-        }).await;
+        })
+        .await;
 
         // File must have been written before the agent run was attempted.
         let entries: Vec<_> = std::fs::read_dir(&work_items)
@@ -818,7 +855,8 @@ mod tests {
         );
         let result = with_cwd(tmp.path(), || async {
             cmd.run_with_frontend(Box::new(FakeSpecsFrontend)).await
-        }).await;
+        })
+        .await;
         if let Err(crate::command::error::CommandError::WorkItemNotFound { .. }) = &result {
             panic!("file lookup must succeed for an existing work item: {result:?}");
         }
@@ -841,7 +879,11 @@ mod tests {
         );
         let result = with_cwd(tmp.path(), || async {
             cmd.run_with_frontend(Box::new(FakeSpecsFrontend)).await
-        }).await;
-        assert!(result.is_err(), "must return error when work item 9999 not found");
+        })
+        .await;
+        assert!(
+            result.is_err(),
+            "must return error when work item 9999 not found"
+        );
     }
 }

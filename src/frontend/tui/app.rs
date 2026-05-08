@@ -60,9 +60,12 @@ pub struct App {
     pub command_dialog_active: bool,
     pub runtime_handle: tokio::runtime::Handle,
     /// Receiver for asynchronous container stats results.
-    pub stats_rx: Option<std::sync::mpsc::Receiver<(usize, crate::engine::container::instance::ContainerStats)>>,
+    pub stats_rx: Option<
+        std::sync::mpsc::Receiver<(usize, crate::engine::container::instance::ContainerStats)>,
+    >,
     /// Sender cloned per stats query — kept alive so the channel stays open.
-    pub stats_tx: std::sync::mpsc::Sender<(usize, crate::engine::container::instance::ContainerStats)>,
+    pub stats_tx:
+        std::sync::mpsc::Sender<(usize, crate::engine::container::instance::ContainerStats)>,
     /// Tracks when the last stats query was dispatched so we don't spam.
     pub last_stats_poll: std::time::Instant,
 }
@@ -135,11 +138,7 @@ impl App {
 
     /// Spawn a parsed command as an async tokio task, wiring up all channels
     /// between the event loop and the command thread.
-    pub fn spawn_command(
-        &mut self,
-        _command_text: &str,
-        parsed: ParsedCommandBoxInput,
-    ) {
+    pub fn spawn_command(&mut self, _command_text: &str, parsed: ParsedCommandBoxInput) {
         let tab = self.active_tab_mut();
 
         // Clear previous output so the new command starts with a fresh log.
@@ -150,7 +149,11 @@ impl App {
 
         // Reset the vt100 parser so the previous container's output is gone.
         let (rows, cols) = tab.vt100_parser.screen().size();
-        tab.vt100_parser = vt100::Parser::new(rows, cols, tab.session.effective_config().scrollback_lines());
+        tab.vt100_parser = vt100::Parser::new(
+            rows,
+            cols,
+            tab.session.effective_config().scrollback_lines(),
+        );
         tab.container_scroll_offset = 0;
         tab.mouse_selection = None;
         tab.last_container_summary = None;
@@ -250,31 +253,59 @@ impl App {
             Some("chat" | "implement" | "exec")
         );
         if is_containerized {
-            use crate::frontend::tui::user_message::TuiUserMessageSink;
             use crate::engine::message::UserMessageSink;
+            use crate::frontend::tui::user_message::TuiUserMessageSink;
             let mut sink = TuiUserMessageSink::new(tab.status_log.clone());
-            sink.info("╔══════════════════════════════════════════════════════════════╗".to_string());
-            sink.info("║                                                              ║".to_string());
+            sink.info(
+                "╔══════════════════════════════════════════════════════════════╗".to_string(),
+            );
+            sink.info(
+                "║                                                              ║".to_string(),
+            );
             sink.info("║     ╦╔╗╔╔╦╗╔═╗╦═╗╔═╗╔═╗╔╦╗╦╦  ╦╔═╗  ╔╦╗╔═╗╔╦╗╔═╗        ║".to_string());
             sink.info("║     ║║║║ ║ ║╣ ╠╦╝╠═╣║   ║ ║╚╗╔╝║╣   ║║║║ ║ ║║║╣         ║".to_string());
             sink.info("║     ╩╝╚╝ ╩ ╚═╝╩╚═╩ ╩╚═╝ ╩ ╩ ╚╝ ╚═╝  ╩ ╩╚═╝═╩╝╚═╝       ║".to_string());
-            sink.info("║                                                              ║".to_string());
+            sink.info(
+                "║                                                              ║".to_string(),
+            );
             sink.info(format!(
                 "║  Agent '{}' is launching in INTERACTIVE mode.{}║",
                 agent_display,
                 " ".repeat(46usize.saturating_sub(agent_display.len() + 43))
             ));
-            sink.info("║  You will need to quit the agent (Ctrl+C or exit)            ║".to_string());
-            sink.info("║  when its work is complete.                                  ║".to_string());
-            sink.info("║                                                              ║".to_string());
-            sink.info("╚══════════════════════════════════════════════════════════════╝".to_string());
+            sink.info(
+                "║  You will need to quit the agent (Ctrl+C or exit)            ║".to_string(),
+            );
+            sink.info(
+                "║  when its work is complete.                                  ║".to_string(),
+            );
+            sink.info(
+                "║                                                              ║".to_string(),
+            );
+            sink.info(
+                "╚══════════════════════════════════════════════════════════════╝".to_string(),
+            );
         }
 
-        tab.yolo_mode = parsed.flags.get("yolo")
-            .map(|v| matches!(v, crate::command::dispatch::parsed_input::FlagValue::Bool(true)))
+        tab.yolo_mode = parsed
+            .flags
+            .get("yolo")
+            .map(|v| {
+                matches!(
+                    v,
+                    crate::command::dispatch::parsed_input::FlagValue::Bool(true)
+                )
+            })
             .unwrap_or(false)
-            || parsed.flags.get("auto")
-                .map(|v| matches!(v, crate::command::dispatch::parsed_input::FlagValue::Bool(true)))
+            || parsed
+                .flags
+                .get("auto")
+                .map(|v| {
+                    matches!(
+                        v,
+                        crate::command::dispatch::parsed_input::FlagValue::Bool(true)
+                    )
+                })
                 .unwrap_or(false);
         tab.execution_phase = ExecutionPhase::Running {
             command: command_name,
@@ -349,7 +380,8 @@ impl App {
             while let Ok((tab_idx, stats)) = rx.try_recv() {
                 if tab_idx < self.tabs.len() {
                     if let Some(ref mut info) = self.tabs[tab_idx].container_info {
-                        info.stats_history.push((stats.cpu_percent, stats.memory_mb));
+                        info.stats_history
+                            .push((stats.cpu_percent, stats.memory_mb));
                         if info.container_name.is_empty() {
                             info.container_name = stats.name.clone();
                         }
@@ -369,13 +401,18 @@ impl App {
         if self.last_stats_poll.elapsed() >= std::time::Duration::from_secs(3) {
             self.last_stats_poll = std::time::Instant::now();
             for (i, tab) in self.tabs.iter().enumerate() {
-                if !matches!(tab.execution_phase, crate::frontend::tui::tabs::ExecutionPhase::Running { .. }) {
+                if !matches!(
+                    tab.execution_phase,
+                    crate::frontend::tui::tabs::ExecutionPhase::Running { .. }
+                ) {
                     continue;
                 }
                 if tab.container_info.is_none() {
                     continue;
                 }
-                let container_name = tab.container_info.as_ref()
+                let container_name = tab
+                    .container_info
+                    .as_ref()
                     .map(|info| info.container_name.clone())
                     .unwrap_or_default();
                 let runtime = self.engines.runtime.clone();
@@ -413,21 +450,34 @@ impl App {
         let active = self.active_tab;
         {
             let tab = &self.tabs[active];
-            let has_workflow_step = tab.workflow_state.lock().ok()
+            let has_workflow_step = tab
+                .workflow_state
+                .lock()
+                .ok()
                 .and_then(|g| g.as_ref().and_then(|ws| ws.current_step.clone()))
                 .is_some();
-            let engine_yolo_active = tab.yolo_state.lock().ok()
+            let engine_yolo_active = tab
+                .yolo_state
+                .lock()
+                .ok()
                 .map(|g| g.is_some())
                 .unwrap_or(false);
-            let backoff_active = tab.yolo_dismissed_at
+            let backoff_active = tab
+                .yolo_dismissed_at
                 .map(|t| t.elapsed() < crate::engine::workflow::timing::STUCK_DIALOG_BACKOFF)
                 .unwrap_or(false);
-            let auto_disabled = tab.workflow_state.lock().ok()
-                .and_then(|g| g.as_ref().map(|ws| {
-                    ws.current_step.as_ref()
-                        .map(|s| ws.auto_disabled.contains(s))
-                        .unwrap_or(false)
-                }))
+            let auto_disabled = tab
+                .workflow_state
+                .lock()
+                .ok()
+                .and_then(|g| {
+                    g.as_ref().map(|ws| {
+                        ws.current_step
+                            .as_ref()
+                            .map(|s| ws.auto_disabled.contains(s))
+                            .unwrap_or(false)
+                    })
+                })
                 .unwrap_or(false);
 
             if tab.stuck
@@ -443,34 +493,34 @@ impl App {
                 // owns the inter-step countdown via `yolo_state`. Showing
                 // an undriven countdown that never advances was confusing
                 // (issue ENG-2: "stuck at 60").
-                let step_name = tab.workflow_state.lock().ok()
+                let step_name = tab
+                    .workflow_state
+                    .lock()
+                    .ok()
                     .and_then(|g| g.as_ref().and_then(|ws| ws.current_step.clone()))
                     .unwrap_or_default();
                 if !matches!(self.active_dialog, Some(Dialog::WorkflowControlBoard(_))) {
-                    self.active_dialog =
-                        Some(Dialog::WorkflowControlBoard(
-                            crate::frontend::tui::dialogs::WorkflowControlBoardState {
-                                step_name,
-                                can_launch_next: true,
-                                can_continue_current: false,
-                                can_restart: true,
-                                can_go_back: false,
-                                can_finish: true,
-                                continue_unavailable_reason: Some(
-                                    "agent is still running".into(),
-                                ),
-                                cancel_to_previous_unavailable_reason: None,
-                                finish_workflow_unavailable_reason: None,
-                                is_mid_step: false,
-                            },
-                        ));
+                    self.active_dialog = Some(Dialog::WorkflowControlBoard(
+                        crate::frontend::tui::dialogs::WorkflowControlBoardState {
+                            step_name,
+                            can_launch_next: true,
+                            can_continue_current: false,
+                            can_restart: true,
+                            can_go_back: false,
+                            can_finish: true,
+                            continue_unavailable_reason: Some("agent is still running".into()),
+                            cancel_to_previous_unavailable_reason: None,
+                            finish_workflow_unavailable_reason: None,
+                            is_mid_step: false,
+                        },
+                    ));
                 }
             } else if !tab.stuck && !has_workflow_step {
                 // Clear stuck-triggered countdown when unstuck.
-                if matches!(self.active_dialog, Some(Dialog::WorkflowYoloCountdown(_))) {
-                    if !engine_yolo_active {
-                        self.active_dialog = None;
-                    }
+                if matches!(self.active_dialog, Some(Dialog::WorkflowYoloCountdown(_)))
+                    && !engine_yolo_active
+                {
+                    self.active_dialog = None;
                 }
             }
         }
@@ -488,21 +538,17 @@ impl App {
                 .map(|t| t.elapsed() < crate::engine::workflow::timing::STUCK_DIALOG_BACKOFF)
                 .unwrap_or(false);
             if !self.command_dialog_active && !backoff_active {
-                self.active_dialog =
-                    Some(Dialog::WorkflowYoloCountdown(
-                        crate::frontend::tui::dialogs::WorkflowYoloCountdownState {
-                            step_name: state.step_name.clone(),
-                            remaining_secs: state.remaining_secs,
-                        },
-                    ));
+                self.active_dialog = Some(Dialog::WorkflowYoloCountdown(
+                    crate::frontend::tui::dialogs::WorkflowYoloCountdownState {
+                        step_name: state.step_name.clone(),
+                        remaining_secs: state.remaining_secs,
+                    },
+                ));
             }
-        } else if matches!(
-            self.active_dialog,
-            Some(Dialog::WorkflowYoloCountdown(_))
-        ) {
-            if self.tabs[active].yolo_countdown.is_none() {
-                self.active_dialog = None;
-            }
+        } else if matches!(self.active_dialog, Some(Dialog::WorkflowYoloCountdown(_)))
+            && self.tabs[active].yolo_countdown.is_none()
+        {
+            self.active_dialog = None;
         }
     }
 
@@ -518,13 +564,13 @@ impl App {
 
         if let Some(request) = request {
             let dialog = match request {
-                DialogRequest::YesNo { title, body } => {
-                    Dialog::YesNo { title, body }
-                }
-                DialogRequest::YesNoCancel { title, body } => {
-                    Dialog::YesNoCancel { title, body }
-                }
-                DialogRequest::TextInput { title, prompt, default_text } => {
+                DialogRequest::YesNo { title, body } => Dialog::YesNo { title, body },
+                DialogRequest::YesNoCancel { title, body } => Dialog::YesNoCancel { title, body },
+                DialogRequest::TextInput {
+                    title,
+                    prompt,
+                    default_text,
+                } => {
                     let mut editor = TextEdit::new(false);
                     if let Some(text) = default_text {
                         editor.set_text(&text);
@@ -535,44 +581,26 @@ impl App {
                         editor,
                     }
                 }
-                DialogRequest::MultilineInput { title, prompt } => {
-                    Dialog::MultilineInput {
-                        title,
-                        prompt,
-                        editor: TextEdit::new(true),
-                    }
-                }
-                DialogRequest::ListPicker { title, items } => {
-                    Dialog::ListPicker {
-                        title,
-                        items,
-                        selected: 0,
-                    }
-                }
+                DialogRequest::MultilineInput { title, prompt } => Dialog::MultilineInput {
+                    title,
+                    prompt,
+                    editor: TextEdit::new(true),
+                },
+                DialogRequest::ListPicker { title, items } => Dialog::ListPicker {
+                    title,
+                    items,
+                    selected: 0,
+                },
                 DialogRequest::KindSelect { title, options } => {
                     Dialog::KindSelect { title, options }
                 }
-                DialogRequest::WorkflowControlBoard(state) => {
-                    Dialog::WorkflowControlBoard(state)
-                }
-                DialogRequest::WorkflowStepError(state) => {
-                    Dialog::WorkflowStepError(state)
-                }
-                DialogRequest::WorkflowYoloCountdown(state) => {
-                    Dialog::WorkflowYoloCountdown(state)
-                }
-                DialogRequest::WorkflowStepConfirm(state) => {
-                    Dialog::WorkflowStepConfirm(state)
-                }
-                DialogRequest::AgentSetup(state) => {
-                    Dialog::AgentSetup(state)
-                }
-                DialogRequest::MountScope(state) => {
-                    Dialog::MountScope(state)
-                }
-                DialogRequest::AgentAuth(state) => {
-                    Dialog::AgentAuth(state)
-                }
+                DialogRequest::WorkflowControlBoard(state) => Dialog::WorkflowControlBoard(state),
+                DialogRequest::WorkflowStepError(state) => Dialog::WorkflowStepError(state),
+                DialogRequest::WorkflowYoloCountdown(state) => Dialog::WorkflowYoloCountdown(state),
+                DialogRequest::WorkflowStepConfirm(state) => Dialog::WorkflowStepConfirm(state),
+                DialogRequest::AgentSetup(state) => Dialog::AgentSetup(state),
+                DialogRequest::MountScope(state) => Dialog::MountScope(state),
+                DialogRequest::AgentAuth(state) => Dialog::AgentAuth(state),
                 DialogRequest::QuitConfirm => Dialog::QuitConfirm,
                 DialogRequest::CloseTabConfirm => Dialog::CloseTabConfirm,
                 DialogRequest::WorkflowCancelConfirm => Dialog::WorkflowCancelConfirm,
@@ -586,9 +614,7 @@ impl App {
                     })
                 }
                 DialogRequest::Loading { title } => Dialog::Loading { title },
-                DialogRequest::Custom { title, body, keys } => {
-                    Dialog::Custom { title, body, keys }
-                }
+                DialogRequest::Custom { title, body, keys } => Dialog::Custom { title, body, keys },
             };
             self.active_dialog = Some(dialog);
             self.command_dialog_active = true;
@@ -610,10 +636,7 @@ impl App {
             return;
         }
         let completions = self.catalogue.tui_completions(partial);
-        self.suggestion_row = completions
-            .into_iter()
-            .map(|c| c.completion)
-            .collect();
+        self.suggestion_row = completions.into_iter().map(|c| c.completion).collect();
     }
 }
 
@@ -642,7 +665,9 @@ mod tests {
     fn make_engines() -> crate::command::dispatch::Engines {
         let runtime = Arc::new(crate::engine::container::ContainerRuntime::docker());
         let overlay = Arc::new(crate::engine::overlay::OverlayEngine::with_auth_resolver(
-            crate::data::fs::auth_paths::AuthPathResolver::at_home(std::path::PathBuf::from("/tmp")),
+            crate::data::fs::auth_paths::AuthPathResolver::at_home(std::path::PathBuf::from(
+                "/tmp",
+            )),
         ));
         let git_engine = Arc::new(crate::engine::git::GitEngine::new());
         let agent_engine = Arc::new(crate::engine::agent::AgentEngine::new(
@@ -655,7 +680,9 @@ mod tests {
         ));
         let workflow_state_store = {
             let tmp = tempfile::tempdir().unwrap();
-            Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(tmp.path()))
+            Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(
+                tmp.path(),
+            ))
         };
         crate::command::dispatch::Engines {
             runtime,
@@ -674,7 +701,13 @@ mod tests {
         let session_manager = Arc::new(RwLock::new(SessionManager::in_memory()));
         let session = make_test_session();
         let tab = Tab::new(session);
-        App::new(catalogue, engines, session_manager, tab, rt.handle().clone())
+        App::new(
+            catalogue,
+            engines,
+            session_manager,
+            tab,
+            rt.handle().clone(),
+        )
     }
 
     // ── update_suggestions ────────────────────────────────────────────────────
@@ -686,7 +719,10 @@ mod tests {
         app.command_input.set_text("");
         app.command_input.text.clear();
         app.update_suggestions();
-        assert!(app.suggestion_row.is_empty(), "empty input must clear suggestions");
+        assert!(
+            app.suggestion_row.is_empty(),
+            "empty input must clear suggestions"
+        );
     }
 
     #[test]
@@ -772,7 +808,13 @@ mod tests {
             latest_stats: None,
             stats_history: Vec::new(),
         });
-        assert!(app.active_tab().container_info.as_ref().unwrap().latest_stats.is_none());
+        assert!(app
+            .active_tab()
+            .container_info
+            .as_ref()
+            .unwrap()
+            .latest_stats
+            .is_none());
 
         // Simulate a stats result arriving on the channel.
         let stats = crate::engine::container::instance::ContainerStats {
@@ -786,7 +828,10 @@ mod tests {
         app.tick_all_tabs();
 
         let info = app.active_tab().container_info.as_ref().unwrap();
-        assert!(info.latest_stats.is_some(), "latest_stats must be populated after drain");
+        assert!(
+            info.latest_stats.is_some(),
+            "latest_stats must be populated after drain"
+        );
         let s = info.latest_stats.as_ref().unwrap();
         assert_eq!(s.cpu_percent, 42.5);
         assert_eq!(s.memory_mb, 256.0);
@@ -856,8 +901,8 @@ mod tests {
 
     #[test]
     fn stats_title_shows_values_when_stats_present() {
-        use crate::frontend::tui::tabs::ContainerInfo;
         use crate::engine::container::instance::ContainerStats;
+        use crate::frontend::tui::tabs::ContainerInfo;
 
         let mut app = make_app();
         let tab = app.active_tab_mut();
@@ -875,7 +920,13 @@ mod tests {
 
         let title = crate::frontend::tui::container_view::build_stats_title_for_test(tab);
         assert!(title.contains("42.5%"), "title must contain CPU: {title}");
-        assert!(title.contains("256MiB"), "title must contain memory: {title}");
-        assert!(title.contains("amux-test"), "title must contain name: {title}");
+        assert!(
+            title.contains("256MiB"),
+            "title must contain memory: {title}"
+        );
+        assert!(
+            title.contains("amux-test"),
+            "title must contain name: {title}"
+        );
     }
 }

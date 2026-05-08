@@ -2,10 +2,9 @@
 
 use async_trait::async_trait;
 
-use crate::command::commands::headless::HeadlessCommandFrontend;
+use crate::command::commands::headless::{HeadlessCommandFrontend, HeadlessServeConfig};
 use crate::command::error::CommandError;
 use crate::frontend::cli::command_frontend::CliFrontend;
-use crate::frontend::headless::HeadlessServeConfig;
 
 #[async_trait]
 impl HeadlessCommandFrontend for CliFrontend {

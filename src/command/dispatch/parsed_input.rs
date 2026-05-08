@@ -6,9 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::command::dispatch::catalogue::{
-    ArgumentKind, CommandCatalogue, CommandSpec, FlagKind,
-};
+use crate::command::dispatch::catalogue::{ArgumentKind, CommandCatalogue, CommandSpec, FlagKind};
 use crate::command::error::CommandError;
 
 /// Result of `parse_command_box_input`. `path` is the resolved canonical
@@ -35,7 +33,10 @@ pub enum ArgValue {
 }
 
 /// Tokenize `raw` against the catalogue.
-pub fn parse(raw: &str, catalogue: &CommandCatalogue) -> Result<ParsedCommandBoxInput, CommandError> {
+pub fn parse(
+    raw: &str,
+    catalogue: &CommandCatalogue,
+) -> Result<ParsedCommandBoxInput, CommandError> {
     let tokens = shell_words::split(raw)
         .map_err(|e| CommandError::CommandBoxParse(format!("tokenize failed: {e}")))?;
     if tokens.is_empty() {
@@ -62,9 +63,7 @@ pub fn parse(raw: &str, catalogue: &CommandCatalogue) -> Result<ParsedCommandBox
         }
     }
     if path.is_empty() {
-        return Err(CommandError::unknown_command(
-            &[tokens[0].as_str()],
-        ));
+        return Err(CommandError::unknown_command(&[tokens[0].as_str()]));
     }
 
     let mut flags: BTreeMap<String, FlagValue> = BTreeMap::new();
@@ -96,20 +95,21 @@ pub fn parse(raw: &str, catalogue: &CommandCatalogue) -> Result<ParsedCommandBox
                 CommandError::unknown_flag(&path_strs, name)
             })?;
             // Helper closure to read a value: prefer inline; otherwise advance idx.
-            let mut read_value = |inline: Option<String>, msg: &str| -> Result<String, CommandError> {
-                if let Some(v) = inline {
-                    idx += 1;
-                    Ok(v)
-                } else {
-                    idx += 1;
-                    let v = tokens
-                        .get(idx)
-                        .cloned()
-                        .ok_or_else(|| CommandError::CommandBoxParse(msg.to_string()))?;
-                    idx += 1;
-                    Ok(v)
-                }
-            };
+            let mut read_value =
+                |inline: Option<String>, msg: &str| -> Result<String, CommandError> {
+                    if let Some(v) = inline {
+                        idx += 1;
+                        Ok(v)
+                    } else {
+                        idx += 1;
+                        let v = tokens
+                            .get(idx)
+                            .cloned()
+                            .ok_or_else(|| CommandError::CommandBoxParse(msg.to_string()))?;
+                        idx += 1;
+                        Ok(v)
+                    }
+                };
             let _ = had_inline;
             match flag_spec.kind {
                 FlagKind::Bool => {
@@ -194,7 +194,9 @@ pub fn parse(raw: &str, catalogue: &CommandCatalogue) -> Result<ParsedCommandBox
                     pos_idx += 1;
                 } else if !arg.optional {
                     let path_strs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-                    return Err(CommandError::missing_required_argument(&path_strs, arg.name));
+                    return Err(CommandError::missing_required_argument(
+                        &path_strs, arg.name,
+                    ));
                 }
             }
         }
@@ -217,7 +219,10 @@ mod tests {
         let cat = CommandCatalogue::get();
         let parsed = parse("exec workflow my-workflow.toml --yolo", cat).unwrap();
         assert_eq!(parsed.path, vec!["exec", "workflow"]);
-        assert!(matches!(parsed.flags.get("yolo"), Some(FlagValue::Bool(true))));
+        assert!(matches!(
+            parsed.flags.get("yolo"),
+            Some(FlagValue::Bool(true))
+        ));
         assert!(matches!(
             parsed.arguments.get("workflow"),
             Some(ArgValue::Single(s)) if s == "my-workflow.toml"
@@ -227,20 +232,19 @@ mod tests {
     #[test]
     fn parse_remote_run_with_trailing_args() {
         let cat = CommandCatalogue::get();
-        let parsed = parse(
-            r#"remote run -- exec prompt --yolo "hello""#,
-            cat,
-        )
-        .unwrap();
+        let parsed = parse(r#"remote run -- exec prompt --yolo "hello""#, cat).unwrap();
         assert_eq!(parsed.path, vec!["remote", "run"]);
         match parsed.arguments.get("command").unwrap() {
             ArgValue::Multi(items) => {
-                assert_eq!(items, &vec![
-                    "exec".to_string(),
-                    "prompt".to_string(),
-                    "--yolo".to_string(),
-                    "hello".to_string(),
-                ]);
+                assert_eq!(
+                    items,
+                    &vec![
+                        "exec".to_string(),
+                        "prompt".to_string(),
+                        "--yolo".to_string(),
+                        "hello".to_string(),
+                    ]
+                );
             }
             _ => panic!("expected Multi"),
         }
@@ -289,7 +293,10 @@ mod tests {
         let parsed = parse("ready -n", cat).unwrap();
         assert_eq!(parsed.path, vec!["ready"]);
         assert!(
-            matches!(parsed.flags.get("non-interactive"), Some(FlagValue::Bool(true))),
+            matches!(
+                parsed.flags.get("non-interactive"),
+                Some(FlagValue::Bool(true))
+            ),
             "-n must map to non-interactive flag"
         );
     }

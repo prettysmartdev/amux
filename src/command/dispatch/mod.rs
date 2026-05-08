@@ -85,11 +85,7 @@ pub struct Engines {
 /// command frontend traits (e.g. [`crate::command::commands::exec_workflow::ExecWorkflowCommandFrontend`])
 /// for command-specific Q&A and reporting.
 pub trait CommandFrontend: UserMessageSink + Send + Sync {
-    fn flag_bool(
-        &self,
-        command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<bool>, CommandError>;
+    fn flag_bool(&self, command_path: &[&str], flag: &str) -> Result<Option<bool>, CommandError>;
 
     fn flag_string(
         &self,
@@ -97,41 +93,18 @@ pub trait CommandFrontend: UserMessageSink + Send + Sync {
         flag: &str,
     ) -> Result<Option<String>, CommandError>;
 
-    fn flag_strings(
-        &self,
-        command_path: &[&str],
-        flag: &str,
-    ) -> Result<Vec<String>, CommandError>;
+    fn flag_strings(&self, command_path: &[&str], flag: &str) -> Result<Vec<String>, CommandError>;
 
-    fn flag_path(
-        &self,
-        command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<PathBuf>, CommandError>;
+    fn flag_path(&self, command_path: &[&str], flag: &str)
+        -> Result<Option<PathBuf>, CommandError>;
 
-    fn flag_enum(
-        &self,
-        command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<String>, CommandError>;
+    fn flag_enum(&self, command_path: &[&str], flag: &str) -> Result<Option<String>, CommandError>;
 
-    fn flag_u16(
-        &self,
-        command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<u16>, CommandError>;
+    fn flag_u16(&self, command_path: &[&str], flag: &str) -> Result<Option<u16>, CommandError>;
 
-    fn argument(
-        &self,
-        command_path: &[&str],
-        name: &str,
-    ) -> Result<Option<String>, CommandError>;
+    fn argument(&self, command_path: &[&str], name: &str) -> Result<Option<String>, CommandError>;
 
-    fn arguments(
-        &self,
-        command_path: &[&str],
-        name: &str,
-    ) -> Result<Vec<String>, CommandError>;
+    fn arguments(&self, command_path: &[&str], name: &str) -> Result<Vec<String>, CommandError>;
 }
 
 // ─── Frontend supertrait ────────────────────────────────────────────────────
@@ -273,11 +246,7 @@ impl<F: CommandFrontend> Dispatch<F> {
     /// Read flags from the frontend and construct the typed `*Command`. No
     /// engine work happens at this point — the command is "ready to run".
     pub fn build_command(&self, path: &[&str]) -> Result<BuiltCommand, CommandError> {
-        let canonical: Vec<&str> = self
-            .catalogue
-            .canonical_path(path)
-            .into_iter()
-            .collect();
+        let canonical: Vec<&str> = self.catalogue.canonical_path(path).into_iter().collect();
         let canonical_refs: Vec<&str> = canonical.to_vec();
         let spec = self
             .catalogue
@@ -325,7 +294,10 @@ impl<F: CommandFrontend> Dispatch<F> {
             }
             ["chat"] => {
                 let flags = read_chat_flags(&self.frontend, &canonical_refs)?;
-                Ok(BuiltCommand::Chat(ChatCommand::new(flags, self.engines.clone())))
+                Ok(BuiltCommand::Chat(ChatCommand::new(
+                    flags,
+                    self.engines.clone(),
+                )))
             }
             ["specs", "new"] => {
                 let interview = self
@@ -337,7 +309,10 @@ impl<F: CommandFrontend> Dispatch<F> {
                     .flag_bool(&canonical_refs, "non-interactive")?
                     .unwrap_or(false);
                 Ok(BuiltCommand::Specs(SpecsCommand::new(
-                    SpecsSubcommand::New(SpecsNewFlags { interview, non_interactive }),
+                    SpecsSubcommand::New(SpecsNewFlags {
+                        interview,
+                        non_interactive,
+                    }),
                     self.engines.clone(),
                 )))
             }
@@ -345,7 +320,9 @@ impl<F: CommandFrontend> Dispatch<F> {
                 let work_item = self
                     .frontend
                     .argument(&canonical_refs, "work_item")?
-                    .ok_or_else(|| CommandError::missing_required_argument(&canonical_refs, "work_item"))?;
+                    .ok_or_else(|| {
+                        CommandError::missing_required_argument(&canonical_refs, "work_item")
+                    })?;
                 let non_interactive = self
                     .frontend
                     .flag_bool(&canonical_refs, "non-interactive")?
@@ -393,7 +370,9 @@ impl<F: CommandFrontend> Dispatch<F> {
                 let field = self
                     .frontend
                     .argument(&canonical_refs, "field")?
-                    .ok_or_else(|| CommandError::missing_required_argument(&canonical_refs, "field"))?;
+                    .ok_or_else(|| {
+                        CommandError::missing_required_argument(&canonical_refs, "field")
+                    })?;
                 Ok(BuiltCommand::Config(ConfigCommand::new(
                     ConfigSubcommand::Get(ConfigGetFlags { field }),
                     self.engines.clone(),
@@ -403,17 +382,25 @@ impl<F: CommandFrontend> Dispatch<F> {
                 let field = self
                     .frontend
                     .argument(&canonical_refs, "field")?
-                    .ok_or_else(|| CommandError::missing_required_argument(&canonical_refs, "field"))?;
+                    .ok_or_else(|| {
+                        CommandError::missing_required_argument(&canonical_refs, "field")
+                    })?;
                 let value = self
                     .frontend
                     .argument(&canonical_refs, "value")?
-                    .ok_or_else(|| CommandError::missing_required_argument(&canonical_refs, "value"))?;
+                    .ok_or_else(|| {
+                        CommandError::missing_required_argument(&canonical_refs, "value")
+                    })?;
                 let global = self
                     .frontend
                     .flag_bool(&canonical_refs, "global")?
                     .unwrap_or(false);
                 Ok(BuiltCommand::Config(ConfigCommand::new(
-                    ConfigSubcommand::Set(ConfigSetFlags { field, value, global }),
+                    ConfigSubcommand::Set(ConfigSetFlags {
+                        field,
+                        value,
+                        global,
+                    }),
                     self.engines.clone(),
                 )))
             }
@@ -421,7 +408,9 @@ impl<F: CommandFrontend> Dispatch<F> {
                 let prompt = self
                     .frontend
                     .argument(&canonical_refs, "prompt")?
-                    .ok_or_else(|| CommandError::missing_required_argument(&canonical_refs, "prompt"))?;
+                    .ok_or_else(|| {
+                        CommandError::missing_required_argument(&canonical_refs, "prompt")
+                    })?;
                 if prompt.trim().is_empty() {
                     return Err(CommandError::InvalidArgumentValue {
                         command: canonical_refs.iter().map(|s| s.to_string()).collect(),
@@ -506,8 +495,7 @@ impl<F: CommandFrontend> Dispatch<F> {
             }
             ["remote", "session", "start"] => {
                 let dir = self.frontend.argument(&canonical_refs, "dir")?;
-                let remote_addr =
-                    self.frontend.flag_string(&canonical_refs, "remote-addr")?;
+                let remote_addr = self.frontend.flag_string(&canonical_refs, "remote-addr")?;
                 let api_key = self.frontend.flag_string(&canonical_refs, "api-key")?;
                 Ok(BuiltCommand::Remote(RemoteCommand::new(
                     RemoteSubcommand::SessionStart(RemoteSessionStartFlags {
@@ -520,8 +508,7 @@ impl<F: CommandFrontend> Dispatch<F> {
             }
             ["remote", "session", "kill"] => {
                 let session_id = self.frontend.argument(&canonical_refs, "session_id")?;
-                let remote_addr =
-                    self.frontend.flag_string(&canonical_refs, "remote-addr")?;
+                let remote_addr = self.frontend.flag_string(&canonical_refs, "remote-addr")?;
                 let api_key = self.frontend.flag_string(&canonical_refs, "api-key")?;
                 Ok(BuiltCommand::Remote(RemoteCommand::new(
                     RemoteSubcommand::SessionKill(RemoteSessionKillFlags {
@@ -542,7 +529,10 @@ impl<F: CommandFrontend> Dispatch<F> {
                     .flag_bool(&canonical_refs, "non-interactive")?
                     .unwrap_or(false);
                 Ok(BuiltCommand::New(NewCommand::new(
-                    NewSubcommand::Spec(NewSpecFlags { interview, non_interactive }),
+                    NewSubcommand::Spec(NewSpecFlags {
+                        interview,
+                        non_interactive,
+                    }),
                     self.engines.clone(),
                 )))
             }
@@ -587,7 +577,11 @@ impl<F: CommandFrontend> Dispatch<F> {
                     .flag_bool(&canonical_refs, "global")?
                     .unwrap_or(false);
                 Ok(BuiltCommand::New(NewCommand::new(
-                    NewSubcommand::Skill(NewSkillFlags { interview, non_interactive, global }),
+                    NewSubcommand::Skill(NewSkillFlags {
+                        interview,
+                        non_interactive,
+                        global,
+                    }),
                     self.engines.clone(),
                 )))
             }
@@ -598,9 +592,7 @@ impl<F: CommandFrontend> Dispatch<F> {
     /// Tokenize a raw TUI command-box string into typed
     /// [`ParsedCommandBoxInput`]. All command-string interpretation lives
     /// here, never in the TUI.
-    pub fn parse_command_box_input(
-        raw: &str,
-    ) -> Result<ParsedCommandBoxInput, CommandError> {
+    pub fn parse_command_box_input(raw: &str) -> Result<ParsedCommandBoxInput, CommandError> {
         parsed_input::parse(raw, CommandCatalogue::get())
     }
 }
@@ -608,10 +600,7 @@ impl<F: CommandFrontend> Dispatch<F> {
 impl<F: DispatchFrontend> Dispatch<F> {
     /// Build the requested command and drive it to completion, moving the
     /// owned frontend into the matching `Box<dyn *CommandFrontend>`.
-    pub async fn run_command(
-        self,
-        path: &[&str],
-    ) -> Result<CommandOutcome, CommandError> {
+    pub async fn run_command(self, path: &[&str]) -> Result<CommandOutcome, CommandError> {
         let built = self.build_command(path)?;
         let frontend = self.frontend;
         match built {
@@ -621,7 +610,9 @@ impl<F: DispatchFrontend> Dispatch<F> {
             }
             BuiltCommand::Ready(cmd) => {
                 let boxed: Box<dyn ReadyCommandFrontend> = Box::new(frontend);
-                cmd.run_with_frontend(boxed).await.map(CommandOutcome::Ready)
+                cmd.run_with_frontend(boxed)
+                    .await
+                    .map(CommandOutcome::Ready)
             }
             BuiltCommand::Implement(cmd) => {
                 let boxed: Box<dyn ImplementCommandFrontend> = Box::new(frontend);
@@ -717,9 +708,7 @@ fn validate_conflicts<F: CommandFrontend>(
             FlagKind::Path | FlagKind::OptionalPath => {
                 frontend.flag_path(command_path, f.long)?.is_some()
             }
-            FlagKind::VecString => {
-                !frontend.flag_strings(command_path, f.long)?.is_empty()
-            }
+            FlagKind::VecString => !frontend.flag_strings(command_path, f.long)?.is_empty(),
             FlagKind::U16 => frontend.flag_u16(command_path, f.long)?.is_some(),
         };
         if is_set {
@@ -877,60 +866,28 @@ mod tests {
     }
 
     impl CommandFrontend for FakeCommandFrontend {
-        fn flag_bool(
-            &self,
-            _p: &[&str],
-            flag: &str,
-        ) -> Result<Option<bool>, CommandError> {
+        fn flag_bool(&self, _p: &[&str], flag: &str) -> Result<Option<bool>, CommandError> {
             Ok(self.bools.get(flag).copied())
         }
-        fn flag_string(
-            &self,
-            _p: &[&str],
-            flag: &str,
-        ) -> Result<Option<String>, CommandError> {
+        fn flag_string(&self, _p: &[&str], flag: &str) -> Result<Option<String>, CommandError> {
             Ok(self.strings.get(flag).cloned())
         }
-        fn flag_strings(
-            &self,
-            _p: &[&str],
-            flag: &str,
-        ) -> Result<Vec<String>, CommandError> {
+        fn flag_strings(&self, _p: &[&str], flag: &str) -> Result<Vec<String>, CommandError> {
             Ok(self.strings_vec.get(flag).cloned().unwrap_or_default())
         }
-        fn flag_path(
-            &self,
-            _p: &[&str],
-            flag: &str,
-        ) -> Result<Option<PathBuf>, CommandError> {
+        fn flag_path(&self, _p: &[&str], flag: &str) -> Result<Option<PathBuf>, CommandError> {
             Ok(self.paths.get(flag).cloned())
         }
-        fn flag_enum(
-            &self,
-            _p: &[&str],
-            flag: &str,
-        ) -> Result<Option<String>, CommandError> {
+        fn flag_enum(&self, _p: &[&str], flag: &str) -> Result<Option<String>, CommandError> {
             Ok(self.enums.get(flag).cloned())
         }
-        fn flag_u16(
-            &self,
-            _p: &[&str],
-            flag: &str,
-        ) -> Result<Option<u16>, CommandError> {
+        fn flag_u16(&self, _p: &[&str], flag: &str) -> Result<Option<u16>, CommandError> {
             Ok(self.u16s.get(flag).copied())
         }
-        fn argument(
-            &self,
-            _p: &[&str],
-            name: &str,
-        ) -> Result<Option<String>, CommandError> {
+        fn argument(&self, _p: &[&str], name: &str) -> Result<Option<String>, CommandError> {
             Ok(self.args.get(name).cloned())
         }
-        fn arguments(
-            &self,
-            _p: &[&str],
-            name: &str,
-        ) -> Result<Vec<String>, CommandError> {
+        fn arguments(&self, _p: &[&str], name: &str) -> Result<Vec<String>, CommandError> {
             Ok(self.args_vec.get(name).cloned().unwrap_or_default())
         }
     }
@@ -938,22 +895,24 @@ mod tests {
     fn make_engines() -> Engines {
         let runtime = Arc::new(crate::engine::container::ContainerRuntime::docker());
         let overlay = Arc::new(crate::engine::overlay::OverlayEngine::with_auth_resolver(
-            crate::data::fs::auth_paths::AuthPathResolver::at_home(std::path::PathBuf::from("/tmp")),
+            crate::data::fs::auth_paths::AuthPathResolver::at_home(std::path::PathBuf::from(
+                "/tmp",
+            )),
         ));
         let git_engine = Arc::new(crate::engine::git::GitEngine::new());
         let agent_engine = Arc::new(crate::engine::agent::AgentEngine::new(
             overlay.clone(),
             runtime.clone(),
         ));
-        let auth_engine = Arc::new(
-            crate::engine::auth::AuthEngine::with_paths(
-                crate::data::fs::auth_paths::AuthPathResolver::at_home("/tmp"),
-                crate::data::fs::headless_paths::HeadlessPaths::at_root("/tmp"),
-            ),
-        );
+        let auth_engine = Arc::new(crate::engine::auth::AuthEngine::with_paths(
+            crate::data::fs::auth_paths::AuthPathResolver::at_home("/tmp"),
+            crate::data::fs::headless_paths::HeadlessPaths::at_root("/tmp"),
+        ));
         let workflow_state_store = {
             let tmp = tempfile::tempdir().unwrap();
-            Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(tmp.path()))
+            Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(
+                tmp.path(),
+            ))
         };
         Engines {
             runtime,
@@ -1041,7 +1000,10 @@ mod tests {
         let built = dispatch.build_command(&["ready"]).unwrap();
         match built {
             BuiltCommand::Ready(cmd) => {
-                assert!(cmd.flags().non_interactive, "json should imply non_interactive");
+                assert!(
+                    cmd.flags().non_interactive,
+                    "json should imply non_interactive"
+                );
             }
             _ => panic!("expected Ready"),
         }
@@ -1051,15 +1013,17 @@ mod tests {
     fn exec_workflow_yolo_implies_worktree_in_built_command() {
         let mut frontend = FakeCommandFrontend::new();
         frontend.bools.insert("yolo".into(), true);
-        frontend.paths.insert(
-            "workflow".into(),
-            std::path::PathBuf::from("/tmp/wf.toml"),
-        );
+        frontend
+            .paths
+            .insert("workflow".into(), std::path::PathBuf::from("/tmp/wf.toml"));
         let dispatch = Dispatch::new(frontend, make_session(), make_engines());
         let built = dispatch.build_command(&["exec", "workflow"]).unwrap();
         match built {
             BuiltCommand::ExecWorkflow(cmd) => {
-                assert!(cmd.flags().worktree, "yolo should imply worktree on exec workflow");
+                assert!(
+                    cmd.flags().worktree,
+                    "yolo should imply worktree on exec workflow"
+                );
             }
             _ => panic!("expected ExecWorkflow"),
         }
@@ -1069,15 +1033,17 @@ mod tests {
     fn exec_workflow_auto_implies_worktree_in_built_command() {
         let mut frontend = FakeCommandFrontend::new();
         frontend.bools.insert("auto".into(), true);
-        frontend.paths.insert(
-            "workflow".into(),
-            std::path::PathBuf::from("/tmp/wf.toml"),
-        );
+        frontend
+            .paths
+            .insert("workflow".into(), std::path::PathBuf::from("/tmp/wf.toml"));
         let dispatch = Dispatch::new(frontend, make_session(), make_engines());
         let built = dispatch.build_command(&["exec", "workflow"]).unwrap();
         match built {
             BuiltCommand::ExecWorkflow(cmd) => {
-                assert!(cmd.flags().worktree, "auto should imply worktree on exec workflow");
+                assert!(
+                    cmd.flags().worktree,
+                    "auto should imply worktree on exec workflow"
+                );
                 assert!(cmd.flags().auto);
             }
             _ => panic!("expected ExecWorkflow"),
@@ -1089,10 +1055,9 @@ mod tests {
         let mut frontend = FakeCommandFrontend::new();
         frontend.args.insert("work_item".into(), "0001".into());
         frontend.bools.insert("yolo".into(), true);
-        frontend.paths.insert(
-            "workflow".into(),
-            std::path::PathBuf::from("/tmp/wf.toml"),
-        );
+        frontend
+            .paths
+            .insert("workflow".into(), std::path::PathBuf::from("/tmp/wf.toml"));
         let dispatch = Dispatch::new(frontend, make_session(), make_engines());
         let built = dispatch.build_command(&["implement"]).unwrap();
         match built {
@@ -1135,7 +1100,9 @@ mod tests {
     #[test]
     fn build_config_get_with_field_argument() {
         let mut frontend = FakeCommandFrontend::new();
-        frontend.args.insert("field".into(), "terminal_scrollback_lines".into());
+        frontend
+            .args
+            .insert("field".into(), "terminal_scrollback_lines".into());
         let dispatch = Dispatch::new(frontend, make_session(), make_engines());
         let built = dispatch.build_command(&["config", "get"]).unwrap();
         assert!(matches!(built, BuiltCommand::Config(_)));
@@ -1188,7 +1155,10 @@ mod tests {
             let dispatch =
                 Dispatch::new(FakeCommandFrontend::new(), make_session(), make_engines());
             let built = dispatch.build_command(&["claws", sub]).unwrap();
-            assert!(matches!(built, BuiltCommand::Claws(_)), "claws {sub} must build Claws");
+            assert!(
+                matches!(built, BuiltCommand::Claws(_)),
+                "claws {sub} must build Claws"
+            );
         }
     }
 
@@ -1239,10 +1209,9 @@ mod tests {
     #[test]
     fn alias_wf_resolves_to_exec_workflow() {
         let mut frontend = FakeCommandFrontend::new();
-        frontend.paths.insert(
-            "workflow".into(),
-            std::path::PathBuf::from("/tmp/wf.toml"),
-        );
+        frontend
+            .paths
+            .insert("workflow".into(), std::path::PathBuf::from("/tmp/wf.toml"));
         let dispatch = Dispatch::new(frontend, make_session(), make_engines());
         // "wf" is a string alias under "exec"; dispatch should resolve it.
         let built = dispatch.build_command(&["exec", "wf"]).unwrap();
@@ -1321,10 +1290,9 @@ mod tests {
     #[test]
     fn exec_workflow_no_yolo_no_auto_worktree_false() {
         let mut frontend = FakeCommandFrontend::new();
-        frontend.paths.insert(
-            "workflow".into(),
-            std::path::PathBuf::from("/tmp/wf.toml"),
-        );
+        frontend
+            .paths
+            .insert("workflow".into(), std::path::PathBuf::from("/tmp/wf.toml"));
         // Neither yolo nor auto is set; worktree must not be implied.
         let dispatch = Dispatch::new(frontend, make_session(), make_engines());
         let built = dispatch.build_command(&["exec", "workflow"]).unwrap();
@@ -1346,10 +1314,9 @@ mod tests {
         let mut frontend = FakeCommandFrontend::new();
         frontend.bools.insert("yolo".into(), true);
         frontend.bools.insert("worktree".into(), true);
-        frontend.paths.insert(
-            "workflow".into(),
-            std::path::PathBuf::from("/tmp/wf.toml"),
-        );
+        frontend
+            .paths
+            .insert("workflow".into(), std::path::PathBuf::from("/tmp/wf.toml"));
         let dispatch = Dispatch::new(frontend, make_session(), make_engines());
         let built = dispatch.build_command(&["exec", "workflow"]).unwrap();
         match built {

@@ -41,7 +41,13 @@ mod tests {
     #[test]
     fn mask_env_replaces_values() {
         let args: Vec<String> = vec![
-            "run", "--rm", "-e", "SECRET=hunter2", "-e", "PATH=/usr/bin", "image",
+            "run",
+            "--rm",
+            "-e",
+            "SECRET=hunter2",
+            "-e",
+            "PATH=/usr/bin",
+            "image",
         ]
         .into_iter()
         .map(String::from)

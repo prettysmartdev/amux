@@ -308,40 +308,25 @@ impl ClawsEngine {
                 } else {
                     let user = std::env::var("USER").unwrap_or_else(|_| "$USER".into());
                     let needed = vec![
-                        format!(
-                            "sudo chown -R {user} {}",
-                            self.options.clone_dir.display()
-                        ),
-                        format!(
-                            "sudo chmod -R u+rwX {}",
-                            self.options.clone_dir.display()
-                        ),
+                        format!("sudo chown -R {user} {}", self.options.clone_dir.display()),
+                        format!("sudo chmod -R u+rwX {}", self.options.clone_dir.display()),
                     ];
                     match frontend.confirm_sudo_actions(&needed)? {
                         true => {
                             // Issue 19: actually execute sudo chown + chmod
                             // to fix permissions on the clone directory.
-                            let clone_path_str =
-                                self.options.clone_dir.to_str().unwrap_or("");
+                            let clone_path_str = self.options.clone_dir.to_str().unwrap_or("");
                             // Resolve uid:gid via `id` commands (avoids
                             // `unsafe` libc calls forbidden by the crate).
                             let uid_str = std::process::Command::new("id")
                                 .arg("-u")
                                 .output()
-                                .map(|o| {
-                                    String::from_utf8_lossy(&o.stdout)
-                                        .trim()
-                                        .to_string()
-                                })
+                                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                                 .unwrap_or_else(|_| user.clone());
                             let gid_str = std::process::Command::new("id")
                                 .arg("-g")
                                 .output()
-                                .map(|o| {
-                                    String::from_utf8_lossy(&o.stdout)
-                                        .trim()
-                                        .to_string()
-                                })
+                                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                                 .unwrap_or_else(|_| uid_str.clone());
                             let chown_status = std::process::Command::new("sudo")
                                 .args([
@@ -353,9 +338,7 @@ impl ClawsEngine {
                                 .status();
                             if let Ok(s) = chown_status {
                                 if !s.success() {
-                                    return Err(EngineError::Other(
-                                        "sudo chown failed".into(),
-                                    ));
+                                    return Err(EngineError::Other("sudo chown failed".into()));
                                 }
                             }
                             let chmod_status = std::process::Command::new("sudo")
@@ -363,9 +346,7 @@ impl ClawsEngine {
                                 .status();
                             if let Ok(s) = chmod_status {
                                 if !s.success() {
-                                    return Err(EngineError::Other(
-                                        "sudo chmod failed".into(),
-                                    ));
+                                    return Err(EngineError::Other("sudo chmod failed".into()));
                                 }
                             }
                             self.summary.permissions_check = StepStatus::Done;
@@ -399,9 +380,7 @@ impl ClawsEngine {
                         &mut sink,
                     ) {
                         Ok(()) => self.summary.image_build = StepStatus::Done,
-                        Err(e) => {
-                            self.summary.image_build = StepStatus::Failed(e.to_string())
-                        }
+                        Err(e) => self.summary.image_build = StepStatus::Failed(e.to_string()),
                     }
                 } else {
                     self.summary.image_build =
@@ -457,8 +436,7 @@ impl ClawsEngine {
                         );
                     }
                     Err(e) => {
-                        self.summary.audit =
-                            StepStatus::Failed(format!("docker run audit: {e}"));
+                        self.summary.audit = StepStatus::Failed(format!("docker run audit: {e}"));
                     }
                     Ok(s) if s.success() => self.summary.audit = StepStatus::Done,
                     Ok(s) => {
@@ -475,10 +453,8 @@ impl ClawsEngine {
                     claws_clone_path, claws_config_path, claws_controller_name,
                 };
                 if let Some(home) = dirs::home_dir() {
-                    let _ = std::fs::create_dir_all(claws_clone_path(
-                        &home,
-                        self.session.git_root(),
-                    ));
+                    let _ =
+                        std::fs::create_dir_all(claws_clone_path(&home, self.session.git_root()));
                     let cfg_path = claws_config_path(&home, self.session.git_root());
                     // Issue 23: persist container_name alongside git_root.
                     let controller_name = claws_controller_name(self.session.git_root());
@@ -579,8 +555,7 @@ impl ClawsEngine {
 
                     // 2. envPassthrough from EffectiveConfig — forward any
                     //    user-configured env vars that are set on the host.
-                    let passthrough_vars =
-                        self.session.effective_config().env_passthrough();
+                    let passthrough_vars = self.session.effective_config().env_passthrough();
                     for name in &passthrough_vars {
                         if let Ok(v) = std::env::var(name) {
                             cmd.arg("-e").arg(format!("{name}={v}"));
@@ -593,13 +568,9 @@ impl ClawsEngine {
                         .effective_config()
                         .agent()
                         .unwrap_or_else(|| "claude".to_string());
-                    if let Ok(agent) =
-                        crate::data::session::AgentName::new(&eff_agent_name)
-                    {
+                    if let Ok(agent) = crate::data::session::AgentName::new(&eff_agent_name) {
                         let keychain_creds =
-                            crate::engine::auth::keychain::agent_keychain_credentials(
-                                &agent,
-                            );
+                            crate::engine::auth::keychain::agent_keychain_credentials(&agent);
                         for (key, val) in &keychain_creds {
                             cmd.arg("-e").arg(format!("{key}={val}"));
                         }
@@ -636,8 +607,7 @@ impl ClawsEngine {
                         // config now that it has been launched.
                         if let Some(home) = dirs::home_dir() {
                             use crate::data::claws_paths::claws_config_path;
-                            let cfg_path =
-                                claws_config_path(&home, self.session.git_root());
+                            let cfg_path = claws_config_path(&home, self.session.git_root());
                             let body = serde_json::json!({
                                 "git_root": self.session.git_root(),
                                 "version": 1,
@@ -645,8 +615,7 @@ impl ClawsEngine {
                             });
                             let _ = std::fs::write(
                                 &cfg_path,
-                                serde_json::to_string_pretty(&body)
-                                    .unwrap_or_default(),
+                                serde_json::to_string_pretty(&body).unwrap_or_default(),
                             );
                         }
                         self.summary.controller = StepStatus::Done;
@@ -664,10 +633,7 @@ impl ClawsEngine {
                     .agent()
                     .unwrap_or_else(|| "claude".to_string());
                 let entrypoint = chat_entrypoint_for(&agent_name);
-                let mut exec_args = vec![
-                    "exec".to_string(),
-                    "-it".to_string(),
-                ];
+                let mut exec_args = vec!["exec".to_string(), "-it".to_string()];
                 // Forward agent credentials into the exec session.
                 if let Ok(agent) = AgentName::new(&agent_name) {
                     if let Ok(creds) = self.auth_engine.agent_keychain_credentials(&agent) {
@@ -714,10 +680,7 @@ impl ClawsEngine {
                         self.summary.controller = StepStatus::Done;
                     }
                     Ok(s) => {
-                        let msg = format!(
-                            "claws-chat exited with code {}",
-                            s.code().unwrap_or(-1)
-                        );
+                        let msg = format!("claws-chat exited with code {}", s.code().unwrap_or(-1));
                         return Ok({
                             self.phase = ClawsPhase::Failed(ClawsFailure::ChatAttach {
                                 controller: controller_name,
@@ -989,7 +952,10 @@ mod tests {
         let runtime = Arc::new(crate::engine::container::ContainerRuntime::docker());
         let auth_paths = crate::data::fs::auth_paths::AuthPathResolver::at_home(tmp.path());
         let headless_paths = crate::data::fs::headless_paths::HeadlessPaths::at_root(tmp.path());
-        let auth_engine = Arc::new(crate::engine::auth::AuthEngine::with_paths(auth_paths, headless_paths));
+        let auth_engine = Arc::new(crate::engine::auth::AuthEngine::with_paths(
+            auth_paths,
+            headless_paths,
+        ));
         ClawsEngine::new(
             session,
             Arc::new(GitEngine::new()),

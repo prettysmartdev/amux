@@ -7,12 +7,9 @@ pub fn render_api_key_banner(key: &str) -> String {
     let inner_width: usize = 67;
     let key_line = format!("  {key}  ");
     let key_padded = format!("{:<width$}", key_line, width = inner_width);
-    let title_line =
-        "  amux headless API key (store this — it will not be shown again)  ";
+    let title_line = "  amux headless API key (store this — it will not be shown again)  ";
     let bar = "═".repeat(inner_width);
-    format!(
-        "╔{bar}╗\n║{title_line}║\n║{key_padded}║\n╚{bar}╝"
-    )
+    format!("╔{bar}╗\n║{title_line}║\n║{key_padded}║\n╚{bar}╝")
 }
 
 #[cfg(test)]
@@ -24,7 +21,10 @@ mod tests {
         let out = render_api_key_banner(&"a".repeat(64));
         assert!(out.starts_with("╔"), "banner must open with ╔");
         assert!(out.ends_with("╝"), "banner must close with ╝");
-        assert!(out.contains("amux headless API key (store this"), "banner must include legacy title");
+        assert!(
+            out.contains("amux headless API key (store this"),
+            "banner must include legacy title"
+        );
     }
 
     #[test]

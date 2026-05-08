@@ -21,9 +21,8 @@ pub use instance::{
 };
 pub use naming::generate_container_name;
 pub use options::{
-    AgentSettings, AutoMode, ContainerName, ContainerOption, CpuLimit, EnvLiteral, EnvVar,
-    Entrypoint, ImageRef, MemoryLimit, ModelFlagForm, OverlayPermission, OverlaySpec, PlanMode,
+    AgentSettings, AutoMode, ContainerName, ContainerOption, CpuLimit, Entrypoint, EnvLiteral,
+    EnvVar, ImageRef, MemoryLimit, ModelFlagForm, OverlayPermission, OverlaySpec, PlanMode,
     YoloMode,
 };
 pub use runtime::ContainerRuntime;
-

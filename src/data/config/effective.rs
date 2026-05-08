@@ -218,7 +218,9 @@ impl EffectiveConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::config::env::{EnvSnapshot, AMUX_API_KEY, AMUX_REMOTE_ADDR, AMUX_REMOTE_SESSION};
+    use crate::data::config::env::{
+        EnvSnapshot, AMUX_API_KEY, AMUX_REMOTE_ADDR, AMUX_REMOTE_SESSION,
+    };
     use crate::data::config::repo::{HeadlessConfig, RemoteConfig};
     use std::time::Duration;
 
@@ -235,25 +237,48 @@ mod tests {
 
     #[test]
     fn agent_flag_beats_repo_and_global() {
-        let flags = FlagConfig { agent: Some("flag-agent".to_string()), ..Default::default() };
-        let repo = RepoConfig { agent: Some("repo-agent".to_string()), ..Default::default() };
-        let global = GlobalConfig { default_agent: Some("global-agent".to_string()), ..Default::default() };
+        let flags = FlagConfig {
+            agent: Some("flag-agent".to_string()),
+            ..Default::default()
+        };
+        let repo = RepoConfig {
+            agent: Some("repo-agent".to_string()),
+            ..Default::default()
+        };
+        let global = GlobalConfig {
+            default_agent: Some("global-agent".to_string()),
+            ..Default::default()
+        };
         let ec = make_effective(flags, EnvSnapshot::empty(), repo, global);
         assert_eq!(ec.agent().as_deref(), Some("flag-agent"));
     }
 
     #[test]
     fn agent_repo_beats_global() {
-        let repo = RepoConfig { agent: Some("repo-agent".to_string()), ..Default::default() };
-        let global = GlobalConfig { default_agent: Some("global-agent".to_string()), ..Default::default() };
+        let repo = RepoConfig {
+            agent: Some("repo-agent".to_string()),
+            ..Default::default()
+        };
+        let global = GlobalConfig {
+            default_agent: Some("global-agent".to_string()),
+            ..Default::default()
+        };
         let ec = make_effective(FlagConfig::default(), EnvSnapshot::empty(), repo, global);
         assert_eq!(ec.agent().as_deref(), Some("repo-agent"));
     }
 
     #[test]
     fn agent_global_is_used_when_repo_unset() {
-        let global = GlobalConfig { default_agent: Some("global-agent".to_string()), ..Default::default() };
-        let ec = make_effective(FlagConfig::default(), EnvSnapshot::empty(), RepoConfig::default(), global);
+        let global = GlobalConfig {
+            default_agent: Some("global-agent".to_string()),
+            ..Default::default()
+        };
+        let ec = make_effective(
+            FlagConfig::default(),
+            EnvSnapshot::empty(),
+            RepoConfig::default(),
+            global,
+        );
         assert_eq!(ec.agent().as_deref(), Some("global-agent"));
     }
 
@@ -272,24 +297,42 @@ mod tests {
 
     #[test]
     fn scrollback_flag_beats_repo_and_global() {
-        let flags = FlagConfig { terminal_scrollback_lines: Some(9999), ..Default::default() };
-        let repo = RepoConfig { terminal_scrollback_lines: Some(5000), ..Default::default() };
-        let global = GlobalConfig { terminal_scrollback_lines: Some(2000), ..Default::default() };
+        let flags = FlagConfig {
+            terminal_scrollback_lines: Some(9999),
+            ..Default::default()
+        };
+        let repo = RepoConfig {
+            terminal_scrollback_lines: Some(5000),
+            ..Default::default()
+        };
+        let global = GlobalConfig {
+            terminal_scrollback_lines: Some(2000),
+            ..Default::default()
+        };
         let ec = make_effective(flags, EnvSnapshot::empty(), repo, global);
         assert_eq!(ec.scrollback_lines(), 9999);
     }
 
     #[test]
     fn scrollback_repo_beats_global() {
-        let repo = RepoConfig { terminal_scrollback_lines: Some(5000), ..Default::default() };
-        let global = GlobalConfig { terminal_scrollback_lines: Some(2000), ..Default::default() };
+        let repo = RepoConfig {
+            terminal_scrollback_lines: Some(5000),
+            ..Default::default()
+        };
+        let global = GlobalConfig {
+            terminal_scrollback_lines: Some(2000),
+            ..Default::default()
+        };
         let ec = make_effective(FlagConfig::default(), EnvSnapshot::empty(), repo, global);
         assert_eq!(ec.scrollback_lines(), 5000);
     }
 
     #[test]
     fn scrollback_global_beats_built_in_default() {
-        let global = GlobalConfig { terminal_scrollback_lines: Some(3333), ..Default::default() };
+        let global = GlobalConfig {
+            terminal_scrollback_lines: Some(3333),
+            ..Default::default()
+        };
         let ec = make_effective(
             FlagConfig::default(),
             EnvSnapshot::empty(),
@@ -319,23 +362,38 @@ mod tests {
             agent_stuck_timeout: Some(Duration::from_secs(999)),
             ..Default::default()
         };
-        let repo = RepoConfig { agent_stuck_timeout_secs: Some(100), ..Default::default() };
-        let global = GlobalConfig { agent_stuck_timeout_secs: Some(50), ..Default::default() };
+        let repo = RepoConfig {
+            agent_stuck_timeout_secs: Some(100),
+            ..Default::default()
+        };
+        let global = GlobalConfig {
+            agent_stuck_timeout_secs: Some(50),
+            ..Default::default()
+        };
         let ec = make_effective(flags, EnvSnapshot::empty(), repo, global);
         assert_eq!(ec.agent_stuck_timeout(), Duration::from_secs(999));
     }
 
     #[test]
     fn timeout_repo_beats_global() {
-        let repo = RepoConfig { agent_stuck_timeout_secs: Some(77), ..Default::default() };
-        let global = GlobalConfig { agent_stuck_timeout_secs: Some(50), ..Default::default() };
+        let repo = RepoConfig {
+            agent_stuck_timeout_secs: Some(77),
+            ..Default::default()
+        };
+        let global = GlobalConfig {
+            agent_stuck_timeout_secs: Some(50),
+            ..Default::default()
+        };
         let ec = make_effective(FlagConfig::default(), EnvSnapshot::empty(), repo, global);
         assert_eq!(ec.agent_stuck_timeout(), Duration::from_secs(77));
     }
 
     #[test]
     fn timeout_global_beats_built_in_default() {
-        let global = GlobalConfig { agent_stuck_timeout_secs: Some(120), ..Default::default() };
+        let global = GlobalConfig {
+            agent_stuck_timeout_secs: Some(120),
+            ..Default::default()
+        };
         let ec = make_effective(
             FlagConfig::default(),
             EnvSnapshot::empty(),
@@ -353,7 +411,10 @@ mod tests {
             RepoConfig::default(),
             GlobalConfig::default(),
         );
-        assert_eq!(ec.agent_stuck_timeout(), Duration::from_secs(DEFAULT_AGENT_STUCK_TIMEOUT_SECS));
+        assert_eq!(
+            ec.agent_stuck_timeout(),
+            Duration::from_secs(DEFAULT_AGENT_STUCK_TIMEOUT_SECS)
+        );
         assert_eq!(ec.agent_stuck_timeout(), Duration::from_secs(30));
     }
 
@@ -447,7 +508,10 @@ mod tests {
 
     #[test]
     fn remote_addr_flag_beats_env_and_global() {
-        let flags = FlagConfig { remote_addr: Some("flag-addr".to_string()), ..Default::default() };
+        let flags = FlagConfig {
+            remote_addr: Some("flag-addr".to_string()),
+            ..Default::default()
+        };
         let env = EnvSnapshot::with_overrides([(AMUX_REMOTE_ADDR, "env-addr")]);
         let global = GlobalConfig {
             remote: Some(RemoteConfig {
@@ -507,7 +571,10 @@ mod tests {
 
     #[test]
     fn remote_api_key_flag_beats_env() {
-        let flags = FlagConfig { api_key: Some("flag-key".to_string()), ..Default::default() };
+        let flags = FlagConfig {
+            api_key: Some("flag-key".to_string()),
+            ..Default::default()
+        };
         let env = EnvSnapshot::with_overrides([(AMUX_API_KEY, "env-key")]);
         let ec = make_effective(flags, env, RepoConfig::default(), GlobalConfig::default());
         assert_eq!(ec.remote_default_api_key().as_deref(), Some("flag-key"));
@@ -531,8 +598,10 @@ mod tests {
 
     #[test]
     fn remote_session_flag_beats_env() {
-        let flags =
-            FlagConfig { remote_session: Some("flag-session".to_string()), ..Default::default() };
+        let flags = FlagConfig {
+            remote_session: Some("flag-session".to_string()),
+            ..Default::default()
+        };
         let env = EnvSnapshot::with_overrides([(AMUX_REMOTE_SESSION, "env-session")]);
         let ec = make_effective(flags, env, RepoConfig::default(), GlobalConfig::default());
         assert_eq!(ec.remote_session().as_deref(), Some("flag-session"));
@@ -541,7 +610,12 @@ mod tests {
     #[test]
     fn remote_session_from_env_when_flag_unset() {
         let env = EnvSnapshot::with_overrides([(AMUX_REMOTE_SESSION, "env-session")]);
-        let ec = make_effective(FlagConfig::default(), env, RepoConfig::default(), GlobalConfig::default());
+        let ec = make_effective(
+            FlagConfig::default(),
+            env,
+            RepoConfig::default(),
+            GlobalConfig::default(),
+        );
         assert_eq!(ec.remote_session().as_deref(), Some("env-session"));
     }
 
@@ -560,7 +634,10 @@ mod tests {
 
     #[test]
     fn always_non_interactive_flag_wins() {
-        let flags = FlagConfig { non_interactive: Some(true), ..Default::default() };
+        let flags = FlagConfig {
+            non_interactive: Some(true),
+            ..Default::default()
+        };
         let global = GlobalConfig {
             headless: Some(HeadlessConfig {
                 always_non_interactive: Some(false),
@@ -664,40 +741,96 @@ mod tests {
 
     #[test]
     fn full_stack_agent_precedence_flag_beats_repo_beats_global_beats_none() {
-        let flags = FlagConfig { agent: Some("flag-agent".to_string()), ..Default::default() };
-        let repo = RepoConfig { agent: Some("repo-agent".to_string()), ..Default::default() };
-        let global = GlobalConfig { default_agent: Some("global-agent".to_string()), ..Default::default() };
+        let flags = FlagConfig {
+            agent: Some("flag-agent".to_string()),
+            ..Default::default()
+        };
+        let repo = RepoConfig {
+            agent: Some("repo-agent".to_string()),
+            ..Default::default()
+        };
+        let global = GlobalConfig {
+            default_agent: Some("global-agent".to_string()),
+            ..Default::default()
+        };
 
         // Flag wins over all.
-        let ec = make_effective(flags.clone(), EnvSnapshot::empty(), repo.clone(), global.clone());
-        assert_eq!(ec.agent().as_deref(), Some("flag-agent"), "flag should beat repo and global");
+        let ec = make_effective(
+            flags.clone(),
+            EnvSnapshot::empty(),
+            repo.clone(),
+            global.clone(),
+        );
+        assert_eq!(
+            ec.agent().as_deref(),
+            Some("flag-agent"),
+            "flag should beat repo and global"
+        );
 
         // Remove flag → repo wins.
-        let ec2 = make_effective(FlagConfig::default(), EnvSnapshot::empty(), repo.clone(), global.clone());
-        assert_eq!(ec2.agent().as_deref(), Some("repo-agent"), "repo should beat global");
+        let ec2 = make_effective(
+            FlagConfig::default(),
+            EnvSnapshot::empty(),
+            repo.clone(),
+            global.clone(),
+        );
+        assert_eq!(
+            ec2.agent().as_deref(),
+            Some("repo-agent"),
+            "repo should beat global"
+        );
 
         // Remove repo → global wins.
-        let ec3 = make_effective(FlagConfig::default(), EnvSnapshot::empty(), RepoConfig::default(), global);
-        assert_eq!(ec3.agent().as_deref(), Some("global-agent"), "global used when flag and repo absent");
+        let ec3 = make_effective(
+            FlagConfig::default(),
+            EnvSnapshot::empty(),
+            RepoConfig::default(),
+            global,
+        );
+        assert_eq!(
+            ec3.agent().as_deref(),
+            Some("global-agent"),
+            "global used when flag and repo absent"
+        );
 
         // Remove all → None.
-        let ec4 = make_effective(FlagConfig::default(), EnvSnapshot::empty(), RepoConfig::default(), GlobalConfig::default());
+        let ec4 = make_effective(
+            FlagConfig::default(),
+            EnvSnapshot::empty(),
+            RepoConfig::default(),
+            GlobalConfig::default(),
+        );
         assert_eq!(ec4.agent(), None, "None when nothing is set");
     }
 
     #[test]
     fn full_stack_flag_wins_over_all_levels_for_scrollback() {
         // Set scrollback at every level; flag must win.
-        let flags = FlagConfig { terminal_scrollback_lines: Some(1111), ..Default::default() };
-        let repo = RepoConfig { terminal_scrollback_lines: Some(2222), ..Default::default() };
-        let global = GlobalConfig { terminal_scrollback_lines: Some(3333), ..Default::default() };
+        let flags = FlagConfig {
+            terminal_scrollback_lines: Some(1111),
+            ..Default::default()
+        };
+        let repo = RepoConfig {
+            terminal_scrollback_lines: Some(2222),
+            ..Default::default()
+        };
+        let global = GlobalConfig {
+            terminal_scrollback_lines: Some(3333),
+            ..Default::default()
+        };
         let ec = make_effective(flags, EnvSnapshot::empty(), repo, global);
         assert_eq!(ec.scrollback_lines(), 1111);
 
         // Remove flag — repo wins.
         let flags2 = FlagConfig::default();
-        let repo2 = RepoConfig { terminal_scrollback_lines: Some(2222), ..Default::default() };
-        let global2 = GlobalConfig { terminal_scrollback_lines: Some(3333), ..Default::default() };
+        let repo2 = RepoConfig {
+            terminal_scrollback_lines: Some(2222),
+            ..Default::default()
+        };
+        let global2 = GlobalConfig {
+            terminal_scrollback_lines: Some(3333),
+            ..Default::default()
+        };
         let ec2 = make_effective(flags2, EnvSnapshot::empty(), repo2, global2);
         assert_eq!(ec2.scrollback_lines(), 2222);
 
@@ -706,7 +839,10 @@ mod tests {
             FlagConfig::default(),
             EnvSnapshot::empty(),
             RepoConfig::default(),
-            GlobalConfig { terminal_scrollback_lines: Some(3333), ..Default::default() },
+            GlobalConfig {
+                terminal_scrollback_lines: Some(3333),
+                ..Default::default()
+            },
         );
         assert_eq!(ec3.scrollback_lines(), 3333);
 

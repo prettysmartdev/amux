@@ -49,11 +49,8 @@ mod tests {
 
     #[test]
     fn format_suggestion_row_multiple_suggestions_separated_by_middots() {
-        let result = format_suggestion_row(&[
-            "chat".to_string(),
-            "exec".to_string(),
-            "status".to_string(),
-        ]);
+        let result =
+            format_suggestion_row(&["chat".to_string(), "exec".to_string(), "status".to_string()]);
         assert_eq!(result, "> chat · exec · status");
     }
 
@@ -73,7 +70,10 @@ mod tests {
     fn hint_for_input_known_command_with_flags_returns_some() {
         // chat has flags (e.g. --yolo), so a hint should be returned
         let hint = hint_for_input("chat");
-        assert!(hint.is_some(), "known command 'chat' must yield a hint when it has flags");
+        assert!(
+            hint.is_some(),
+            "known command 'chat' must yield a hint when it has flags"
+        );
     }
 
     #[test]
@@ -89,6 +89,9 @@ mod tests {
             !hint.starts_with("chat"),
             "hint must not repeat the command name; got: {hint}"
         );
-        assert!(hint.contains("--yolo"), "hint for 'chat' must include --yolo flag");
+        assert!(
+            hint.contains("--yolo"),
+            "hint for 'chat' must include --yolo flag"
+        );
     }
 }

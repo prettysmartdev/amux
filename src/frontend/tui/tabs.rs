@@ -117,7 +117,9 @@ pub type SharedResizeTx = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u
 /// Shared control board sender. The engine creates the channel and publishes
 /// the sender via `set_control_board_sender`; the TUI event loop reads it
 /// to send mid-step WCB requests.
-pub type SharedControlBoardTx = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::engine::workflow::ControlBoardRequest>>>>;
+pub type SharedControlBoardTx = Arc<
+    Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::engine::workflow::ControlBoardRequest>>>,
+>;
 
 #[derive(Debug, Clone)]
 pub struct YoloState {
@@ -229,8 +231,7 @@ pub struct Tab {
     /// Event loop forwards terminal resizes to the container's PTY master.
     pub container_resize_tx: Option<tokio::sync::mpsc::UnboundedSender<(u16, u16)>>,
     /// Receives the command outcome once the spawned task finishes.
-    pub command_result_rx:
-        Option<std::sync::mpsc::Receiver<Result<CommandOutcome, CommandError>>>,
+    pub command_result_rx: Option<std::sync::mpsc::Receiver<Result<CommandOutcome, CommandError>>>,
     /// Event loop polls for dialog requests from the command thread.
     pub dialog_request_rx: Option<std::sync::mpsc::Receiver<DialogRequest>>,
     /// Event loop sends dialog responses back to the command thread.
@@ -362,7 +363,11 @@ impl Tab {
     ) {
         self.container_window_state = ContainerWindowState::Maximized;
         self.container_scroll_offset = 0;
-        self.vt100_parser = vt100::Parser::new(rows, cols, self.session.effective_config().scrollback_lines());
+        self.vt100_parser = vt100::Parser::new(
+            rows,
+            cols,
+            self.session.effective_config().scrollback_lines(),
+        );
         self.last_container_summary = None;
         self.mouse_selection = None;
         self.last_output_time = Some(Instant::now());
@@ -464,7 +469,8 @@ impl Tab {
         let total = view.steps.len();
         let done_count = view.steps.iter().filter(|s| s.status == "done").count();
         let current_name = view.current_step.as_deref().unwrap_or_else(|| {
-            view.steps.iter()
+            view.steps
+                .iter()
                 .find(|s| s.status == "running")
                 .map(|s| s.name.as_str())
                 .unwrap_or("")
@@ -477,7 +483,9 @@ impl Tab {
             }
             return String::new();
         }
-        let step_index = view.steps.iter()
+        let step_index = view
+            .steps
+            .iter()
             .position(|s| s.name == current_name)
             .map(|i| i + 1)
             .unwrap_or(0);
@@ -500,7 +508,11 @@ impl Tab {
             // Check if the engine signalled a PTY reset (workflow step transition).
             if self.pty_reset_flag.swap(false, Ordering::Relaxed) {
                 let (rows, cols) = self.vt100_parser.screen().size();
-                self.vt100_parser = vt100::Parser::new(rows, cols, self.session.effective_config().scrollback_lines());
+                self.vt100_parser = vt100::Parser::new(
+                    rows,
+                    cols,
+                    self.session.effective_config().scrollback_lines(),
+                );
                 self.container_scroll_offset = 0;
                 self.mouse_selection = None;
             }
@@ -515,7 +527,9 @@ impl Tab {
                 if let Ok((cols, rows)) = crossterm::terminal::size() {
                     let (inner_cols, inner_rows) =
                         crate::frontend::tui::compute_container_inner_size(cols, rows);
-                    self.vt100_parser.screen_mut().set_size(inner_rows, inner_cols);
+                    self.vt100_parser
+                        .screen_mut()
+                        .set_size(inner_rows, inner_cols);
                     if let Some(ref tx) = self.container_resize_tx {
                         let _ = tx.send((inner_cols, inner_rows));
                     }
@@ -541,10 +555,7 @@ impl Tab {
                         info.stats_history.iter().map(|(c, _)| c).sum::<f64>() / count;
                     let mem_avg: f64 =
                         info.stats_history.iter().map(|(_, m)| m).sum::<f64>() / count;
-                    (
-                        format!("{:.1}%", cpu_avg),
-                        format!("{:.0}MiB", mem_avg),
-                    )
+                    (format!("{:.1}%", cpu_avg), format!("{:.0}MiB", mem_avg))
                 };
                 self.last_container_summary = Some(LastContainerSummary {
                     agent_display_name: info.agent_display_name,
@@ -582,8 +593,10 @@ impl Tab {
                             text: format!("Command '{}' completed successfully.", cmd_name),
                         });
                     }
-                    self.execution_phase =
-                        ExecutionPhase::Done { command: cmd_name, exit_code: 0 };
+                    self.execution_phase = ExecutionPhase::Done {
+                        command: cmd_name,
+                        exit_code: 0,
+                    };
                     self.close_container_overlay(0);
                     self.command_result_rx = None;
                     self.container_stdout_rx = None;
@@ -713,18 +726,23 @@ pub fn tab_color(tab: &Tab) -> ratatui::style::Color {
 }
 
 /// Execution window border color based on phase and focus.
-pub fn window_border_color(
-    phase: &ExecutionPhase,
-    focused: bool,
-) -> ratatui::style::Color {
+pub fn window_border_color(phase: &ExecutionPhase, focused: bool) -> ratatui::style::Color {
     use ratatui::style::Color;
     match phase {
         ExecutionPhase::Error { .. } => Color::Red,
         ExecutionPhase::Running { .. } => {
-            if focused { Color::Blue } else { Color::Gray }
+            if focused {
+                Color::Blue
+            } else {
+                Color::Gray
+            }
         }
         ExecutionPhase::Done { .. } => {
-            if focused { Color::Green } else { Color::Gray }
+            if focused {
+                Color::Green
+            } else {
+                Color::Gray
+            }
         }
         ExecutionPhase::Idle => Color::DarkGray,
     }
@@ -764,11 +782,7 @@ pub fn phase_label(phase: &ExecutionPhase) -> String {
 ///   full width equally (`area_width / n`).
 ///
 /// Tabs never shrink below 12 cells (enough for a truncated label + ellipsis).
-pub fn compute_tab_bar_width(
-    num_tabs: usize,
-    area_width: u16,
-    max_natural_content: u16,
-) -> u16 {
+pub fn compute_tab_bar_width(num_tabs: usize, area_width: u16, max_natural_content: u16) -> u16 {
     if num_tabs == 0 || area_width == 0 {
         return 0;
     }
@@ -805,9 +819,18 @@ mod tests {
 
     #[test]
     fn container_window_cycles() {
-        assert_eq!(ContainerWindowState::Hidden.cycle(), ContainerWindowState::Maximized);
-        assert_eq!(ContainerWindowState::Minimized.cycle(), ContainerWindowState::Maximized);
-        assert_eq!(ContainerWindowState::Maximized.cycle(), ContainerWindowState::Minimized);
+        assert_eq!(
+            ContainerWindowState::Hidden.cycle(),
+            ContainerWindowState::Maximized
+        );
+        assert_eq!(
+            ContainerWindowState::Minimized.cycle(),
+            ContainerWindowState::Maximized
+        );
+        assert_eq!(
+            ContainerWindowState::Maximized.cycle(),
+            ContainerWindowState::Minimized
+        );
     }
 
     /// Reproduces TUI-3: vt100 0.15.2's `Grid::visible_rows()` panicked in
@@ -844,7 +867,10 @@ mod tests {
         let screen = tab.vt100_parser.screen_mut();
         screen.set_scrollback(depth);
         let eff = screen.scrollback();
-        assert_eq!(eff, depth, "set_scrollback must clamp to depth, not screen_rows");
+        assert_eq!(
+            eff, depth,
+            "set_scrollback must clamp to depth, not screen_rows"
+        );
         // Reading cells at this offset must not panic.
         let _ = screen.cell(0, 0);
         let _ = screen.cell(23, 79);
@@ -861,7 +887,10 @@ mod tests {
     #[test]
     fn truncate_with_ellipsis_at_limit() {
         // Exactly 14 chars: no ellipsis.
-        assert_eq!(truncate_with_ellipsis("aaaaaaaaaaaaaa", 14), "aaaaaaaaaaaaaa");
+        assert_eq!(
+            truncate_with_ellipsis("aaaaaaaaaaaaaa", 14),
+            "aaaaaaaaaaaaaa"
+        );
     }
 
     #[test]
@@ -883,7 +912,9 @@ mod tests {
     #[test]
     fn tab_subcommand_label_running_returns_command() {
         let mut tab = make_tab();
-        tab.execution_phase = ExecutionPhase::Running { command: "chat".into() };
+        tab.execution_phase = ExecutionPhase::Running {
+            command: "chat".into(),
+        };
         assert_eq!(tab.tab_subcommand_label(20, true), "chat");
     }
 
@@ -1001,36 +1032,52 @@ mod tests {
     #[test]
     fn window_border_color_running_focused_is_blue() {
         use ratatui::style::Color;
-        let phase = ExecutionPhase::Running { command: "x".into() };
+        let phase = ExecutionPhase::Running {
+            command: "x".into(),
+        };
         assert_eq!(window_border_color(&phase, true), Color::Blue);
     }
 
     #[test]
     fn window_border_color_running_unfocused_is_gray() {
         use ratatui::style::Color;
-        let phase = ExecutionPhase::Running { command: "x".into() };
+        let phase = ExecutionPhase::Running {
+            command: "x".into(),
+        };
         assert_eq!(window_border_color(&phase, false), Color::Gray);
     }
 
     #[test]
     fn window_border_color_done_focused_is_green() {
         use ratatui::style::Color;
-        let phase = ExecutionPhase::Done { command: "x".into(), exit_code: 0 };
+        let phase = ExecutionPhase::Done {
+            command: "x".into(),
+            exit_code: 0,
+        };
         assert_eq!(window_border_color(&phase, true), Color::Green);
     }
 
     #[test]
     fn window_border_color_done_unfocused_is_gray() {
         use ratatui::style::Color;
-        let phase = ExecutionPhase::Done { command: "x".into(), exit_code: 0 };
+        let phase = ExecutionPhase::Done {
+            command: "x".into(),
+            exit_code: 0,
+        };
         assert_eq!(window_border_color(&phase, false), Color::Gray);
     }
 
     #[test]
     fn window_border_color_idle_is_dark_gray_regardless_of_focus() {
         use ratatui::style::Color;
-        assert_eq!(window_border_color(&ExecutionPhase::Idle, true), Color::DarkGray);
-        assert_eq!(window_border_color(&ExecutionPhase::Idle, false), Color::DarkGray);
+        assert_eq!(
+            window_border_color(&ExecutionPhase::Idle, true),
+            Color::DarkGray
+        );
+        assert_eq!(
+            window_border_color(&ExecutionPhase::Idle, false),
+            Color::DarkGray
+        );
     }
 
     // ── tab_color ─────────────────────────────────────────────────────────────
@@ -1075,7 +1122,9 @@ mod tests {
     fn tab_color_running_with_pty_container_visible_is_green() {
         use ratatui::style::Color;
         let mut tab = make_tab();
-        tab.execution_phase = ExecutionPhase::Running { command: "chat".into() };
+        tab.execution_phase = ExecutionPhase::Running {
+            command: "chat".into(),
+        };
         tab.container_window_state = ContainerWindowState::Minimized;
         assert_eq!(tab_color(&tab), Color::Green);
     }
@@ -1084,7 +1133,9 @@ mod tests {
     fn tab_color_running_maximized_container_is_green() {
         use ratatui::style::Color;
         let mut tab = make_tab();
-        tab.execution_phase = ExecutionPhase::Running { command: "chat".into() };
+        tab.execution_phase = ExecutionPhase::Running {
+            command: "chat".into(),
+        };
         tab.container_window_state = ContainerWindowState::Maximized;
         assert_eq!(tab_color(&tab), Color::Green);
     }
@@ -1093,7 +1144,9 @@ mod tests {
     fn tab_color_running_no_container_is_blue() {
         use ratatui::style::Color;
         let mut tab = make_tab();
-        tab.execution_phase = ExecutionPhase::Running { command: "chat".into() };
+        tab.execution_phase = ExecutionPhase::Running {
+            command: "chat".into(),
+        };
         tab.container_window_state = ContainerWindowState::Hidden;
         assert_eq!(tab_color(&tab), Color::Blue);
     }
@@ -1102,7 +1155,9 @@ mod tests {
     fn tab_color_running_claws_is_magenta() {
         use ratatui::style::Color;
         let mut tab = make_tab();
-        tab.execution_phase = ExecutionPhase::Running { command: "claws".into() };
+        tab.execution_phase = ExecutionPhase::Running {
+            command: "claws".into(),
+        };
         tab.is_claws = true;
         assert_eq!(tab_color(&tab), Color::Magenta);
     }

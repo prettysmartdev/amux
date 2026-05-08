@@ -119,9 +119,7 @@ struct ListSessionsQuery {
 }
 
 fn error_json(msg: impl Into<String>) -> Json<ErrorResponse> {
-    Json(ErrorResponse {
-        error: msg.into(),
-    })
+    Json(ErrorResponse { error: msg.into() })
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
@@ -198,10 +196,7 @@ async fn auth_middleware(
                 };
 
                 use subtle::ConstantTimeEq;
-                let keys_equal: bool = provided_hash
-                    .as_bytes()
-                    .ct_eq(key_hash.as_bytes())
-                    .into();
+                let keys_equal: bool = provided_hash.as_bytes().ct_eq(key_hash.as_bytes()).into();
                 if !keys_equal {
                     return (StatusCode::UNAUTHORIZED, error_json("Invalid API key."))
                         .into_response();
@@ -229,7 +224,11 @@ async fn handle_status(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 }
 
 async fn handle_workdirs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let dirs: Vec<String> = state.workdirs.iter().map(|p| p.display().to_string()).collect();
+    let dirs: Vec<String> = state
+        .workdirs
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
     Json(serde_json::json!({ "workdirs": dirs }))
 }
 
@@ -249,7 +248,11 @@ async fn handle_create_session(
     };
 
     if !state.workdirs.contains(&requested) {
-        let allowed: Vec<String> = state.workdirs.iter().map(|p| p.display().to_string()).collect();
+        let allowed: Vec<String> = state
+            .workdirs
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
         return (
             StatusCode::FORBIDDEN,
             error_json(format!(
@@ -308,11 +311,19 @@ async fn handle_create_session(
                 .into_response();
         }
     };
-    state.sessions.lock().await.insert(session_id.clone(), session);
+    state
+        .sessions
+        .lock()
+        .await
+        .insert(session_id.clone(), session);
 
     tracing::info!(session_id = %session_id, workdir = %requested.display(), "Session created");
 
-    (StatusCode::CREATED, Json(CreateSessionResponse { session_id })).into_response()
+    (
+        StatusCode::CREATED,
+        Json(CreateSessionResponse { session_id }),
+    )
+        .into_response()
 }
 
 async fn handle_list_sessions(
@@ -535,9 +546,7 @@ async fn handle_create_command(
     let command_id = uuid::Uuid::new_v4().to_string();
     let args_json = serde_json::to_string(&body.args).unwrap_or_else(|_| "[]".to_string());
 
-    let cmd_dir = state
-        .paths
-        .command_dir(&session_id, &command_id);
+    let cmd_dir = state.paths.command_dir(&session_id, &command_id);
     if let Err(e) = tokio::fs::create_dir_all(&cmd_dir).await {
         tracing::error!(error = %e, "Failed to create command directory");
         state.busy_sessions.lock().await.remove(&session_id);
@@ -583,12 +592,24 @@ async fn handle_create_command(
     let workdir_clone = workdir;
 
     let handle = tokio::spawn(async move {
-        execute_command(state_clone, cmd_id, sess_id, subcommand, cmd_args, log_p, workdir_clone)
-            .await;
+        execute_command(
+            state_clone,
+            cmd_id,
+            sess_id,
+            subcommand,
+            cmd_args,
+            log_p,
+            workdir_clone,
+        )
+        .await;
     });
     state.task_handles.lock().await.push(handle);
 
-    (StatusCode::ACCEPTED, Json(CreateCommandResponse { command_id })).into_response()
+    (
+        StatusCode::ACCEPTED,
+        Json(CreateCommandResponse { command_id }),
+    )
+        .into_response()
 }
 
 async fn execute_command(
@@ -886,11 +907,7 @@ async fn handle_get_workflow(
     let session_id = match state.store.get_command(&command_id) {
         Ok(Some(c)) => c.session_id,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                error_json("command not found"),
-            )
-                .into_response();
+            return (StatusCode::NOT_FOUND, error_json("command not found")).into_response();
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to get command for workflow");
@@ -944,29 +961,29 @@ mod tests {
     // Route table from oldsrc/commands/headless/server.rs — wire-identical assertion guard.
     // Every entry here must be registered in build_router; any divergence is a regression.
     const EXPECTED_ROUTES: &[(&str, &str)] = &[
-        ("GET",    "/v1/status"),
-        ("GET",    "/v1/workdirs"),
-        ("GET",    "/v1/sessions"),
-        ("POST",   "/v1/sessions"),
-        ("GET",    "/v1/sessions/:id"),
+        ("GET", "/v1/status"),
+        ("GET", "/v1/workdirs"),
+        ("GET", "/v1/sessions"),
+        ("POST", "/v1/sessions"),
+        ("GET", "/v1/sessions/:id"),
         ("DELETE", "/v1/sessions/:id"),
-        ("POST",   "/v1/commands"),
-        ("GET",    "/v1/commands/:id"),
-        ("GET",    "/v1/commands/:id/logs"),
-        ("GET",    "/v1/commands/:id/logs/stream"),
-        ("GET",    "/v1/workflows/:command_id"),
+        ("POST", "/v1/commands"),
+        ("GET", "/v1/commands/:id"),
+        ("GET", "/v1/commands/:id/logs"),
+        ("GET", "/v1/commands/:id/logs/stream"),
+        ("GET", "/v1/workflows/:command_id"),
     ];
 
     fn make_test_state(tmp: &std::path::Path) -> Arc<AppState> {
         use crate::command::dispatch::Engines;
+        use crate::data::fs::auth_paths::AuthPathResolver;
         use crate::data::fs::headless_db::SqliteSessionStore;
         use crate::data::fs::headless_paths::HeadlessPaths;
+        use crate::engine::agent::AgentEngine;
         use crate::engine::auth::AuthEngine;
         use crate::engine::container::ContainerRuntime;
         use crate::engine::git::GitEngine;
         use crate::engine::overlay::OverlayEngine;
-        use crate::engine::agent::AgentEngine;
-        use crate::data::fs::auth_paths::AuthPathResolver;
 
         let paths = HeadlessPaths::at_root(tmp);
         let store = SqliteSessionStore::open(tmp).unwrap();
@@ -980,9 +997,8 @@ mod tests {
             AuthPathResolver::at_home(tmp),
             paths.clone(),
         ));
-        let workflow_state_store = Arc::new(
-            crate::data::EngineWorkflowStateStore::at_git_root(tmp),
-        );
+        let workflow_state_store =
+            Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(tmp));
         let engines = Engines {
             runtime,
             git_engine,
@@ -1007,7 +1023,11 @@ mod tests {
     #[test]
     fn expected_route_count() {
         // Guard: if someone adds a route without updating this table, the count drifts.
-        assert_eq!(EXPECTED_ROUTES.len(), 11, "route count mismatch — update EXPECTED_ROUTES");
+        assert_eq!(
+            EXPECTED_ROUTES.len(),
+            11,
+            "route count mismatch — update EXPECTED_ROUTES"
+        );
     }
 
     #[tokio::test]
@@ -1028,9 +1048,9 @@ mod tests {
         // Test routes that always return non-404 regardless of request content.
         // These only depend on server state, not on specific resource IDs.
         let unconditional_routes: &[(&str, &str)] = &[
-            ("GET",  "/v1/status"),
-            ("GET",  "/v1/workdirs"),
-            ("GET",  "/v1/sessions"),
+            ("GET", "/v1/status"),
+            ("GET", "/v1/workdirs"),
+            ("GET", "/v1/sessions"),
         ];
 
         for (method, path) in unconditional_routes {
@@ -1040,9 +1060,10 @@ mod tests {
                 "POST" => client.post(&url),
                 _ => panic!("unhandled method {method}"),
             };
-            let resp = req.send().await.unwrap_or_else(|e| {
-                panic!("request to {method} {path} failed: {e}")
-            });
+            let resp = req
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("request to {method} {path} failed: {e}"));
             assert_ne!(
                 resp.status().as_u16(),
                 404,
@@ -1067,25 +1088,26 @@ mod tests {
         // We assert they respond with something (connection succeeds and we get any HTTP response).
         let resource_routes: &[(&str, &str, u16)] = &[
             // (method, path, expected_status_for_missing_resource)
-            ("GET",    "/v1/sessions/test-id",       404), // session not found
-            ("DELETE", "/v1/sessions/test-id",       404), // session not found
-            ("GET",    "/v1/commands/test-id",       404), // command not found
-            ("GET",    "/v1/commands/test-id/logs",  404), // command not found
+            ("GET", "/v1/sessions/test-id", 404), // session not found
+            ("DELETE", "/v1/sessions/test-id", 404), // session not found
+            ("GET", "/v1/commands/test-id", 404), // command not found
+            ("GET", "/v1/commands/test-id/logs", 404), // command not found
             // SSE route returns 404 for missing command too
-            ("GET",    "/v1/commands/test-id/logs/stream", 404),
-            ("GET",    "/v1/workflows/test-cmd",     404), // command not found
+            ("GET", "/v1/commands/test-id/logs/stream", 404),
+            ("GET", "/v1/workflows/test-cmd", 404), // command not found
         ];
 
         for (method, path, expected_status) in resource_routes {
             let url = format!("http://{addr}{path}");
             let req = match *method {
-                "GET"    => client.get(&url),
+                "GET" => client.get(&url),
                 "DELETE" => client.delete(&url),
                 _ => panic!("unhandled method {method}"),
             };
-            let resp = req.send().await.unwrap_or_else(|e| {
-                panic!("request to {method} {path} failed: {e}")
-            });
+            let resp = req
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("request to {method} {path} failed: {e}"));
             // The handler returns *expected_status* for missing resources.
             // We verify the route exists by confirming the response status matches
             // what the handler produces (not a routing-level 404 from an unregistered path).
@@ -1103,7 +1125,11 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_ne!(resp.status().as_u16(), 404, "POST /v1/sessions returned 404 — route may not be registered");
+        assert_ne!(
+            resp.status().as_u16(),
+            404,
+            "POST /v1/sessions returned 404 — route may not be registered"
+        );
 
         // POST /v1/commands — check it responds (even with 400 for missing headers).
         let resp = client
@@ -1111,7 +1137,11 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_ne!(resp.status().as_u16(), 404, "POST /v1/commands returned 404 — route may not be registered");
+        assert_ne!(
+            resp.status().as_u16(),
+            404,
+            "POST /v1/commands returned 404 — route may not be registered"
+        );
     }
 
     #[test]
@@ -1154,9 +1184,7 @@ mod tests {
             h.as_ref().iter().map(|b| format!("{b:02x}")).collect()
         };
         // Replace auth_mode with Enabled.
-        Arc::get_mut(&mut state).unwrap().auth_mode = AuthMode::Enabled {
-            key_hash: hash,
-        };
+        Arc::get_mut(&mut state).unwrap().auth_mode = AuthMode::Enabled { key_hash: hash };
 
         let app = build_router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1173,7 +1201,11 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status().as_u16(), 401, "missing auth header must return 401");
+        assert_eq!(
+            resp.status().as_u16(),
+            401,
+            "missing auth header must return 401"
+        );
 
         // Wrong key → 401.
         let resp = client
@@ -1208,6 +1240,10 @@ mod tests {
         let resp = reqwest::get(format!("http://{addr}/v1/status"))
             .await
             .unwrap();
-        assert_ne!(resp.status().as_u16(), 401, "disabled auth must not block requests");
+        assert_ne!(
+            resp.status().as_u16(),
+            401,
+            "disabled auth must not block requests"
+        );
     }
 }

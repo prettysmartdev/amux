@@ -26,12 +26,17 @@ impl CommandCatalogue {
     }
 
     /// Render an OpenAPI-ish schema for the entire command surface.
-    /// Stable enough that 0069's headless server can consume it.
     pub fn openapi_schema(&self) -> Value {
         let mut paths = serde_json::Map::new();
         for route in self.rest_route_table() {
             let spec = self
-                .lookup(&route.command_path.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+                .lookup(
+                    &route
+                        .command_path
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>(),
+                )
                 .expect("rest route must resolve");
             let mut params = Vec::new();
             for arg in spec.arguments {
@@ -74,11 +79,7 @@ impl CommandCatalogue {
     }
 }
 
-fn collect_routes(
-    spec: &'static CommandSpec,
-    path: &mut Vec<String>,
-    out: &mut Vec<RestRoute>,
-) {
+fn collect_routes(spec: &'static CommandSpec, path: &mut Vec<String>, out: &mut Vec<RestRoute>) {
     if spec.subcommands.is_empty() && !path.is_empty() {
         out.push(RestRoute {
             method: "POST",

@@ -27,7 +27,12 @@ pub fn agent_keychain_credentials(agent: &AgentName) -> Vec<(String, String)> {
 /// access token via the JSON path `claudeAiOauth.accessToken`.
 fn claude_keychain_credentials() -> Vec<(String, String)> {
     let out = match Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
         .output()
     {
         Ok(o) if o.status.success() => o,

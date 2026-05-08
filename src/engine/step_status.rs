@@ -16,10 +16,7 @@ impl StepStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            StepStatus::Skipped
-                | StepStatus::Done
-                | StepStatus::Warn(_)
-                | StepStatus::Failed(_)
+            StepStatus::Skipped | StepStatus::Done | StepStatus::Warn(_) | StepStatus::Failed(_)
         )
     }
 }

@@ -65,7 +65,8 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             auto_flag: Some(&["--permission-mode", "auto"]),
             disallowed_tools_flag: Some("--disallowedTools"),
             allowed_tools_flag: Some("--allowedTools"),
-            model_flag: ModelFlagDelivery::SpaceArg, supports_stdin_injection: false,
+            model_flag: ModelFlagDelivery::SpaceArg,
+            supports_stdin_injection: false,
         },
         "codex" => AgentMatrix {
             agent: "codex",
@@ -76,7 +77,8 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             auto_flag: None,
             disallowed_tools_flag: None,
             allowed_tools_flag: None,
-            model_flag: ModelFlagDelivery::SpaceArg, supports_stdin_injection: false,
+            model_flag: ModelFlagDelivery::SpaceArg,
+            supports_stdin_injection: false,
         },
         "opencode" => AgentMatrix {
             agent: "opencode",
@@ -87,7 +89,8 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             auto_flag: None,
             disallowed_tools_flag: None,
             allowed_tools_flag: None,
-            model_flag: ModelFlagDelivery::SpaceArg, supports_stdin_injection: false,
+            model_flag: ModelFlagDelivery::SpaceArg,
+            supports_stdin_injection: false,
         },
         "maki" => AgentMatrix {
             agent: "maki",
@@ -98,7 +101,8 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             auto_flag: None,
             disallowed_tools_flag: None,
             allowed_tools_flag: None,
-            model_flag: ModelFlagDelivery::SpaceArg, supports_stdin_injection: false,
+            model_flag: ModelFlagDelivery::SpaceArg,
+            supports_stdin_injection: false,
         },
         "gemini" => AgentMatrix {
             agent: "gemini",
@@ -109,7 +113,8 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             auto_flag: Some(&["--approval-mode=auto_edit"]),
             disallowed_tools_flag: None,
             allowed_tools_flag: None,
-            model_flag: ModelFlagDelivery::SpaceArg, supports_stdin_injection: false,
+            model_flag: ModelFlagDelivery::SpaceArg,
+            supports_stdin_injection: false,
         },
         "copilot" => AgentMatrix {
             agent: "copilot",
@@ -120,7 +125,8 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             auto_flag: None,
             disallowed_tools_flag: None,
             allowed_tools_flag: None,
-            model_flag: ModelFlagDelivery::SpaceArg, supports_stdin_injection: false,
+            model_flag: ModelFlagDelivery::SpaceArg,
+            supports_stdin_injection: false,
         },
         "crush" => AgentMatrix {
             agent: "crush",
@@ -131,7 +137,8 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             auto_flag: None,
             disallowed_tools_flag: None,
             allowed_tools_flag: None,
-            model_flag: ModelFlagDelivery::SpaceArg, supports_stdin_injection: false,
+            model_flag: ModelFlagDelivery::SpaceArg,
+            supports_stdin_injection: false,
         },
         "cline" => AgentMatrix {
             agent: "cline",
@@ -142,7 +149,8 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             auto_flag: Some(&["--auto-approve-all"]),
             disallowed_tools_flag: None,
             allowed_tools_flag: None,
-            model_flag: ModelFlagDelivery::SpaceArg, supports_stdin_injection: false,
+            model_flag: ModelFlagDelivery::SpaceArg,
+            supports_stdin_injection: false,
         },
         other => {
             return Err(EngineError::Other(format!(

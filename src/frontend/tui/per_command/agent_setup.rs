@@ -31,9 +31,7 @@ impl AgentSetupFrontend for TuiCommandFrontend {
         }))?;
         Ok(match response {
             DialogResponse::Char('y') | DialogResponse::Yes => AgentSetupDecision::Setup,
-            DialogResponse::Char('f') if default_available => {
-                AgentSetupDecision::FallbackToDefault
-            }
+            DialogResponse::Char('f') if default_available => AgentSetupDecision::FallbackToDefault,
             _ => AgentSetupDecision::Abort,
         })
     }
@@ -55,13 +53,11 @@ impl HasContainerFrontend for TuiCommandFrontend {
         // engine drives all stdout/stdin/resize traffic; the TuiCommandFrontend
         // continues to be used for status messages and dialog prompts.
         match self.container_io.take() {
-            Some(io) => {
-                Box::new(super::TuiContainerProxy::with_io(
-                    self.status_log.clone(),
-                    io,
-                    self.container_name_shared.clone(),
-                ))
-            }
+            Some(io) => Box::new(super::TuiContainerProxy::with_io(
+                self.status_log.clone(),
+                io,
+                self.container_name_shared.clone(),
+            )),
             None => Box::new(super::TuiContainerProxy::new(self.status_log.clone())),
         }
     }

@@ -103,7 +103,9 @@ fn build_clap_flag(spec: &FlagSpec) -> Arg {
             arg = arg.action(ArgAction::Set);
         }
         FlagKind::U16 => {
-            arg = arg.action(ArgAction::Set).value_parser(clap::value_parser!(u16));
+            arg = arg
+                .action(ArgAction::Set)
+                .value_parser(clap::value_parser!(u16));
             if let FlagDefault::U16(n) = spec.default {
                 let s: &'static str = Box::leak(n.to_string().into_boxed_str());
                 arg = arg.default_value(s);
@@ -124,12 +126,28 @@ mod tests {
     fn build_root_succeeds_and_includes_top_level_commands() {
         let cat = CommandCatalogue::get();
         let cmd = cat.build_clap_command();
-        let names: Vec<_> = cmd.get_subcommands().map(|c| c.get_name().to_string()).collect();
+        let names: Vec<_> = cmd
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
         for n in [
-            "init", "ready", "implement", "chat", "specs", "claws", "status",
-            "config", "exec", "headless", "remote", "new",
+            "init",
+            "ready",
+            "implement",
+            "chat",
+            "specs",
+            "claws",
+            "status",
+            "config",
+            "exec",
+            "headless",
+            "remote",
+            "new",
         ] {
-            assert!(names.iter().any(|x| x == n), "missing subcommand {n} in clap projection");
+            assert!(
+                names.iter().any(|x| x == n),
+                "missing subcommand {n} in clap projection"
+            );
         }
     }
 
@@ -145,10 +163,7 @@ mod tests {
             .get_subcommands()
             .find(|c| c.get_name() == "workflow")
             .unwrap();
-        let aliases: Vec<_> = workflow
-            .get_all_aliases()
-            .map(|s| s.to_string())
-            .collect();
+        let aliases: Vec<_> = workflow.get_all_aliases().map(|s| s.to_string()).collect();
         assert!(aliases.iter().any(|a| a == "wf"));
     }
 
@@ -177,7 +192,10 @@ mod tests {
                     // TUI-only flags must NOT appear in CLI projection.
                     if let Some(flag) = spec.find_flag(id) {
                         assert!(
-                            !matches!(flag.frontends, crate::command::dispatch::catalogue::FrontendVisibility::TuiOnly),
+                            !matches!(
+                                flag.frontends,
+                                crate::command::dispatch::catalogue::FrontendVisibility::TuiOnly
+                            ),
                             "TUI-only flag '{id}' at {path:?} must not be in clap projection"
                         );
                     }
@@ -239,7 +257,8 @@ mod tests {
                 assert!(
                     !clap_longs.contains(&flag.long.to_string()),
                     "TUI-only flag '{}' at {:?} must not appear in clap projection",
-                    flag.long, path
+                    flag.long,
+                    path
                 );
             }
         }

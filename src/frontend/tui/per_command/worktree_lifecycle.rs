@@ -27,11 +27,7 @@ impl WorktreeLifecycleFrontend for TuiCommandFrontend {
         suggested_message: &str,
     ) -> Result<PreWorktreeDecision, CommandError> {
         let file_list = format_file_list(files);
-        let body = format!(
-            "{} uncommitted file(s):\n\n{}",
-            files.len(),
-            file_list
-        );
+        let body = format!("{} uncommitted file(s):\n\n{}", files.len(), file_list);
         let response = self.ask_dialog(DialogRequest::Custom {
             title: "Uncommitted files".into(),
             body,
@@ -142,10 +138,7 @@ impl WorktreeLifecycleFrontend for TuiCommandFrontend {
                 ('n', "Skip commit, merge as-is".into()),
             ],
         })?;
-        if matches!(
-            response,
-            DialogResponse::Yes | DialogResponse::Char('y')
-        ) {
+        if matches!(response, DialogResponse::Yes | DialogResponse::Char('y')) {
             let msg_response = self.ask_dialog(DialogRequest::TextInput {
                 title: "Commit message".into(),
                 prompt: "Enter commit message (or press Enter to accept):".into(),
@@ -189,12 +182,7 @@ impl WorktreeLifecycleFrontend for TuiCommandFrontend {
         ))
     }
 
-    fn report_merge_conflict(
-        &mut self,
-        branch: &str,
-        worktree_path: &Path,
-        _git_root: &Path,
-    ) {
+    fn report_merge_conflict(&mut self, branch: &str, worktree_path: &Path, _git_root: &Path) {
         self.messages.error_msg(format!(
             "Merge conflict on branch '{}'. Resolve manually in {}",
             branch,

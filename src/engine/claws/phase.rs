@@ -51,7 +51,10 @@ impl ClawsFailure {
             ClawsFailure::ImageBuild { tag, message } => {
                 format!("image build for tag '{tag}' failed: {message}")
             }
-            ClawsFailure::ChatAttach { controller, message } => {
+            ClawsFailure::ChatAttach {
+                controller,
+                message,
+            } => {
                 format!("attaching chat to controller '{controller}' failed: {message}")
             }
             ClawsFailure::ControllerNotRunning { hint } => hint.clone(),

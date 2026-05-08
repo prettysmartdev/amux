@@ -15,10 +15,7 @@ pub struct Substitution {
 /// Substitute every `{{...}}` placeholder in `template`. When `work_item` is
 /// `None`, every `work_item_*` placeholder is replaced with an empty string
 /// and a warning is queued so the caller can surface it via `UserMessageSink`.
-pub fn substitute_prompt(
-    template: &str,
-    work_item: Option<&WorkItemContext>,
-) -> Substitution {
+pub fn substitute_prompt(template: &str, work_item: Option<&WorkItemContext>) -> Substitution {
     let mut out = template.to_string();
     let mut warnings = Vec::new();
     let uses_wi = template.contains("{{work_item");
@@ -31,11 +28,9 @@ pub fn substitute_prompt(
     }
 
     // {{work_item_number}} → zero-padded four-digit
-    out = replace_token(&out, "{{work_item_number}}", |_| {
-        match work_item {
-            Some(wi) => format!("{:04}", wi.number),
-            None => String::new(),
-        }
+    out = replace_token(&out, "{{work_item_number}}", |_| match work_item {
+        Some(wi) => format!("{:04}", wi.number),
+        None => String::new(),
     });
     // {{work_item}} → bare numeric
     out = replace_token(&out, "{{work_item}}", |_| match work_item {
@@ -96,14 +91,13 @@ fn replace_token<F: Fn(&str) -> String>(input: &str, token: &str, f: F) -> Strin
 /// case-insensitively (trailing colons stripped). Returns `None` when the
 /// section is not found.
 pub fn extract_section(content: &str, name: &str) -> Option<String> {
-    let needle = name
-        .trim()
-        .trim_end_matches(':')
-        .to_ascii_lowercase();
+    let needle = name.trim().trim_end_matches(':').to_ascii_lowercase();
     let mut iter = content.lines().peekable();
     while let Some(line) = iter.next() {
         let trimmed = line.trim();
-        let heading = trimmed.strip_prefix("## ").or_else(|| trimmed.strip_prefix("# "));
+        let heading = trimmed
+            .strip_prefix("## ")
+            .or_else(|| trimmed.strip_prefix("# "));
         let Some(h) = heading else {
             continue;
         };
@@ -157,10 +151,7 @@ mod tests {
     #[test]
     fn extracts_section() {
         let body = "# Title\n\n## Goal\nDo the thing\n\n## Notes\nN/A\n";
-        let sub = substitute_prompt(
-            "Goal: {{work_item_section:[Goal]}}",
-            Some(&wi(body)),
-        );
+        let sub = substitute_prompt("Goal: {{work_item_section:[Goal]}}", Some(&wi(body)));
         assert_eq!(sub.rendered, "Goal: Do the thing");
     }
 

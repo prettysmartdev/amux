@@ -127,18 +127,15 @@ impl HeadlessPaths {
     }
 
     /// Workflow state file for a single command run.
-    pub fn command_workflow_state_path(
-        &self,
-        session_id: &str,
-        command_id: &str,
-    ) -> PathBuf {
+    pub fn command_workflow_state_path(&self, session_id: &str, command_id: &str) -> PathBuf {
         self.command_dir(session_id, command_id)
             .join("workflow.state.json")
     }
 
     /// Metadata file for a single command run.
     pub fn command_metadata_path(&self, session_id: &str, command_id: &str) -> PathBuf {
-        self.command_dir(session_id, command_id).join("metadata.json")
+        self.command_dir(session_id, command_id)
+            .join("metadata.json")
     }
 
     /// Per-session worktree directory.

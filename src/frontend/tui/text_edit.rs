@@ -246,6 +246,9 @@ mod tests {
         e.move_right();
         assert_eq!(e.cursor, 2);
         e.move_word_right();
-        assert_eq!(e.cursor, 6, "word-right from mid-word must jump to start of next word");
+        assert_eq!(
+            e.cursor, 6,
+            "word-right from mid-word must jump to start of next word"
+        );
     }
 }

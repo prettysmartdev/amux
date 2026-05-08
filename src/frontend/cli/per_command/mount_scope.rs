@@ -1,6 +1,6 @@
 //! `MountScopeFrontend` impl for the CLI.
 //!
-//! Per WI 0069 §7u, the safe non-interactive default is `MountGitRoot`.
+//! The safe non-interactive default is `MountGitRoot`.
 //! When stdin is a TTY the CLI prompts; otherwise it returns the default.
 
 use std::path::Path;

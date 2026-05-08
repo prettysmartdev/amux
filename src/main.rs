@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 //! Layer 4 — the `amux` binary entrypoint.
 //!
-//! Per `aspec/architecture/2026-grand-architecture.md` and work item
-//! `0069-grand-architecture-layer-3-frontends-and-binary.md`, `main.rs`
+//! Per `aspec/architecture/2026-grand-architecture.md`, `main.rs`
 //! contains no business logic: it builds clap from `CommandCatalogue`,
 //! parses argv, constructs the engines + session, and dispatches to either
 //! the CLI frontend (when a subcommand is present) or the TUI frontend
@@ -32,8 +31,7 @@ async fn main() -> Result<ExitCode> {
 
     let global_config = GlobalConfig::load().unwrap_or_default();
     let runtime = Arc::new(
-        ContainerRuntime::detect(&global_config)
-            .context("failed to detect container runtime")?,
+        ContainerRuntime::detect(&global_config).context("failed to detect container runtime")?,
     );
     let git_engine = Arc::new(GitEngine::new());
 
@@ -45,16 +43,14 @@ async fn main() -> Result<ExitCode> {
     )
     .context("failed to open session")?;
 
-    let overlay_engine = Arc::new(
-        OverlayEngine::new(&session).context("failed to construct overlay engine")?,
-    );
-    let auth_engine = Arc::new(
-        AuthEngine::new(&session).context("failed to construct auth engine")?,
-    );
+    let overlay_engine =
+        Arc::new(OverlayEngine::new(&session).context("failed to construct overlay engine")?);
+    let auth_engine =
+        Arc::new(AuthEngine::new(&session).context("failed to construct auth engine")?);
     let agent_engine = Arc::new(AgentEngine::new(overlay_engine.clone(), runtime.clone()));
-    let workflow_state_store = Arc::new(
-        amux::data::EngineWorkflowStateStore::at_git_root(session.git_root().to_path_buf()),
-    );
+    let workflow_state_store = Arc::new(amux::data::EngineWorkflowStateStore::at_git_root(
+        session.git_root().to_path_buf(),
+    ));
 
     let engines = Engines {
         runtime,
@@ -99,9 +95,10 @@ mod tests {
             vec!["amux", "headless", "start"],
             vec!["amux", "remote", "session", "start"],
         ] {
-            let m = cmd.clone().try_get_matches_from(&argv).unwrap_or_else(|e| {
-                panic!("failed to parse {argv:?}: {e}")
-            });
+            let m = cmd
+                .clone()
+                .try_get_matches_from(&argv)
+                .unwrap_or_else(|e| panic!("failed to parse {argv:?}: {e}"));
             assert!(
                 m.subcommand_name().is_some(),
                 "{argv:?} must have a subcommand — routes to CLI"
@@ -122,7 +119,10 @@ mod tests {
             "bare `amux` must have no subcommand — routes to TUI"
         );
         let path = command_path_from_matches(&m);
-        assert!(path.is_empty(), "bare invocation must produce an empty path");
+        assert!(
+            path.is_empty(),
+            "bare invocation must produce an empty path"
+        );
     }
 
     /// Aliases also route through the CLI branch correctly.

@@ -77,9 +77,16 @@ fn validate_and_coerce(field: &str, value: &str) -> Result<serde_json::Value, St
         }
         "yoloDisallowedTools" | "envPassthrough" | "headless.workDirs" => {
             // Parse comma-separated into array
-            let items: Vec<&str> = value.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let items: Vec<&str> = value
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
             Ok(serde_json::Value::Array(
-                items.iter().map(|s| serde_json::Value::String(s.to_string())).collect(),
+                items
+                    .iter()
+                    .map(|s| serde_json::Value::String(s.to_string()))
+                    .collect(),
             ))
         }
         "terminal_scrollback_lines" | "agentStuckTimeout" | "headless.port" => {
@@ -394,7 +401,8 @@ impl Command for ConfigCommand {
                     });
                 }
                 let global_value = config_field_value(
-                    &serde_json::to_value(session.global_config()).unwrap_or(serde_json::Value::Null),
+                    &serde_json::to_value(session.global_config())
+                        .unwrap_or(serde_json::Value::Null),
                     &f.field,
                 );
                 let repo_value = config_field_value(
@@ -473,7 +481,11 @@ impl Command for ConfigCommand {
                 ConfigOutcome::Set(ConfigSetOutcome {
                     field: f.field,
                     value: f.value,
-                    scope: if f.global { "global".into() } else { "repo".into() },
+                    scope: if f.global {
+                        "global".into()
+                    } else {
+                        "repo".into()
+                    },
                 })
             }
         };
@@ -527,9 +539,7 @@ fn set_config_field(json: &mut serde_json::Value, field: &str, value: serde_json
                     );
                 }
             }
-            current = current
-                .get_mut(*part)
-                .expect("just inserted nested object");
+            current = current.get_mut(*part).expect("just inserted nested object");
         }
     }
 }
@@ -685,10 +695,7 @@ mod tests {
     #[test]
     fn validate_and_coerce_list_field() {
         let v = validate_and_coerce("yoloDisallowedTools", "tool1, tool2, tool3").unwrap();
-        assert_eq!(
-            v,
-            serde_json::json!(["tool1", "tool2", "tool3"])
-        );
+        assert_eq!(v, serde_json::json!(["tool1", "tool2", "tool3"]));
     }
 
     #[test]
@@ -794,7 +801,10 @@ mod tests {
         let result = levenshtein_suggestions("runtim", &names);
         if result.len() >= 2 {
             // First result must be "runtime" (closest match).
-            assert_eq!(result[0], "runtime", "closest match must be first: {result:?}");
+            assert_eq!(
+                result[0], "runtime",
+                "closest match must be first: {result:?}"
+            );
         }
     }
 }

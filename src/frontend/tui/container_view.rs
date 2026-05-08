@@ -38,7 +38,9 @@ pub fn render_container_maximized(
     // Tab bar = 3 rows at top, status bar + command box + suggestion = 5 rows at bottom.
     let top_reserved: u16 = 3;
     let bottom_reserved: u16 = 5 + workflow_strip_height;
-    let exec_height = outer_area.height.saturating_sub(top_reserved + bottom_reserved);
+    let exec_height = outer_area
+        .height
+        .saturating_sub(top_reserved + bottom_reserved);
     let exec_width = outer_area.width;
 
     let container_height = ((exec_height as u32 * 95 / 100) as u16).max(5);
@@ -318,11 +320,7 @@ fn render_vt100_screen(
 }
 
 #[inline]
-fn cell_in_selection(
-    norm_sel: Option<((u16, u16), (u16, u16))>,
-    row: u16,
-    col: u16,
-) -> bool {
+fn cell_in_selection(norm_sel: Option<((u16, u16), (u16, u16))>, row: u16, col: u16) -> bool {
     let Some(((sr, sc), (er, ec))) = norm_sel else {
         return false;
     };

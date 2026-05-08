@@ -157,7 +157,10 @@ mod tests {
         assert_eq!(step_status_label(&StepStatus::Running), "running");
         assert_eq!(step_status_label(&StepStatus::Done), "done");
         assert_eq!(step_status_label(&StepStatus::Skipped), "skipped");
-        assert_eq!(step_status_label(&StepStatus::Failed(String::new())), "failed");
+        assert_eq!(
+            step_status_label(&StepStatus::Failed(String::new())),
+            "failed"
+        );
         assert_eq!(
             step_status_label(&StepStatus::Failed("out of disk".into())),
             "failed: out of disk"
@@ -199,5 +202,4 @@ mod tests {
         assert!(s.contains('└'), "must contain bottom-left corner");
         assert!(s.contains('┘'), "must contain bottom-right corner");
     }
-
 }

@@ -92,8 +92,14 @@ mod tests {
         let r = resolver();
         let paths = r.resolve("claude");
         assert_eq!(paths.agent, "claude");
-        assert_eq!(paths.config_file, Some(Path::new("/home/testuser/.claude.json").to_path_buf()));
-        assert_eq!(paths.settings_dir, Some(Path::new("/home/testuser/.claude").to_path_buf()));
+        assert_eq!(
+            paths.config_file,
+            Some(Path::new("/home/testuser/.claude.json").to_path_buf())
+        );
+        assert_eq!(
+            paths.settings_dir,
+            Some(Path::new("/home/testuser/.claude").to_path_buf())
+        );
     }
 
     #[test]
@@ -102,7 +108,10 @@ mod tests {
         let paths = r.resolve("codex");
         assert_eq!(paths.agent, "codex");
         assert_eq!(paths.config_file, None);
-        assert_eq!(paths.settings_dir, Some(Path::new("/home/testuser/.codex").to_path_buf()));
+        assert_eq!(
+            paths.settings_dir,
+            Some(Path::new("/home/testuser/.codex").to_path_buf())
+        );
     }
 
     #[test]
@@ -111,7 +120,10 @@ mod tests {
         let paths = r.resolve("gemini");
         assert_eq!(paths.agent, "gemini");
         assert_eq!(paths.config_file, None);
-        assert_eq!(paths.settings_dir, Some(Path::new("/home/testuser/.gemini").to_path_buf()));
+        assert_eq!(
+            paths.settings_dir,
+            Some(Path::new("/home/testuser/.gemini").to_path_buf())
+        );
     }
 
     #[test]
@@ -146,8 +158,14 @@ mod tests {
     fn resolve_claude_linux_paths_are_correct() {
         let r = AuthPathResolver::at_home("/home/alice");
         let paths = r.resolve("claude");
-        assert_eq!(paths.config_file.unwrap(), Path::new("/home/alice/.claude.json"));
-        assert_eq!(paths.settings_dir.unwrap(), Path::new("/home/alice/.claude"));
+        assert_eq!(
+            paths.config_file.unwrap(),
+            Path::new("/home/alice/.claude.json")
+        );
+        assert_eq!(
+            paths.settings_dir.unwrap(),
+            Path::new("/home/alice/.claude")
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -155,7 +173,13 @@ mod tests {
     fn resolve_claude_macos_paths_are_correct() {
         let r = AuthPathResolver::at_home("/Users/alice");
         let paths = r.resolve("claude");
-        assert_eq!(paths.config_file.unwrap(), Path::new("/Users/alice/.claude.json"));
-        assert_eq!(paths.settings_dir.unwrap(), Path::new("/Users/alice/.claude"));
+        assert_eq!(
+            paths.config_file.unwrap(),
+            Path::new("/Users/alice/.claude.json")
+        );
+        assert_eq!(
+            paths.settings_dir.unwrap(),
+            Path::new("/Users/alice/.claude")
+        );
     }
 }

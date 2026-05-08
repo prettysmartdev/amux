@@ -1,8 +1,7 @@
 //! `WorktreeLifecycleFrontend` impl for the CLI.
 //!
-//! Per WI 0069 §1, the CLI prompts on stdin (when it is a TTY) for each
-//! decision; when stdin is piped the CLI returns the safe non-interactive
-//! defaults from §7u.
+//! The CLI prompts on stdin (when it is a TTY) for each decision; when
+//! stdin is piped the CLI returns the safe non-interactive defaults.
 
 use std::path::Path;
 
@@ -33,10 +32,7 @@ impl WorktreeLifecycleFrontend for CliFrontend {
         if !stdin_is_tty() {
             return Ok(PreWorktreeDecision::UseLastCommit);
         }
-        eprintln!(
-            "amux: {} uncommitted file(s) in working tree:",
-            files.len()
-        );
+        eprintln!("amux: {} uncommitted file(s) in working tree:", files.len());
         for f in files.iter().take(10) {
             eprintln!("  {f}");
         }
@@ -83,10 +79,11 @@ impl WorktreeLifecycleFrontend for CliFrontend {
     }
 
     fn report_worktree_created(&mut self, path: &Path, branch: &str) {
-        self.messages.write_message(crate::engine::message::UserMessage {
-            level: crate::engine::message::MessageLevel::Info,
-            text: format!("worktree created at {} on branch {branch}", path.display()),
-        });
+        self.messages
+            .write_message(crate::engine::message::UserMessage {
+                level: crate::engine::message::MessageLevel::Info,
+                text: format!("worktree created at {} on branch {branch}", path.display()),
+            });
     }
 
     fn ask_post_workflow_action(
@@ -165,34 +162,32 @@ impl WorktreeLifecycleFrontend for CliFrontend {
         Ok(matches!(ch, 'y' | 'Y'))
     }
 
-    fn report_merge_conflict(
-        &mut self,
-        branch: &str,
-        worktree_path: &Path,
-        git_root: &Path,
-    ) {
-        self.messages.write_message(crate::engine::message::UserMessage {
-            level: crate::engine::message::MessageLevel::Error,
-            text: format!(
-                "merge conflict on {branch} (worktree {}, git root {})",
-                worktree_path.display(),
-                git_root.display()
-            ),
-        });
+    fn report_merge_conflict(&mut self, branch: &str, worktree_path: &Path, git_root: &Path) {
+        self.messages
+            .write_message(crate::engine::message::UserMessage {
+                level: crate::engine::message::MessageLevel::Error,
+                text: format!(
+                    "merge conflict on {branch} (worktree {}, git root {})",
+                    worktree_path.display(),
+                    git_root.display()
+                ),
+            });
     }
 
     fn report_worktree_discarded(&mut self, branch: &str) {
-        self.messages.write_message(crate::engine::message::UserMessage {
-            level: crate::engine::message::MessageLevel::Info,
-            text: format!("worktree for {branch} discarded"),
-        });
+        self.messages
+            .write_message(crate::engine::message::UserMessage {
+                level: crate::engine::message::MessageLevel::Info,
+                text: format!("worktree for {branch} discarded"),
+            });
     }
 
     fn report_worktree_kept(&mut self, path: &Path, branch: &str) {
-        self.messages.write_message(crate::engine::message::UserMessage {
-            level: crate::engine::message::MessageLevel::Info,
-            text: format!("worktree for {branch} kept at {}", path.display()),
-        });
+        self.messages
+            .write_message(crate::engine::message::UserMessage {
+                level: crate::engine::message::MessageLevel::Info,
+                text: format!("worktree for {branch} kept at {}", path.display()),
+            });
     }
 }
 
@@ -206,20 +201,24 @@ impl WorktreeLifecycleFrontend for CliFrontend {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::command::dispatch::catalogue::CommandCatalogue;
     use crate::command::commands::worktree_lifecycle::WorktreeLifecycleFrontend;
+    use crate::command::dispatch::catalogue::CommandCatalogue;
     use crate::frontend::cli::command_frontend::CliFrontend;
 
     fn make_frontend() -> CliFrontend {
         let cmd = CommandCatalogue::get().build_clap_command();
-        let m = cmd.try_get_matches_from(["amux", "implement", "0069"]).unwrap();
+        let m = cmd
+            .try_get_matches_from(["amux", "implement", "0069"])
+            .unwrap();
         CliFrontend::new(m)
     }
 
     #[test]
     fn confirm_worktree_cleanup_returns_false_when_not_tty() {
         let mut f = make_frontend();
-        let result = f.confirm_worktree_cleanup("feature/x", &PathBuf::from("/tmp/wt")).unwrap();
+        let result = f
+            .confirm_worktree_cleanup("feature/x", &PathBuf::from("/tmp/wt"))
+            .unwrap();
         // §7u safe default: false.
         assert!(!result, "expected false in non-TTY env");
     }

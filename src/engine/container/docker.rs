@@ -14,8 +14,7 @@
 //!
 //! For non-interactive captured output (or when a seeded prompt must be
 //! piped before user stdin), this module pipes stdin/stdout/stderr through
-//! the supplied `ContainerFrontend`. For TUI/headless frontends those paths
-//! land in 0071/0072.
+//! the supplied `ContainerFrontend`.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -26,9 +25,7 @@ use crate::engine::container::instance::{
     handle_now, ContainerExecution, ContainerExitInfo, ContainerId, ContainerInstance,
     ContainerStats, ExecutionBackend,
 };
-use crate::engine::container::options::{
-    ContainerName, ImageRef, ResolvedContainerOptions,
-};
+use crate::engine::container::options::{ContainerName, ImageRef, ResolvedContainerOptions};
 use crate::engine::error::EngineError;
 
 /// Docker label applied to every amux-spawned container so `list_running`
@@ -52,12 +49,11 @@ impl DockerBackend {
             .stderr(Stdio::null())
             .spawn();
         match child {
-            Ok(child) => super::runtime::wait_with_timeout(
-                child,
-                std::time::Duration::from_secs(10),
-            )
-            .map(|s| s.success())
-            .unwrap_or(false),
+            Ok(child) => {
+                super::runtime::wait_with_timeout(child, std::time::Duration::from_secs(10))
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            }
             Err(_) => false,
         }
     }
@@ -72,10 +68,9 @@ impl ContainerBackend for DockerBackend {
             .image
             .clone()
             .ok_or_else(|| EngineError::MissingRequiredOption("Image".into()))?;
-        let name = options
-            .name
-            .clone()
-            .unwrap_or_else(|| ContainerName::new(crate::engine::container::naming::generate_container_name()));
+        let name = options.name.clone().unwrap_or_else(|| {
+            ContainerName::new(crate::engine::container::naming::generate_container_name())
+        });
         Ok(Box::new(DockerContainerInstance {
             id: ContainerId::new(name.0.clone()),
             name,
@@ -91,8 +86,8 @@ impl ContainerBackend for DockerBackend {
         let format = "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.CreatedAt}}";
         let queries: &[&[&str]] = &[
             &["ps", "--filter", "label=amux=true", "--format", format],
-            &["ps", "--filter", "name=amux-",      "--format", format],
-            &["ps", "--filter", "name=nanoclaw",   "--format", format],
+            &["ps", "--filter", "name=amux-", "--format", format],
+            &["ps", "--filter", "name=nanoclaw", "--format", format],
         ];
 
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -144,8 +139,8 @@ impl ContainerBackend for DockerBackend {
         let format = "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.CreatedAt}}";
         let queries: &[&[&str]] = &[
             &["ps", "--filter", "label=amux=true", "--format", format],
-            &["ps", "--filter", "name=amux-",      "--format", format],
-            &["ps", "--filter", "name=nanoclaw",   "--format", format],
+            &["ps", "--filter", "name=amux-", "--format", format],
+            &["ps", "--filter", "name=nanoclaw", "--format", format],
         ];
 
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -301,11 +296,17 @@ impl ContainerInstance for DockerContainerInstance {
         // - Otherwise we keep the existing inherit-stdio path (correct for
         //   the bare CLI, for non-interactive runs, and for build/pull
         //   probes that should stream into the user's terminal).
-        frontend.report_status(crate::engine::container::frontend::ContainerStatus::Running {
-            container_name: self.name.0.clone(),
-        });
+        frontend.report_status(
+            crate::engine::container::frontend::ContainerStatus::Running {
+                container_name: self.name.0.clone(),
+            },
+        );
 
-        let pty_io = if interactive { frontend.take_container_io() } else { None };
+        let pty_io = if interactive {
+            frontend.take_container_io()
+        } else {
+            None
+        };
 
         if let Some(io) = pty_io {
             return spawn_pty_bridged_docker(self, frontend, io, argv, started_at, handle);
@@ -395,7 +396,12 @@ fn spawn_pty_bridged_docker(
     let (cols, rows) = io.initial_size;
     let pty_system = native_pty_system();
     let pair = pty_system
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| EngineError::Container(format!("openpty: {e}")))?;
 
     let mut cmd = CommandBuilder::new("docker");
@@ -456,8 +462,7 @@ fn spawn_pty_bridged_docker(
     // `MasterPty` is not `Clone`, so we wrap it in `Arc<Mutex>` and share
     // between the resize task and the execution backend (which needs it for
     // cleanup). Resize calls are rare and brief, so lock contention is fine.
-    let master_arc =
-        std::sync::Arc::new(std::sync::Mutex::new(pair.master));
+    let master_arc = std::sync::Arc::new(std::sync::Mutex::new(pair.master));
 
     let master_for_resize = std::sync::Arc::clone(&master_arc);
     let mut resize_rx = io.resize;
@@ -801,10 +806,7 @@ fn parse_stats_line(line: &str, fallback_name: &str) -> Result<ContainerStats, E
 }
 
 fn parse_cpu_percent(s: &str) -> f64 {
-    s.trim()
-        .trim_end_matches('%')
-        .parse::<f64>()
-        .unwrap_or(0.0)
+    s.trim().trim_end_matches('%').parse::<f64>().unwrap_or(0.0)
 }
 
 fn parse_memory_mb(s: &str) -> f64 {
@@ -896,9 +898,7 @@ mod tests {
 
     #[test]
     fn build_run_argv_minimal() {
-        let resolved = resolve(vec![
-            ContainerOption::Image(ImageRef::new("img:latest")),
-        ]);
+        let resolved = resolve(vec![ContainerOption::Image(ImageRef::new("img:latest"))]);
         let argv = build_run_argv(
             &ContainerName::new("ctr"),
             &ImageRef::new("img:latest"),
@@ -927,7 +927,9 @@ mod tests {
             &ImageRef::new("img:latest"),
             &resolved,
         );
-        assert!(argv.windows(2).any(|w| w[0] == "-v" && w[1] == "/h/p:/c/p:ro"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "-v" && w[1] == "/h/p:/c/p:ro"));
     }
 
     #[test]
@@ -944,7 +946,9 @@ mod tests {
             &resolved,
         );
         assert!(argv.contains(&"AMUX_TEST_ENV_DOCKER=v1".to_string()));
-        assert!(!argv.iter().any(|a| a.contains("AMUX_TEST_NEVER_SET_DOCKER")));
+        assert!(!argv
+            .iter()
+            .any(|a| a.contains("AMUX_TEST_NEVER_SET_DOCKER")));
         std::env::remove_var("AMUX_TEST_ENV_DOCKER");
     }
 
@@ -959,7 +963,9 @@ mod tests {
             &ImageRef::new("img:latest"),
             &resolved,
         );
-        assert!(argv.iter().any(|a| a.contains("docker.sock") || a.contains("docker_engine")));
+        assert!(argv
+            .iter()
+            .any(|a| a.contains("docker.sock") || a.contains("docker_engine")));
     }
 
     #[test]
@@ -1001,7 +1007,10 @@ mod tests {
             .find(|w| w[0] == "-v")
             .map(|w| w[1].clone())
             .unwrap();
-        assert_eq!(vol_arg, "/h/rw:/c/rw", "RW overlay must not have :ro suffix");
+        assert_eq!(
+            vol_arg, "/h/rw:/c/rw",
+            "RW overlay must not have :ro suffix"
+        );
     }
 
     #[test]
@@ -1019,7 +1028,9 @@ mod tests {
             &ImageRef::new("img:latest"),
             &resolved,
         );
-        assert!(argv.windows(2).any(|w| w[0] == "-e" && w[1] == "MY_KEY=my_value"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "-e" && w[1] == "MY_KEY=my_value"));
     }
 
     #[test]
@@ -1033,8 +1044,14 @@ mod tests {
             &ImageRef::new("img:latest"),
             &resolved,
         );
-        assert!(argv.contains(&"-i".to_string()), "seeded prompt needs -i flag");
-        assert!(!argv.contains(&"-it".to_string()), "seeded prompt must NOT add -it");
+        assert!(
+            argv.contains(&"-i".to_string()),
+            "seeded prompt needs -i flag"
+        );
+        assert!(
+            !argv.contains(&"-it".to_string()),
+            "seeded prompt must NOT add -it"
+        );
     }
 
     #[test]
@@ -1049,9 +1066,19 @@ mod tests {
             &ImageRef::new("img:latest"),
             &resolved,
         );
-        assert!(argv.contains(&"-it".to_string()), "interactive+seeded must use -it for PTY");
-        assert!(!argv.contains(&"-i".to_string()), "interactive+seeded must NOT use bare -i");
-        assert_eq!(argv.last().map(|s| s.as_str()), Some("hello"), "seeded prompt must be last positional arg");
+        assert!(
+            argv.contains(&"-it".to_string()),
+            "interactive+seeded must use -it for PTY"
+        );
+        assert!(
+            !argv.contains(&"-i".to_string()),
+            "interactive+seeded must NOT use bare -i"
+        );
+        assert_eq!(
+            argv.last().map(|s| s.as_str()),
+            Some("hello"),
+            "seeded prompt must be last positional arg"
+        );
     }
 
     #[test]
@@ -1065,7 +1092,10 @@ mod tests {
             &ImageRef::new("img:latest"),
             &resolved,
         );
-        assert!(argv.contains(&"-it".to_string()), "interactive run needs -it flag");
+        assert!(
+            argv.contains(&"-it".to_string()),
+            "interactive run needs -it flag"
+        );
     }
 
     #[test]
@@ -1079,7 +1109,9 @@ mod tests {
             &ImageRef::new("img:latest"),
             &resolved,
         );
-        assert!(argv.windows(2).any(|w| w[0] == "-w" && w[1] == "/workspace"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "-w" && w[1] == "/workspace"));
     }
 
     #[test]
@@ -1095,7 +1127,8 @@ mod tests {
             &resolved,
         );
         assert!(
-            argv.windows(2).any(|w| w[0] == "--name" && w[1] == "my-container"),
+            argv.windows(2)
+                .any(|w| w[0] == "--name" && w[1] == "my-container"),
             "container name must appear as --name <name>"
         );
     }
@@ -1105,7 +1138,9 @@ mod tests {
         let ssh_src = PathBuf::from("/home/user/.ssh");
         let resolved = resolve(vec![
             ContainerOption::Image(ImageRef::new("img:latest")),
-            ContainerOption::MountSsh { source: ssh_src.clone() },
+            ContainerOption::MountSsh {
+                source: ssh_src.clone(),
+            },
         ]);
         let argv = build_run_argv(
             &ContainerName::new("ctr"),
@@ -1117,8 +1152,14 @@ mod tests {
             .find(|w| w[0] == "-v" && w[1].contains(".ssh"))
             .map(|w| w[1].clone())
             .expect("SSH mount volume must be present");
-        assert!(ssh_vol.ends_with(":ro"), "SSH mount must be read-only: {ssh_vol}");
-        assert!(ssh_vol.starts_with("/home/user/.ssh:"), "SSH host path must match: {ssh_vol}");
+        assert!(
+            ssh_vol.ends_with(":ro"),
+            "SSH mount must be read-only: {ssh_vol}"
+        );
+        assert!(
+            ssh_vol.starts_with("/home/user/.ssh:"),
+            "SSH host path must match: {ssh_vol}"
+        );
     }
 
     #[test]
@@ -1135,8 +1176,14 @@ mod tests {
             &ImageRef::new("img:latest"),
             &resolved,
         );
-        assert!(!argv.iter().any(|a| a.contains("yolo")), "yolo must not add a docker flag");
-        assert!(!argv.iter().any(|a| a.contains("bypass")), "yolo must not add a bypass flag");
+        assert!(
+            !argv.iter().any(|a| a.contains("yolo")),
+            "yolo must not add a docker flag"
+        );
+        assert!(
+            !argv.iter().any(|a| a.contains("bypass")),
+            "yolo must not add a bypass flag"
+        );
     }
 
     #[test]

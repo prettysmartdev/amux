@@ -262,9 +262,10 @@ impl AuthEngine {
             hex_encode(&h.as_ref()[..4])
         };
         params.distinguished_name = rcgen::DistinguishedName::new();
-        params
-            .distinguished_name
-            .push(rcgen::DnType::CommonName, format!("amux-headless-{ip_short_hash}"));
+        params.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            format!("amux-headless-{ip_short_hash}"),
+        );
 
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         params.not_after = rcgen::date_time_ymd(2034, 1, 1);
@@ -301,11 +302,7 @@ impl AuthEngine {
     }
 
     /// Load TLS material from explicit paths.
-    pub fn load_tls_from_paths(
-        &self,
-        cert: &Path,
-        key: &Path,
-    ) -> Result<TlsMaterial, EngineError> {
+    pub fn load_tls_from_paths(&self, cert: &Path, key: &Path) -> Result<TlsMaterial, EngineError> {
         let cert_pem = std::fs::read_to_string(cert).map_err(|e| EngineError::io(cert, e))?;
         let key_pem = std::fs::read_to_string(key).map_err(|e| EngineError::io(key, e))?;
         // Hash the DER bytes (decoded from PEM) to match the fingerprint computed in
@@ -328,8 +325,7 @@ impl AuthEngine {
 
 /// Sentinel hash used by `verify_api_key` when no on-disk hash exists.
 /// 64 hex zeros.
-const SENTINEL_HASH: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+const SENTINEL_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Decode PEM (stripping header/footer and base64-decoding) into DER bytes.
 fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
@@ -481,8 +477,11 @@ mod tests {
         let key = e.generate_api_key().unwrap();
         assert_eq!(key.as_str().len(), 64, "API key must be 64-char hex");
         assert!(
-            key.as_str().chars().all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_lowercase())),
-            "API key must be lowercase hex; got {:?}", key.as_str()
+            key.as_str()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_ascii_lowercase())),
+            "API key must be lowercase hex; got {:?}",
+            key.as_str()
         );
     }
 
@@ -534,8 +533,14 @@ mod tests {
         assert!(regenerated, "first call must report regenerated=true");
 
         // Both files must exist on disk.
-        assert!(head.join("tls").join("cert.pem").exists(), "cert.pem not written");
-        assert!(head.join("tls").join("key.pem").exists(), "key.pem not written");
+        assert!(
+            head.join("tls").join("cert.pem").exists(),
+            "cert.pem not written"
+        );
+        assert!(
+            head.join("tls").join("key.pem").exists(),
+            "key.pem not written"
+        );
         assert!(
             head.join("tls").join("bind_ip").exists(),
             "bind_ip sidecar must be written"
@@ -552,7 +557,10 @@ mod tests {
             "fingerprint must be 64 hex chars"
         );
         assert!(
-            material.fingerprint_sha256_hex.chars().all(|c| c.is_ascii_hexdigit()),
+            material
+                .fingerprint_sha256_hex
+                .chars()
+                .all(|c| c.is_ascii_hexdigit()),
             "fingerprint must be all hex digits"
         );
     }
@@ -618,7 +626,10 @@ mod tests {
         assert!(!key.as_str().is_empty(), "returned key must be non-empty");
 
         // Hash file must be on disk and match the SHA-256 of the plaintext key.
-        let hash_on_disk = e.read_api_key_hash().unwrap().expect("hash file must exist");
+        let hash_on_disk = e
+            .read_api_key_hash()
+            .unwrap()
+            .expect("hash file must exist");
         let expected_hash = e.hash_api_key(&key);
         assert_eq!(
             hash_on_disk.as_str(),

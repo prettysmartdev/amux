@@ -27,11 +27,7 @@ pub fn workflow_strip_height(state: &WorkflowViewState) -> u16 {
         return 0;
     }
     let columns = build_workflow_columns(state);
-    let max_parallel = columns
-        .iter()
-        .map(|c| c.len())
-        .max()
-        .unwrap_or(1);
+    let max_parallel = columns.iter().map(|c| c.len()).max().unwrap_or(1);
     let rows = max_parallel.min(3) as u16;
     rows * 3
 }
@@ -70,8 +66,12 @@ pub fn render_workflow_strip(
             base_col_w
         };
 
-        let steps_to_show: Vec<&WorkflowStepView> =
-            col_steps.iter().skip(scroll_offset).take(visible_rows).copied().collect();
+        let steps_to_show: Vec<&WorkflowStepView> = col_steps
+            .iter()
+            .skip(scroll_offset)
+            .take(visible_rows)
+            .copied()
+            .collect();
         let hidden = col_steps.len().saturating_sub(scroll_offset + visible_rows);
 
         for (row_idx, step) in steps_to_show.iter().enumerate() {
@@ -91,8 +91,14 @@ pub fn render_workflow_strip(
                 .map(|c| c == &step.name)
                 .unwrap_or(false);
             let auto_disabled = state.auto_disabled.contains(&step.name);
-            let (label, style) =
-                step_box_label_and_style(&step.name, &step.status, is_current, auto_disabled, step.stuck, box_w);
+            let (label, style) = step_box_label_and_style(
+                &step.name,
+                &step.status,
+                is_current,
+                auto_disabled,
+                step.stuck,
+                box_w,
+            );
 
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -109,8 +115,7 @@ pub fn render_workflow_strip(
                 if arrow_x < area.x + area.width {
                     let arrow_area = Rect::new(arrow_x, row_y + 1, 1, 1);
                     frame.render_widget(
-                        Paragraph::new("\u{2192}")
-                            .style(Style::default().fg(Color::DarkGray)),
+                        Paragraph::new("\u{2192}").style(Style::default().fg(Color::DarkGray)),
                         arrow_area,
                     );
                 }
@@ -213,15 +218,15 @@ fn step_box_label_and_style(
     stuck: bool,
     box_width: u16,
 ) -> (String, Style) {
-    let prefix_chars = if auto_disabled { 2 } else { 0 }
-        + if stuck { 3 } else { 0 };
+    let prefix_chars = if auto_disabled { 2 } else { 0 } + if stuck { 3 } else { 0 };
     // Available chars inside the box: width − 2 (borders) − 4 (' X ' around
     // glyph + name + trailing space) − optional auto-disabled/stuck prefix.
-    let max_name_chars = (box_width as usize)
-        .saturating_sub(6 + prefix_chars)
-        .max(1);
+    let max_name_chars = (box_width as usize).saturating_sub(6 + prefix_chars).max(1);
     let truncated_name = if name.chars().count() > max_name_chars {
-        let trunc: String = name.chars().take(max_name_chars.saturating_sub(1)).collect();
+        let trunc: String = name
+            .chars()
+            .take(max_name_chars.saturating_sub(1))
+            .collect();
         format!("{trunc}\u{2026}")
     } else {
         name.to_string()
@@ -231,7 +236,9 @@ fn step_box_label_and_style(
         "pending" => ("\u{25cb}", Style::default().fg(Color::DarkGray)),
         "running" => (
             "\u{25cf}",
-            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
         ),
         "done" => ("\u{2713}", Style::default().fg(Color::Green)),
         "error" => (
@@ -242,7 +249,9 @@ fn step_box_label_and_style(
         _ => ("\u{25cb}", Style::default().fg(Color::DarkGray)),
     };
     if stuck {
-        style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
     }
     if is_current {
         style = style.add_modifier(Modifier::BOLD);
@@ -408,7 +417,8 @@ mod tests {
         // Stuck step gets ⚠️ prefix in the label.
         assert!(
             label.contains("\u{26a0}"),
-            "stuck step label must contain ⚠ (U+26A0), got: {:?}", label
+            "stuck step label must contain ⚠ (U+26A0), got: {:?}",
+            label
         );
         // Style should be Yellow (overrides normal status color).
         assert_eq!(

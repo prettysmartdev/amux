@@ -16,9 +16,9 @@ use crate::command::commands::agent_setup::AgentSetupFrontend;
 use crate::command::commands::exec_workflow::WorkflowSummary;
 use crate::command::commands::implement_prompts::render_default_prompt;
 use crate::command::commands::mount_scope::{MountScope, MountScopeFrontend};
-use crate::command::commands::{collect_all_overlay_specs, parse_overlay_spec};
 use crate::command::commands::worktree_lifecycle::{WorktreeLifecycle, WorktreeLifecycleFrontend};
 use crate::command::commands::Command;
+use crate::command::commands::{collect_all_overlay_specs, parse_overlay_spec};
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
 use crate::data::session::Session;
@@ -115,7 +115,10 @@ impl WorkflowFrontend for ImplementWorkflowProxy {
         state: &crate::data::workflow_state::WorkflowState,
         available: &AvailableActions,
     ) -> Result<NextAction, EngineError> {
-        self.0.lock().unwrap().user_choose_next_action(state, available)
+        self.0
+            .lock()
+            .unwrap()
+            .user_choose_next_action(state, available)
     }
     fn confirm_resume(&mut self, mismatch: &ResumeMismatch) -> Result<bool, EngineError> {
         self.0.lock().unwrap().confirm_resume(mismatch)
@@ -125,7 +128,10 @@ impl WorkflowFrontend for ImplementWorkflowProxy {
         step: &WorkflowStep,
         exit: &ContainerExitInfo,
     ) -> Result<StepFailureChoice, EngineError> {
-        self.0.lock().unwrap().user_choose_after_step_failure(step, exit)
+        self.0
+            .lock()
+            .unwrap()
+            .user_choose_after_step_failure(step, exit)
     }
     fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus) {
         self.0.lock().unwrap().report_step_status(step, status);
@@ -139,10 +145,7 @@ impl WorkflowFrontend for ImplementWorkflowProxy {
     fn report_step_unstuck(&mut self, step: &WorkflowStep) {
         self.0.lock().unwrap().report_step_unstuck(step);
     }
-    fn yolo_countdown_tick(
-        &mut self,
-        remaining: Duration,
-    ) -> Result<YoloTickOutcome, EngineError> {
+    fn yolo_countdown_tick(&mut self, remaining: Duration) -> Result<YoloTickOutcome, EngineError> {
         self.0.lock().unwrap().yolo_countdown_tick(remaining)
     }
     fn report_workflow_completed(&mut self, outcome: &WorkflowOutcome) {
@@ -195,16 +198,10 @@ impl ContainerFrontend for ImplementContainerFrontendProxy {
         buf[..n].copy_from_slice(&bytes[..n]);
         Ok(n)
     }
-    fn report_status(
-        &mut self,
-        status: crate::engine::container::frontend::ContainerStatus,
-    ) {
+    fn report_status(&mut self, status: crate::engine::container::frontend::ContainerStatus) {
         self.0.lock().unwrap().report_status(status);
     }
-    fn report_progress(
-        &mut self,
-        progress: crate::engine::container::frontend::ContainerProgress,
-    ) {
+    fn report_progress(&mut self, progress: crate::engine::container::frontend::ContainerProgress) {
         self.0.lock().unwrap().report_progress(progress);
     }
     fn resize_pty(&mut self, cols: u16, rows: u16) {
@@ -245,10 +242,10 @@ impl ContainerExecutionFactory for ImplementCommandLayerFactory {
             env_passthrough: Some(session.effective_config().env_passthrough()),
             directory_overlays: self.directory_overlays.clone(),
         };
-        let options = self
-            .engines
-            .agent_engine
-            .build_options(session, &runtime.step_agent, &run_opts)?;
+        let options =
+            self.engines
+                .agent_engine
+                .build_options(session, &runtime.step_agent, &run_opts)?;
         let instance = self.engines.runtime.build(options)?;
         let proxy = ImplementContainerFrontendProxy(Arc::clone(&self.shared));
         instance.run_with_frontend(Box::new(proxy))
@@ -293,7 +290,11 @@ impl Command for ImplementCommand {
         } else {
             None
         };
-        let workflow_used = self.flags.workflow.as_ref().map(|p| p.display().to_string());
+        let workflow_used = self
+            .flags
+            .workflow
+            .as_ref()
+            .map(|p| p.display().to_string());
 
         // Load or construct workflow.
         frontend.write_message(UserMessage {
@@ -338,8 +339,7 @@ impl Command for ImplementCommand {
         };
 
         // Confirm mount scope when cwd differs from git root.
-        let cwd = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let git_root_for_scope = self
             .engines
             .git_engine
@@ -365,7 +365,9 @@ impl Command for ImplementCommand {
                     let cmd_err = CommandError::from(e);
                     frontend.write_message(UserMessage {
                         level: MessageLevel::Error,
-                        text: format!("implement: failed to resolve git root for worktree: {cmd_err}"),
+                        text: format!(
+                            "implement: failed to resolve git root for worktree: {cmd_err}"
+                        ),
                     });
                     return Err(cmd_err);
                 }
@@ -424,8 +426,7 @@ impl Command for ImplementCommand {
 
         frontend.set_pty_active(true);
 
-        let shared: Arc<Mutex<Box<dyn ImplementCommandFrontend>>> =
-            Arc::new(Mutex::new(frontend));
+        let shared: Arc<Mutex<Box<dyn ImplementCommandFrontend>>> = Arc::new(Mutex::new(frontend));
 
         let flags_arc = Arc::new(self.flags.clone());
 
@@ -652,6 +653,9 @@ mod tests {
             overlay: vec![],
         };
         assert!(flags.yolo);
-        assert!(!flags.worktree, "yolo without workflow must NOT imply worktree");
+        assert!(
+            !flags.worktree,
+            "yolo without workflow must NOT imply worktree"
+        );
     }
 }

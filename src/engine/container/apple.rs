@@ -30,10 +30,9 @@ impl ContainerBackend for AppleBackend {
         &self,
         options: ResolvedContainerOptions,
     ) -> Result<Box<dyn ContainerInstance>, EngineError> {
-        let image = options
-            .image
-            .clone()
-            .ok_or_else(|| EngineError::ConflictingOptions("missing required Image option".into()))?;
+        let image = options.image.clone().ok_or_else(|| {
+            EngineError::ConflictingOptions("missing required Image option".into())
+        })?;
         let name = options.name.clone().unwrap_or_else(|| {
             ContainerName::new(crate::engine::container::naming::generate_container_name())
         });
@@ -84,17 +83,20 @@ impl ContainerBackend for AppleBackend {
             // Apple `container list` outputs Names as a JSON array ["name"],
             // not a string. Handle both array and string forms.
             let row_name = {
-                let val = row.get("Names")
+                let val = row
+                    .get("Names")
                     .or_else(|| row.get("Name"))
                     .or_else(|| row.get("name"));
                 match val {
-                    Some(v) if v.is_array() => v.as_array()
+                    Some(v) if v.is_array() => v
+                        .as_array()
                         .and_then(|a| a.first())
                         .and_then(|s| s.as_str())
                         .map(|s| s.trim_start_matches('/'))
                         .unwrap_or_default()
                         .to_string(),
-                    Some(v) => v.as_str()
+                    Some(v) => v
+                        .as_str()
                         .map(|s| s.trim_start_matches('/'))
                         .unwrap_or_default()
                         .to_string(),
@@ -173,17 +175,20 @@ impl ContainerBackend for AppleBackend {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             let row_name = {
-                let val = row.get("Names")
+                let val = row
+                    .get("Names")
                     .or_else(|| row.get("Name"))
                     .or_else(|| row.get("name"));
                 match val {
-                    Some(v) if v.is_array() => v.as_array()
+                    Some(v) if v.is_array() => v
+                        .as_array()
                         .and_then(|a| a.first())
                         .and_then(|s| s.as_str())
                         .map(|s| s.trim_start_matches('/'))
                         .unwrap_or_default()
                         .to_string(),
-                    Some(v) => v.as_str()
+                    Some(v) => v
+                        .as_str()
                         .map(|s| s.trim_start_matches('/'))
                         .unwrap_or_default()
                         .to_string(),
@@ -270,12 +275,12 @@ impl ContainerBackend for AppleBackend {
                         .and_then(serde_json::from_str)
                 })
                 .map_err(|e| {
-                    EngineError::Container(format!(
-                        "unparseable container stats output: {e}"
-                    ))
+                    EngineError::Container(format!("unparseable container stats output: {e}"))
                 })?;
             let entry = match &value {
-                serde_json::Value::Array(arr) => arr.first().cloned().unwrap_or(serde_json::Value::Null),
+                serde_json::Value::Array(arr) => {
+                    arr.first().cloned().unwrap_or(serde_json::Value::Null)
+                }
                 _ => value,
             };
             let cpu = entry
@@ -380,11 +385,17 @@ impl ContainerInstance for AppleContainerInstance {
         // PTY-bridged path: the TUI frontend exposes a `ContainerIo`. We
         // spawn the Apple `container run -it` binary via portable-pty so the
         // PTY master is bridged into the frontend's vt100 parser.
-        frontend.report_status(crate::engine::container::frontend::ContainerStatus::Running {
-            container_name: self.name.0.clone(),
-        });
+        frontend.report_status(
+            crate::engine::container::frontend::ContainerStatus::Running {
+                container_name: self.name.0.clone(),
+            },
+        );
 
-        let pty_io = if interactive { frontend.take_container_io() } else { None };
+        let pty_io = if interactive {
+            frontend.take_container_io()
+        } else {
+            None
+        };
         if let Some(io) = pty_io {
             return spawn_pty_bridged_apple(self, frontend, io, argv, started_at, handle);
         }
@@ -470,7 +481,12 @@ fn spawn_pty_bridged_apple(
     let (cols, rows) = io.initial_size;
     let pty_system = native_pty_system();
     let pair = pty_system
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| EngineError::Container(format!("openpty: {e}")))?;
 
     let mut cmd = CommandBuilder::new("container");
@@ -525,8 +541,7 @@ fn spawn_pty_bridged_apple(
     });
 
     // Resize task: forward terminal resizes to the PTY master.
-    let master_arc =
-        std::sync::Arc::new(std::sync::Mutex::new(pair.master));
+    let master_arc = std::sync::Arc::new(std::sync::Mutex::new(pair.master));
     let master_for_resize = std::sync::Arc::clone(&master_arc);
     let mut resize_rx = io.resize;
     tokio::spawn(async move {

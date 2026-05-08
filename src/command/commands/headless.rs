@@ -3,12 +3,27 @@
 use async_trait::async_trait;
 use serde::Serialize;
 
+use std::net::IpAddr;
+use std::path::PathBuf;
+
 use crate::command::commands::Command;
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
 use crate::data::fs::headless_process;
+use crate::engine::auth::TlsMaterial;
 use crate::engine::message::{MessageLevel, UserMessage, UserMessageSink};
-use crate::frontend::headless::HeadlessServeConfig;
+
+/// Configuration handed from the `headless start` command to Layer 3's
+/// `serve_until_shutdown`. Lives in Layer 2 so the trait signature does
+/// not pull Layer 3 types into the command layer.
+#[derive(Debug, Clone)]
+pub struct HeadlessServeConfig {
+    pub port: u16,
+    pub bind_ip: IpAddr,
+    pub workdirs: Vec<PathBuf>,
+    pub dangerously_skip_auth: bool,
+    pub tls_material: Option<TlsMaterial>,
+}
 
 pub mod banner;
 
@@ -255,8 +270,7 @@ async fn run_start(
     // TLS material: generate or load now so the bind_ip warning surfaces
     // BEFORE we hand off to serve_until_shutdown.
     let bind_ip: std::net::IpAddr = "127.0.0.1".parse().expect("static loopback ip");
-    let (tls_material, regenerated) =
-        engines.auth_engine.ensure_self_signed_tls(bind_ip)?;
+    let (tls_material, regenerated) = engines.auth_engine.ensure_self_signed_tls(bind_ip)?;
     if regenerated && headless_paths.tls_bind_ip_file().exists() {
         // Existing sidecar file means a previous cert was here — emit the
         // re-pin warning. (We can't reliably distinguish "first ever cert"
@@ -413,9 +427,9 @@ async fn run_status(
     };
 
     let meta = headless_process::read_server_meta(&meta_path)?;
-    let bound_addr = meta.as_ref().map(|m| {
-        format!("{}://{}:{}", m.scheme, m.bind_ip, m.port)
-    });
+    let bound_addr = meta
+        .as_ref()
+        .map(|m| format!("{}://{}:{}", m.scheme, m.bind_ip, m.port));
 
     // HTTP-probe the running server when we know its endpoint. A short
     // timeout keeps `status` snappy; a missing/timed-out probe means the
@@ -503,10 +517,10 @@ mod tests {
         assert_eq!(merged.len(), 2, "must contain both cli and config entries");
     }
 
-    use crate::engine::auth::AuthEngine;
-    use crate::data::fs::headless_paths::HeadlessPaths;
-    use crate::data::fs::auth_paths::AuthPathResolver;
     use crate::command::dispatch::Engines;
+    use crate::data::fs::auth_paths::AuthPathResolver;
+    use crate::data::fs::headless_paths::HeadlessPaths;
+    use crate::engine::auth::AuthEngine;
     use crate::engine::message::{UserMessage, UserMessageSink};
     use std::sync::Arc;
 
@@ -523,9 +537,8 @@ mod tests {
             runtime.clone(),
         ));
         let auth_engine = Arc::new(AuthEngine::with_paths(auth_paths, headless_paths));
-        let workflow_state_store = Arc::new(
-            crate::data::EngineWorkflowStateStore::at_git_root(tmp),
-        );
+        let workflow_state_store =
+            Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(tmp));
         Engines {
             runtime,
             git_engine,
@@ -536,7 +549,9 @@ mod tests {
         }
     }
 
-    struct NullFrontend { messages: Vec<String> }
+    struct NullFrontend {
+        messages: Vec<String>,
+    }
     impl UserMessageSink for NullFrontend {
         fn write_message(&mut self, msg: UserMessage) {
             self.messages.push(msg.text);
@@ -547,7 +562,7 @@ mod tests {
     impl HeadlessCommandFrontend for NullFrontend {
         async fn serve_until_shutdown(
             &mut self,
-            _config: crate::frontend::headless::HeadlessServeConfig,
+            _config: HeadlessServeConfig,
         ) -> Result<(), crate::command::error::CommandError> {
             Ok(())
         }
@@ -571,7 +586,9 @@ mod tests {
             dangerously_skip_auth: false, // no auth configured, but refresh_key skips check
         };
 
-        let mut frontend = NullFrontend { messages: Vec::new() };
+        let mut frontend = NullFrontend {
+            messages: Vec::new(),
+        };
         let result = run_start(flags, &engines, &mut frontend, &headless_paths).await;
         assert!(result.is_ok(), "refresh_key must short-circuit: {result:?}");
         if let Ok(HeadlessOutcome::Start(outcome)) = result {
@@ -595,10 +612,14 @@ mod tests {
             dangerously_skip_auth: false,
         };
 
-        let mut frontend = NullFrontend { messages: Vec::new() };
+        let mut frontend = NullFrontend {
+            messages: Vec::new(),
+        };
         let result = run_start(flags, &engines, &mut frontend, &headless_paths).await;
-        assert!(matches!(result, Err(CommandError::HeadlessAuthMissing)),
-            "missing auth hash must error with HeadlessAuthMissing: {result:?}");
+        assert!(
+            matches!(result, Err(CommandError::HeadlessAuthMissing)),
+            "missing auth hash must error with HeadlessAuthMissing: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -617,9 +638,14 @@ mod tests {
             dangerously_skip_auth: true,
         };
 
-        let mut frontend = NullFrontend { messages: Vec::new() };
+        let mut frontend = NullFrontend {
+            messages: Vec::new(),
+        };
         let result = run_start(flags, &engines, &mut frontend, &headless_paths).await;
-        assert!(result.is_ok(), "dangerously_skip_auth must bypass auth check: {result:?}");
+        assert!(
+            result.is_ok(),
+            "dangerously_skip_auth must bypass auth check: {result:?}"
+        );
     }
 
     #[test]
@@ -629,13 +655,21 @@ mod tests {
         let headless_paths = engines.auth_engine.headless_paths().clone();
         headless_paths.ensure_root().unwrap();
 
-        let mut frontend = NullFrontend { messages: Vec::new() };
+        let mut frontend = NullFrontend {
+            messages: Vec::new(),
+        };
         let result = run_kill(&headless_paths, &mut frontend);
-        assert!(matches!(result, Err(CommandError::HeadlessNotRunning)),
-            "kill with no PID file must surface HeadlessNotRunning: {result:?}");
         assert!(
-            frontend.messages.iter().any(|m| m.contains("No headless") || m.contains("no PID")),
-            "must emit a warning; got: {:?}", frontend.messages
+            matches!(result, Err(CommandError::HeadlessNotRunning)),
+            "kill with no PID file must surface HeadlessNotRunning: {result:?}"
+        );
+        assert!(
+            frontend
+                .messages
+                .iter()
+                .any(|m| m.contains("No headless") || m.contains("no PID")),
+            "must emit a warning; got: {:?}",
+            frontend.messages
         );
     }
 
@@ -650,11 +684,18 @@ mod tests {
         // Write a PID that can't possibly be alive.
         crate::data::fs::headless_process::write_pid(&pid_path, u32::MAX - 1).unwrap();
 
-        let mut frontend = NullFrontend { messages: Vec::new() };
+        let mut frontend = NullFrontend {
+            messages: Vec::new(),
+        };
         let result = run_kill(&headless_paths, &mut frontend);
-        assert!(matches!(result, Err(CommandError::HeadlessNotRunning)),
-            "stale PID must surface HeadlessNotRunning: {result:?}");
-        assert!(!pid_path.exists(), "PID file must be removed after stale detection");
+        assert!(
+            matches!(result, Err(CommandError::HeadlessNotRunning)),
+            "stale PID must surface HeadlessNotRunning: {result:?}"
+        );
+        assert!(
+            !pid_path.exists(),
+            "PID file must be removed after stale detection"
+        );
     }
 
     #[tokio::test]
@@ -708,12 +749,21 @@ mod tests {
         let headless_paths = engines.auth_engine.headless_paths().clone();
         headless_paths.ensure_root().unwrap();
 
-        let mut frontend = NullFrontend { messages: Vec::new() };
+        let mut frontend = NullFrontend {
+            messages: Vec::new(),
+        };
         let result = run_logs(&headless_paths, &mut frontend);
-        assert!(result.is_ok(), "missing log file must not error: {result:?}");
         assert!(
-            frontend.messages.iter().any(|m| m.contains("not found") || m.contains("Log")),
-            "must emit log-not-found warning; got: {:?}", frontend.messages
+            result.is_ok(),
+            "missing log file must not error: {result:?}"
+        );
+        assert!(
+            frontend
+                .messages
+                .iter()
+                .any(|m| m.contains("not found") || m.contains("Log")),
+            "must emit log-not-found warning; got: {:?}",
+            frontend.messages
         );
     }
 
@@ -728,7 +778,9 @@ mod tests {
         let log_path = headless_paths.log_file();
         std::fs::write(&log_path, "line one\nline two\nline three\n").unwrap();
 
-        let mut frontend = NullFrontend { messages: Vec::new() };
+        let mut frontend = NullFrontend {
+            messages: Vec::new(),
+        };
         let result = run_logs(&headless_paths, &mut frontend);
         assert!(result.is_ok());
         assert_eq!(frontend.messages.len(), 3, "must stream all lines");

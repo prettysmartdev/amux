@@ -2,7 +2,7 @@
 //!
 //! Frontends (Layer 3) parse user input into `FlagConfig` and pass it down
 //! through Layer 2 to Layer 0 / Layer 1. The concrete `clap` definitions live
-//! in Layer 2's `Dispatch` (work item 0068); this file only models the shape.
+//! in Layer 2's `Dispatch`; this file only models the shape.
 
 use std::path::PathBuf;
 use std::time::Duration;

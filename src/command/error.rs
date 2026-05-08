@@ -24,16 +24,10 @@ pub enum CommandError {
     UnknownCommand { path: Vec<String> },
 
     #[error("unknown flag '{flag}' for command {command:?}")]
-    UnknownFlag {
-        command: Vec<String>,
-        flag: String,
-    },
+    UnknownFlag { command: Vec<String>, flag: String },
 
     #[error("missing required flag '{flag}' for command {command:?}")]
-    MissingRequiredFlag {
-        command: Vec<String>,
-        flag: String,
-    },
+    MissingRequiredFlag { command: Vec<String>, flag: String },
 
     #[error("missing required argument '{argument}' for command {command:?}")]
     MissingRequiredArgument {
@@ -173,7 +167,11 @@ impl CommandError {
         }
     }
 
-    pub fn mutually_exclusive(command: &[&str], a: impl Into<String>, b: impl Into<String>) -> Self {
+    pub fn mutually_exclusive(
+        command: &[&str],
+        a: impl Into<String>,
+        b: impl Into<String>,
+    ) -> Self {
         CommandError::MutuallyExclusive {
             command: command.iter().map(|s| s.to_string()).collect(),
             a: a.into(),

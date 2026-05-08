@@ -13,14 +13,15 @@ impl ImplementCommandFrontend for CliFrontend {
     }
 
     fn report_implement_summary(&mut self, summary: &WorkflowSummary) {
-        self.messages.write_message(crate::engine::message::UserMessage {
-            level: crate::engine::message::MessageLevel::Info,
-            text: format!(
-                "implement summary — {}/{} steps OK ({} failed)",
-                summary.steps_completed,
-                summary.steps_completed + summary.steps_failed,
-                summary.steps_failed
-            ),
-        });
+        self.messages
+            .write_message(crate::engine::message::UserMessage {
+                level: crate::engine::message::MessageLevel::Info,
+                text: format!(
+                    "implement summary — {}/{} steps OK ({} failed)",
+                    summary.steps_completed,
+                    summary.steps_completed + summary.steps_failed,
+                    summary.steps_failed
+                ),
+            });
     }
 }

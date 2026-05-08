@@ -25,13 +25,12 @@ use crate::command::commands::agent_setup::{
 };
 use crate::command::commands::auth::AuthCommandFrontend;
 use crate::command::commands::chat::ChatCommandFrontend;
-use crate::command::commands::config::{
-    ConfigCommandFrontend, ConfigEditRequest, ConfigFieldRow,
-};
+use crate::command::commands::config::{ConfigCommandFrontend, ConfigEditRequest, ConfigFieldRow};
 use crate::command::commands::download::DownloadCommandFrontend;
 use crate::command::commands::exec_prompt::ExecPromptCommandFrontend;
 use crate::command::commands::exec_workflow::{ExecWorkflowCommandFrontend, WorkflowSummary};
 use crate::command::commands::headless::HeadlessCommandFrontend;
+use crate::command::commands::headless::HeadlessServeConfig;
 use crate::command::commands::implement::ImplementCommandFrontend;
 use crate::command::commands::mount_scope::{MountScopeDecision, MountScopeFrontend};
 use crate::command::commands::new::NewCommandFrontend;
@@ -46,12 +45,11 @@ use crate::command::dispatch::CommandFrontend;
 use crate::command::error::CommandError;
 use crate::data::config::repo::WorkItemsConfig;
 use crate::data::session::AgentName;
+use crate::data::workflow_definition::WorkflowStep;
 use crate::engine::claws::frontend::ClawsFrontend;
 use crate::engine::claws::phase::ClawsPhase;
 use crate::engine::claws::summary::ClawsSummary;
-use crate::engine::container::frontend::{
-    ContainerFrontend, ContainerProgress, ContainerStatus,
-};
+use crate::engine::container::frontend::{ContainerFrontend, ContainerProgress, ContainerStatus};
 use crate::engine::container::instance::ContainerExitInfo;
 use crate::engine::error::EngineError;
 use crate::engine::init::frontend::InitFrontend;
@@ -63,12 +61,10 @@ use crate::engine::ready::phase::ReadyPhase;
 use crate::engine::ready::summary::ReadySummary;
 use crate::engine::step_status::StepStatus;
 use crate::engine::workflow::actions::{
-    AvailableActions, NextAction, ResumeMismatch, StepFailureChoice, StepOutput,
-    WorkflowOutcome, WorkflowStepStatus, YoloTickOutcome,
+    AvailableActions, NextAction, ResumeMismatch, StepFailureChoice, StepOutput, WorkflowOutcome,
+    WorkflowStepStatus, YoloTickOutcome,
 };
 use crate::engine::workflow::frontend::WorkflowFrontend;
-use crate::data::workflow_definition::WorkflowStep;
-use crate::frontend::headless::HeadlessServeConfig;
 
 /// Parsed flag/argument store populated from the HTTP request's `args` vector.
 #[derive(Debug)]
@@ -96,11 +92,7 @@ impl HeadlessDispatchFrontend {
     /// `log_path` is the `output.log` file that all output will be written to.
     /// `subcommand` is the command path (e.g. "exec prompt" → ["exec", "prompt"]).
     /// `args` is the raw args vector from the HTTP request body.
-    pub fn new(
-        subcommand: &str,
-        args: &[String],
-        log_path: &Path,
-    ) -> Result<Self, CommandError> {
+    pub fn new(subcommand: &str, args: &[String], log_path: &Path) -> Result<Self, CommandError> {
         let log_file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -280,11 +272,7 @@ impl UserMessageSink for HeadlessDispatchFrontend {
 // ─── CommandFrontend (flag/argument access) ─────────────────────────────────
 
 impl CommandFrontend for HeadlessDispatchFrontend {
-    fn flag_bool(
-        &self,
-        _command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<bool>, CommandError> {
+    fn flag_bool(&self, _command_path: &[&str], flag: &str) -> Result<Option<bool>, CommandError> {
         Ok(self.parsed.bools.get(flag).copied())
     }
 
@@ -301,7 +289,12 @@ impl CommandFrontend for HeadlessDispatchFrontend {
         _command_path: &[&str],
         flag: &str,
     ) -> Result<Vec<String>, CommandError> {
-        Ok(self.parsed.strings_vec.get(flag).cloned().unwrap_or_default())
+        Ok(self
+            .parsed
+            .strings_vec
+            .get(flag)
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn flag_path(
@@ -320,27 +313,15 @@ impl CommandFrontend for HeadlessDispatchFrontend {
         Ok(self.parsed.enums.get(flag).cloned())
     }
 
-    fn flag_u16(
-        &self,
-        _command_path: &[&str],
-        flag: &str,
-    ) -> Result<Option<u16>, CommandError> {
+    fn flag_u16(&self, _command_path: &[&str], flag: &str) -> Result<Option<u16>, CommandError> {
         Ok(self.parsed.u16s.get(flag).copied())
     }
 
-    fn argument(
-        &self,
-        _command_path: &[&str],
-        name: &str,
-    ) -> Result<Option<String>, CommandError> {
+    fn argument(&self, _command_path: &[&str], name: &str) -> Result<Option<String>, CommandError> {
         Ok(self.parsed.args.get(name).cloned())
     }
 
-    fn arguments(
-        &self,
-        _command_path: &[&str],
-        name: &str,
-    ) -> Result<Vec<String>, CommandError> {
+    fn arguments(&self, _command_path: &[&str], name: &str) -> Result<Vec<String>, CommandError> {
         Ok(self.parsed.args_vec.get(name).cloned().unwrap_or_default())
     }
 }
@@ -392,10 +373,7 @@ impl ContainerFrontend for HeadlessDispatchFrontend {
     }
 
     fn report_progress(&mut self, progress: ContainerProgress) {
-        self.write_to_log(&format!(
-            "[INFO] {}: {}",
-            progress.stage, progress.message
-        ));
+        self.write_to_log(&format!("[INFO] {}: {}", progress.stage, progress.message));
     }
 
     fn resize_pty(&mut self, _cols: u16, _rows: u16) {}
@@ -528,10 +506,7 @@ impl WorkflowFrontend for HeadlessDispatchFrontend {
     }
 
     fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus) {
-        self.write_to_log(&format!(
-            "[INFO] Step '{}': {:?}",
-            step.name, status
-        ));
+        self.write_to_log(&format!("[INFO] Step '{}': {:?}", step.name, status));
     }
 
     fn report_step_output(&mut self, _step: &WorkflowStep, _output: StepOutput) {}
@@ -616,12 +591,7 @@ impl WorktreeLifecycleFrontend for HeadlessDispatchFrontend {
         Ok(true)
     }
 
-    fn report_merge_conflict(
-        &mut self,
-        branch: &str,
-        worktree_path: &Path,
-        _git_root: &Path,
-    ) {
+    fn report_merge_conflict(&mut self, branch: &str, worktree_path: &Path, _git_root: &Path) {
         self.write_to_log(&format!(
             "[WARN] Merge conflict on branch '{branch}' at {}",
             worktree_path.display()
@@ -675,10 +645,7 @@ impl ReadyFrontend for HeadlessDispatchFrontend {
     fn ask_run_audit_on_template(&mut self) -> Result<bool, EngineError> {
         Ok(false)
     }
-    fn ask_migrate_legacy_layout(
-        &mut self,
-        _agent_name: &AgentName,
-    ) -> Result<bool, EngineError> {
+    fn ask_migrate_legacy_layout(&mut self, _agent_name: &AgentName) -> Result<bool, EngineError> {
         Ok(true)
     }
     fn report_phase(&mut self, phase: &ReadyPhase) {
@@ -823,14 +790,20 @@ mod tests {
     fn flag_bool_with_explicit_true_value() {
         let tmp = tempfile::tempdir().unwrap();
         let f = make_frontend("chat", &["--background", "true"], tmp.path());
-        assert_eq!(f.flag_bool(&["headless", "start"], "background").unwrap(), Some(true));
+        assert_eq!(
+            f.flag_bool(&["headless", "start"], "background").unwrap(),
+            Some(true)
+        );
     }
 
     #[test]
     fn flag_bool_with_explicit_false_value() {
         let tmp = tempfile::tempdir().unwrap();
         let f = make_frontend("chat", &["--background", "false"], tmp.path());
-        assert_eq!(f.flag_bool(&["headless", "start"], "background").unwrap(), Some(false));
+        assert_eq!(
+            f.flag_bool(&["headless", "start"], "background").unwrap(),
+            Some(false)
+        );
     }
 
     // ─── flag_string ──────────────────────────────────────────────────────────
@@ -868,7 +841,10 @@ mod tests {
     fn flag_u16_parses_port_value() {
         let tmp = tempfile::tempdir().unwrap();
         let f = make_frontend("headless start", &["--port", "9876"], tmp.path());
-        assert_eq!(f.flag_u16(&["headless", "start"], "port").unwrap(), Some(9876));
+        assert_eq!(
+            f.flag_u16(&["headless", "start"], "port").unwrap(),
+            Some(9876)
+        );
     }
 
     // ─── argument (positional) ────────────────────────────────────────────────
@@ -878,7 +854,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let f = make_frontend("exec prompt", &["hello", "world"], tmp.path());
         assert_eq!(
-            f.argument(&["exec", "prompt"], "prompt").unwrap().as_deref(),
+            f.argument(&["exec", "prompt"], "prompt")
+                .unwrap()
+                .as_deref(),
             Some("hello world")
         );
     }

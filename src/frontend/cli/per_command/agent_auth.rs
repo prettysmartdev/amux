@@ -1,6 +1,6 @@
 //! `AgentAuthFrontend` impl for the CLI.
 //!
-//! Per WI 0069 §7u, the safe non-interactive default is `DeclineOnce`
+//! The safe non-interactive default is `DeclineOnce`
 //! (do NOT auto-persist consent). The CLI prompts on stdin only when stdin
 //! is a TTY; otherwise it falls back to the safe default.
 

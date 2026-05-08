@@ -137,7 +137,9 @@ pub enum ContainerOption {
     SeededPrompt(String),
     Interactive(bool),
     AllowDocker(bool),
-    MountSsh { source: PathBuf },
+    MountSsh {
+        source: PathBuf,
+    },
     Yolo(YoloMode),
     Auto(AutoMode),
     Plan(PlanMode),
@@ -146,10 +148,14 @@ pub enum ContainerOption {
     Cpu(CpuLimit),
     Memory(MemoryLimit),
     AgentSettingsPassthrough(AgentSettings),
-    AgentCredentials { env_vars: Vec<(String, String)> },
+    AgentCredentials {
+        env_vars: Vec<(String, String)>,
+    },
     DisallowedTools(Vec<String>),
     AllowedTools(Vec<String>),
-    Model { flag: ModelFlagForm },
+    Model {
+        flag: ModelFlagForm,
+    },
     NonInteractivePrintFlag(String),
     /// Container-side `$HOME` remapped from `/root` when a non-root `USER`
     /// directive is detected in the agent's Dockerfile.
@@ -303,8 +309,14 @@ mod tests {
             ContainerOption::Yolo(YoloMode::Disabled),
         ]);
         let resolved = result.expect("from_iter should succeed");
-        assert_eq!(resolved.image.as_ref().map(|i| i.as_str()), Some("my-image:latest"));
-        assert_eq!(resolved.entrypoint.as_ref().map(|e| &e.0), Some(&vec!["claude".to_string(), "--print".to_string()]));
+        assert_eq!(
+            resolved.image.as_ref().map(|i| i.as_str()),
+            Some("my-image:latest")
+        );
+        assert_eq!(
+            resolved.entrypoint.as_ref().map(|e| &e.0),
+            Some(&vec!["claude".to_string(), "--print".to_string()])
+        );
         assert!(resolved.interactive);
         assert_eq!(resolved.allowed_tools, vec!["Bash".to_string()]);
         assert!(matches!(resolved.yolo, YoloMode::Disabled));

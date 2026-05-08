@@ -234,14 +234,14 @@ impl SessionState {
 /// Trait used by Layer 0 to delegate git-root resolution to Layer 1.
 ///
 /// Layer 0 must never invoke `git rev-parse` directly; it accepts a resolver
-/// at construction time and the real implementation lands in 0067 with the
-/// `GitEngine`.
+/// at construction time and the real implementation lives in `GitEngine`
+/// (Layer 1).
 pub trait GitRootResolver: Send + Sync {
     fn resolve(&self, working_dir: &Path) -> Result<PathBuf, DataError>;
 }
 
-/// Test-only resolver that always returns the same git root regardless of
-/// input. Useful for Layer-0-internal tests and as a placeholder until 0067.
+/// Resolver that always returns the same git root regardless of input.
+/// Used by Layer-0-internal tests and the headless server's session restore.
 #[derive(Debug, Clone)]
 pub struct StaticGitRootResolver {
     root: PathBuf,
@@ -293,17 +293,15 @@ impl Session {
         resolver: &dyn GitRootResolver,
         opts: SessionOpenOptions,
     ) -> Result<Self, DataError> {
-        let git_root = resolver
-            .resolve(&working_dir)
-            .map_err(|e| match e {
-                DataError::GitRootNotFound { working_dir } => {
-                    DataError::GitRootNotFound { working_dir }
-                }
-                other => DataError::GitRootResolution {
-                    working_dir: working_dir.clone(),
-                    message: other.to_string(),
-                },
-            })?;
+        let git_root = resolver.resolve(&working_dir).map_err(|e| match e {
+            DataError::GitRootNotFound { working_dir } => {
+                DataError::GitRootNotFound { working_dir }
+            }
+            other => DataError::GitRootResolution {
+                working_dir: working_dir.clone(),
+                message: other.to_string(),
+            },
+        })?;
         Self::open_at_git_root(working_dir, git_root, opts)
     }
 
@@ -603,9 +601,11 @@ mod tests {
     fn session_open_propagates_git_root_not_found() {
         let setup = IsolatedSetup::new();
         let resolver = FailingGitRootResolver;
-        let opts = SessionOpenOptions { env: Some(setup.env()), ..Default::default() };
-        let err = Session::open(setup.git_root.path().to_path_buf(), &resolver, opts)
-            .unwrap_err();
+        let opts = SessionOpenOptions {
+            env: Some(setup.env()),
+            ..Default::default()
+        };
+        let err = Session::open(setup.git_root.path().to_path_buf(), &resolver, opts).unwrap_err();
         assert!(
             matches!(err, DataError::GitRootNotFound { .. }),
             "expected GitRootNotFound, got {err:?}"
@@ -641,9 +641,11 @@ mod tests {
         std::fs::write(amux_dir.join("config.json"), b"{this is not json}").unwrap();
 
         let resolver = StaticGitRootResolver::new(setup.git_root.path());
-        let opts = SessionOpenOptions { env: Some(setup.env()), ..Default::default() };
-        let err = Session::open(setup.git_root.path().to_path_buf(), &resolver, opts)
-            .unwrap_err();
+        let opts = SessionOpenOptions {
+            env: Some(setup.env()),
+            ..Default::default()
+        };
+        let err = Session::open(setup.git_root.path().to_path_buf(), &resolver, opts).unwrap_err();
         assert!(
             matches!(err, DataError::ConfigParse { .. }),
             "expected ConfigParse, got {err:?}"
@@ -653,9 +655,15 @@ mod tests {
     #[test]
     fn session_flags_override_default_agent() {
         let setup = IsolatedSetup::new();
-        let flags = FlagConfig { agent: Some("flag-agent".to_string()), ..Default::default() };
+        let flags = FlagConfig {
+            agent: Some("flag-agent".to_string()),
+            ..Default::default()
+        };
         let session = setup.open_session_with_opts(flags);
-        assert_eq!(session.default_agent().map(|a| a.as_str()), Some("flag-agent"));
+        assert_eq!(
+            session.default_agent().map(|a| a.as_str()),
+            Some("flag-agent")
+        );
     }
 
     // ─── Layer-0-internal integration: Config + Session round-trip ───────────
@@ -681,14 +689,14 @@ mod tests {
         )
         .unwrap();
 
-        let env = EnvSnapshot::with_overrides([(
-            AMUX_CONFIG_HOME,
-            home_tmp.path().to_str().unwrap(),
-        )]);
+        let env =
+            EnvSnapshot::with_overrides([(AMUX_CONFIG_HOME, home_tmp.path().to_str().unwrap())]);
         let resolver = StaticGitRootResolver::new(git_tmp.path());
-        let opts = SessionOpenOptions { env: Some(env), ..Default::default() };
-        let session =
-            Session::open(git_tmp.path().to_path_buf(), &resolver, opts).unwrap();
+        let opts = SessionOpenOptions {
+            env: Some(env),
+            ..Default::default()
+        };
+        let session = Session::open(git_tmp.path().to_path_buf(), &resolver, opts).unwrap();
 
         // Repo agent wins over global.
         assert_eq!(session.default_agent().map(|a| a.as_str()), Some("codex"));
@@ -697,6 +705,9 @@ mod tests {
         assert_eq!(ec.scrollback_lines(), 7777);
         // Both raw configs are accessible.
         assert_eq!(session.repo_config().agent.as_deref(), Some("codex"));
-        assert_eq!(session.global_config().default_agent.as_deref(), Some("claude"));
+        assert_eq!(
+            session.global_config().default_agent.as_deref(),
+            Some("claude")
+        );
     }
 }

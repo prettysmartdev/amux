@@ -25,7 +25,10 @@ pub struct GlobalConfig {
     pub terminal_scrollback_lines: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
-    #[serde(rename = "yoloDisallowedTools", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "yoloDisallowedTools",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub yolo_disallowed_tools: Option<Vec<String>>,
     #[serde(rename = "envPassthrough", skip_serializing_if = "Option::is_none")]
     pub env_passthrough: Option<Vec<String>>,
@@ -91,8 +94,8 @@ impl GlobalConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| DataError::io(parent, e))?;
         }
-        let content =
-            serde_json::to_string_pretty(self).map_err(|e| DataError::ConfigSerialize { source: e })?;
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| DataError::ConfigSerialize { source: e })?;
         std::fs::write(&path, content).map_err(|e| DataError::io(&path, e))
     }
 }

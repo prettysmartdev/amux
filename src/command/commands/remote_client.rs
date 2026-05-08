@@ -75,8 +75,14 @@ impl RemoteClient {
     /// self-signed cert should be trusted.
     pub fn is_loopback_addr(addr: &str) -> bool {
         let trimmed = addr.trim();
-        let after_scheme = trimmed.split_once("://").map(|(_, rest)| rest).unwrap_or(trimmed);
-        let host_part = after_scheme.split_once('/').map(|(h, _)| h).unwrap_or(after_scheme);
+        let after_scheme = trimmed
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(trimmed);
+        let host_part = after_scheme
+            .split_once('/')
+            .map(|(h, _)| h)
+            .unwrap_or(after_scheme);
         let host = host_part
             .rsplit_once(':')
             .map(|(h, _)| h)
@@ -107,9 +113,10 @@ impl RemoteClient {
         // Compare canonicalized URLs against the global config default.
         let global = session.global_config();
         if let Some(remote) = global.remote.as_ref() {
-            if let (Some(default_addr), Some(default_key)) =
-                (remote.default_addr.as_deref(), remote.default_api_key.as_deref())
-            {
+            if let (Some(default_addr), Some(default_key)) = (
+                remote.default_addr.as_deref(),
+                remote.default_api_key.as_deref(),
+            ) {
                 if canonicalize_url(target_addr) == canonicalize_url(default_addr) {
                     return Ok(Some(ApiKey::from_string(default_key)));
                 }
@@ -140,10 +147,7 @@ impl RemoteClient {
         for (k, v) in flags {
             body.insert(k.to_string(), v.clone());
         }
-        let mut req = self
-            .http
-            .post(&url)
-            .json(&serde_json::Value::Object(body));
+        let mut req = self.http.post(&url).json(&serde_json::Value::Object(body));
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
@@ -329,7 +333,11 @@ fn canonicalize_url(s: &str) -> String {
         ("http", Some("80")) | ("https", Some("443")) | (_, None) => String::new(),
         (_, Some(p)) => format!(":{p}"),
     };
-    let path_render = if path_part == "/" { "" } else { path_part.as_str() };
+    let path_render = if path_part == "/" {
+        ""
+    } else {
+        path_part.as_str()
+    };
     format!("{scheme}://{host}{port_render}{path_render}")
 }
 
@@ -361,7 +369,10 @@ mod tests {
     #[test]
     fn url_canonicalize_default_port_elided() {
         assert_eq!(canonicalize_url("http://1.2.3.4:80/"), "http://1.2.3.4");
-        assert_eq!(canonicalize_url("https://example.com:443/"), "https://example.com");
+        assert_eq!(
+            canonicalize_url("https://example.com:443/"),
+            "https://example.com"
+        );
     }
 
     #[test]
@@ -388,32 +399,23 @@ mod tests {
             env: Some(env),
             ..Default::default()
         };
-        let session = Session::open_at_git_root(
-            tmp.path().to_path_buf(),
-            tmp.path().to_path_buf(),
-            opts,
-        )
-        .unwrap();
+        let session =
+            Session::open_at_git_root(tmp.path().to_path_buf(), tmp.path().to_path_buf(), opts)
+                .unwrap();
         (tmp, session)
     }
 
     fn make_session_with_global_config(config_json: &str) -> (tempfile::TempDir, Session) {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("config.json"), config_json).unwrap();
-        let env = EnvSnapshot::with_overrides([(
-            "AMUX_CONFIG_HOME",
-            tmp.path().to_str().unwrap(),
-        )]);
+        let env = EnvSnapshot::with_overrides([("AMUX_CONFIG_HOME", tmp.path().to_str().unwrap())]);
         let opts = SessionOpenOptions {
             env: Some(env),
             ..Default::default()
         };
-        let session = Session::open_at_git_root(
-            tmp.path().to_path_buf(),
-            tmp.path().to_path_buf(),
-            opts,
-        )
-        .unwrap();
+        let session =
+            Session::open_at_git_root(tmp.path().to_path_buf(), tmp.path().to_path_buf(), opts)
+                .unwrap();
         (tmp, session)
     }
 
@@ -437,8 +439,7 @@ mod tests {
     fn resolve_api_key_env_var_used_when_no_explicit() {
         let env = EnvSnapshot::with_overrides([("AMUX_API_KEY", "env-key")]);
         let (_tmp, session) = make_session(env);
-        let result =
-            RemoteClient::resolve_api_key(&session, "http://localhost:9876", None);
+        let result = RemoteClient::resolve_api_key(&session, "http://localhost:9876", None);
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap().unwrap().as_str(),
@@ -449,10 +450,10 @@ mod tests {
 
     #[test]
     fn resolve_api_key_global_config_matched_by_default_addr() {
-        let config_json = r#"{"remote":{"defaultAddr":"http://localhost:9876","defaultAPIKey":"config-key"}}"#;
+        let config_json =
+            r#"{"remote":{"defaultAddr":"http://localhost:9876","defaultAPIKey":"config-key"}}"#;
         let (_tmp, session) = make_session_with_global_config(config_json);
-        let result =
-            RemoteClient::resolve_api_key(&session, "http://localhost:9876", None);
+        let result = RemoteClient::resolve_api_key(&session, "http://localhost:9876", None);
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap().unwrap().as_str(),
@@ -463,10 +464,10 @@ mod tests {
 
     #[test]
     fn resolve_api_key_global_config_not_used_when_addr_differs() {
-        let config_json = r#"{"remote":{"defaultAddr":"http://other-host:9876","defaultAPIKey":"config-key"}}"#;
+        let config_json =
+            r#"{"remote":{"defaultAddr":"http://other-host:9876","defaultAPIKey":"config-key"}}"#;
         let (_tmp, session) = make_session_with_global_config(config_json);
-        let result =
-            RemoteClient::resolve_api_key(&session, "http://localhost:9876", None);
+        let result = RemoteClient::resolve_api_key(&session, "http://localhost:9876", None);
         assert!(result.is_ok());
         assert!(
             result.unwrap().is_none(),
@@ -477,10 +478,12 @@ mod tests {
     #[test]
     fn resolve_api_key_returns_none_when_no_source_available() {
         let (_tmp, session) = make_session(EnvSnapshot::empty());
-        let result =
-            RemoteClient::resolve_api_key(&session, "http://localhost:9876", None);
+        let result = RemoteClient::resolve_api_key(&session, "http://localhost:9876", None);
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none(), "must return None when no key source exists");
+        assert!(
+            result.unwrap().is_none(),
+            "must return None when no key source exists"
+        );
     }
 
     #[test]
@@ -488,8 +491,7 @@ mod tests {
         let env = EnvSnapshot::with_overrides([("AMUX_API_KEY", "env-key")]);
         let (_tmp, session) = make_session(env);
         // An explicit empty string should fall through to env.
-        let result =
-            RemoteClient::resolve_api_key(&session, "http://localhost:9876", Some("   "));
+        let result = RemoteClient::resolve_api_key(&session, "http://localhost:9876", Some("   "));
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap().unwrap().as_str(),
@@ -507,10 +509,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(matchers::method("POST"))
             .and(matchers::path("/v1/status"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"ok": true})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
             .mount(&server)
             .await;
 
@@ -538,7 +537,10 @@ mod tests {
         let client = RemoteClient::new(&server.uri(), None).unwrap();
         let result = client.send_command(&["exec", "workflow"], &[]).await;
         assert!(
-            matches!(result, Err(CommandError::RemoteHttpStatus { status: 400, .. })),
+            matches!(
+                result,
+                Err(CommandError::RemoteHttpStatus { status: 400, .. })
+            ),
             "400 must map to RemoteHttpStatus, got: {result:?}"
         );
     }
@@ -560,7 +562,10 @@ mod tests {
         let client = RemoteClient::new(&server.uri(), None).unwrap();
         let result = client.send_command(&["status"], &[]).await;
         assert!(
-            matches!(result, Err(CommandError::RemoteHttpStatus { status: 500, .. })),
+            matches!(
+                result,
+                Err(CommandError::RemoteHttpStatus { status: 500, .. })
+            ),
             "500 must map to RemoteHttpStatus, got: {result:?}"
         );
     }

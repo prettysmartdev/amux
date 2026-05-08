@@ -117,8 +117,7 @@ impl WorkflowState {
     /// otherwise it is removed.
     pub fn set_status(&mut self, step_name: &str, status: StepState) {
         let is_completed = matches!(status, StepState::Succeeded | StepState::Skipped);
-        self.step_states
-            .insert(step_name.to_string(), status);
+        self.step_states.insert(step_name.to_string(), status);
         if is_completed {
             self.completed_steps.insert(step_name.to_string());
         } else {
@@ -177,7 +176,10 @@ mod tests {
 
     #[test]
     fn schema_version_returns_constant() {
-        assert_eq!(WorkflowState::schema_version(), WORKFLOW_STATE_SCHEMA_VERSION);
+        assert_eq!(
+            WorkflowState::schema_version(),
+            WORKFLOW_STATE_SCHEMA_VERSION
+        );
     }
 
     #[test]

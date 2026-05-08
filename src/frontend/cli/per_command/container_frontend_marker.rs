@@ -1,6 +1,6 @@
 //! `ContainerFrontend` impl for the CLI.
 //!
-//! Per WI 0069 §1, the CLI binds container stdout/stderr to the host
+//! The CLI binds container stdout/stderr to the host
 //! stdout/stderr and reads stdin via `tokio::task::spawn_blocking`. The
 //! [`set_pty_active`] gate on the message queue ensures `UserMessage`s
 //! are queued while the container owns the terminal.
@@ -8,9 +8,7 @@
 use async_trait::async_trait;
 use std::io::Write;
 
-use crate::engine::container::frontend::{
-    ContainerFrontend, ContainerProgress, ContainerStatus,
-};
+use crate::engine::container::frontend::{ContainerFrontend, ContainerProgress, ContainerStatus};
 use crate::engine::error::EngineError;
 use crate::engine::message::{UserMessage, UserMessageSink};
 
@@ -41,7 +39,9 @@ impl ContainerFrontend for CliFrontend {
         let read = tokio::task::spawn_blocking(move || {
             use std::io::Read;
             let mut local = vec![0u8; len];
-            let n = std::io::stdin().lock().read(&mut local)
+            let n = std::io::stdin()
+                .lock()
+                .read(&mut local)
                 .map_err(|e| EngineError::Other(format!("read stdin: {e}")))?;
             local.truncate(n);
             Ok::<Vec<u8>, EngineError>(local)

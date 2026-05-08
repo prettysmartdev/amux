@@ -61,8 +61,8 @@ pub fn extract_aspec_tarball(tarball_bytes: &[u8], dest: &Path) -> Result<(), Ne
         .map_err(|e| NetworkError::ExtractFailed(format!("read entries: {e}")))?;
 
     for entry in entries {
-        let mut entry = entry
-            .map_err(|e| NetworkError::ExtractFailed(format!("read entry: {e}")))?;
+        let mut entry =
+            entry.map_err(|e| NetworkError::ExtractFailed(format!("read entry: {e}")))?;
         let path = entry
             .path()
             .map_err(|e| NetworkError::ExtractFailed(format!("read entry path: {e}")))?
@@ -77,8 +77,9 @@ pub fn extract_aspec_tarball(tarball_bytes: &[u8], dest: &Path) -> Result<(), Ne
         }
         let relative: String = components[2..].join("/");
         if relative.is_empty() {
-            std::fs::create_dir_all(dest)
-                .map_err(|e| NetworkError::ExtractFailed(format!("mkdir {}: {e}", dest.display())))?;
+            std::fs::create_dir_all(dest).map_err(|e| {
+                NetworkError::ExtractFailed(format!("mkdir {}: {e}", dest.display()))
+            })?;
             continue;
         }
         let target = dest.join(&relative);

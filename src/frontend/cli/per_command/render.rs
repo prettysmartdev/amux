@@ -24,7 +24,9 @@ use crate::command::commands::headless::{
 };
 use crate::command::commands::implement::ImplementOutcome;
 use crate::command::commands::init::InitOutcome;
-use crate::command::commands::new::{NewOutcome, NewSkillOutcome, NewSpecOutcome, NewWorkflowOutcome};
+use crate::command::commands::new::{
+    NewOutcome, NewSkillOutcome, NewSpecOutcome, NewWorkflowOutcome,
+};
 use crate::command::commands::ready::ReadyOutcome;
 use crate::command::commands::remote::{
     RemoteOutcome, RemoteRunOutcome, RemoteSessionKillOutcome, RemoteSessionStartOutcome,
@@ -82,10 +84,7 @@ pub fn render_status(o: &StatusOutcome) -> String {
         out.push_str("  To start one: amux implement <work-item>  or  amux chat\n");
     } else {
         let headers = ["●", "Container", "ID", "Image", "CPU%", "Mem MB", "Started"];
-        let rows: Vec<Vec<String>> = agents
-            .iter()
-            .map(|c| render_container_row(c))
-            .collect();
+        let rows: Vec<Vec<String>> = agents.iter().map(|c| render_container_row(c)).collect();
         out.push_str(&format_table(&headers, &rows));
     }
 
@@ -215,7 +214,11 @@ fn render_exec_workflow(o: &ExecWorkflowOutcome) -> Option<String> {
         Some(c) if c != 0 => format!(" (exit {c})"),
         _ => String::new(),
     };
-    let wt = if o.worktree_used { " in isolated worktree" } else { "" };
+    let wt = if o.worktree_used {
+        " in isolated worktree"
+    } else {
+        ""
+    };
     Some(format!("Workflow {} completed{exit}{wt}.", o.workflow))
 }
 
@@ -225,7 +228,11 @@ fn render_implement(o: &ImplementOutcome) -> Option<String> {
         .as_deref()
         .map(|w| format!(" (workflow {w})"))
         .unwrap_or_default();
-    let wt = if o.worktree_used { " in isolated worktree" } else { "" };
+    let wt = if o.worktree_used {
+        " in isolated worktree"
+    } else {
+        ""
+    };
     let exit = match o.exit_code {
         Some(c) if c != 0 => format!(" — exit {c}"),
         _ => String::new(),
@@ -249,10 +256,7 @@ fn render_ready(o: &ReadyOutcome) -> Option<String> {
     if o.json_requested {
         // Emit the legacy schema {ready, runtime, steps:{...}} so existing
         // CI / scripting consumers piping `amux ready --json` keep working.
-        Some(
-            serde_json::to_string_pretty(&o.to_legacy_json())
-                .unwrap_or_else(|_| "{}".into()),
-        )
+        Some(serde_json::to_string_pretty(&o.to_legacy_json()).unwrap_or_else(|_| "{}".into()))
     } else {
         None
     }
@@ -324,13 +328,21 @@ fn render_headless(o: &HeadlessOutcome) -> Option<String> {
 }
 
 fn render_headless_start(o: &HeadlessStartOutcome) -> String {
-    let mode = if o.background { "background" } else { "foreground" };
+    let mode = if o.background {
+        "background"
+    } else {
+        "foreground"
+    };
     let workdirs = if o.workdirs.is_empty() {
         "<none>".to_string()
     } else {
         o.workdirs.join(", ")
     };
-    let key = if o.refreshed_key { " (api key refreshed)" } else { "" };
+    let key = if o.refreshed_key {
+        " (api key refreshed)"
+    } else {
+        ""
+    };
     format!(
         "Headless server started on port {} in {mode} mode.\n  workdirs: {workdirs}{key}",
         o.port
@@ -356,10 +368,7 @@ fn render_headless_status(o: &HeadlessStatusOutcome) -> String {
     if !o.running {
         return "Headless server is not running.".to_string();
     }
-    let pid_part = o
-        .pid
-        .map(|p| format!(" (PID {p})"))
-        .unwrap_or_default();
+    let pid_part = o.pid.map(|p| format!(" (PID {p})")).unwrap_or_default();
     let addr_part = o
         .bound_addr
         .as_deref()
@@ -525,7 +534,9 @@ mod tests {
                 kind: ContainerKind::Agent,
                 tab_number: None,
                 stuck: false,
-                command_label: None, cpu_percent: None, memory_mb: None,
+                command_label: None,
+                cpu_percent: None,
+                memory_mb: None,
             }],
             watched: false,
             tip: "test tip".into(),
@@ -533,7 +544,10 @@ mod tests {
         let s = render_status(&o);
         assert!(s.contains("CODE AGENTS"), "{s}");
         assert!(s.contains("amux-1"), "{s}");
-        assert!(s.contains("Nanoclaw is not running"), "empty nanoclaw section: {s}");
+        assert!(
+            s.contains("Nanoclaw is not running"),
+            "empty nanoclaw section: {s}"
+        );
     }
 
     #[test]
@@ -547,7 +561,9 @@ mod tests {
                 kind: ContainerKind::Claws,
                 tab_number: None,
                 stuck: false,
-                command_label: None, cpu_percent: None, memory_mb: None,
+                command_label: None,
+                cpu_percent: None,
+                memory_mb: None,
             }],
             watched: false,
             tip: "test tip".into(),
@@ -555,7 +571,10 @@ mod tests {
         let s = render_status(&o);
         assert!(s.contains("NANOCLAW"), "{s}");
         assert!(s.contains("amux-claws-controller"), "{s}");
-        assert!(s.contains("No code agents running"), "empty agents section: {s}");
+        assert!(
+            s.contains("No code agents running"),
+            "empty agents section: {s}"
+        );
     }
 
     #[test]
@@ -570,7 +589,9 @@ mod tests {
                     kind: ContainerKind::Agent,
                     tab_number: None,
                     stuck: false,
-                    command_label: None, cpu_percent: None, memory_mb: None,
+                    command_label: None,
+                    cpu_percent: None,
+                    memory_mb: None,
                 },
                 StatusContainerRow {
                     id: "claws123456789".into(),
@@ -580,7 +601,9 @@ mod tests {
                     kind: ContainerKind::Claws,
                     tab_number: None,
                     stuck: false,
-                    command_label: None, cpu_percent: None, memory_mb: None,
+                    command_label: None,
+                    cpu_percent: None,
+                    memory_mb: None,
                 },
             ],
             watched: false,
@@ -589,8 +612,14 @@ mod tests {
         let s = render_status(&o);
         assert!(s.contains("amux-1"), "agent row: {s}");
         assert!(s.contains("amux-claws-abc"), "claws row: {s}");
-        assert!(!s.contains("No code agents running"), "agents section not empty: {s}");
-        assert!(!s.contains("Nanoclaw is not running"), "nanoclaw section not empty: {s}");
+        assert!(
+            !s.contains("No code agents running"),
+            "agents section not empty: {s}"
+        );
+        assert!(
+            !s.contains("Nanoclaw is not running"),
+            "nanoclaw section not empty: {s}"
+        );
     }
 
     #[test]
@@ -725,12 +754,18 @@ mod tests {
 
     #[test]
     fn render_auth_accepted_vs_declined() {
-        assert!(render_auth(&AuthOutcome { accepted: true, persisted: true })
-            .unwrap()
-            .contains("accepted"));
-        assert!(render_auth(&AuthOutcome { accepted: false, persisted: true })
-            .unwrap()
-            .contains("declined"));
+        assert!(render_auth(&AuthOutcome {
+            accepted: true,
+            persisted: true
+        })
+        .unwrap()
+        .contains("accepted"));
+        assert!(render_auth(&AuthOutcome {
+            accepted: false,
+            persisted: true
+        })
+        .unwrap()
+        .contains("declined"));
     }
 
     // ── render_ready ──────────────────────────────────────────────────────────
@@ -751,8 +786,7 @@ mod tests {
             refresh_requested: false,
         };
         let s = render_ready(&o).expect("json_requested=true must produce output");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&s).expect("must be valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&s).expect("must be valid JSON");
         // Top-level keys per legacy schema.
         assert_eq!(parsed["ready"], true);
         assert_eq!(parsed["runtime"], "docker");
@@ -799,8 +833,7 @@ mod tests {
             refresh_requested: true,
         };
         let s = render_ready(&o).expect("json_requested=true must produce output");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&s).expect("must be valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&s).expect("must be valid JSON");
         assert_eq!(parsed["ready"], false);
         assert_eq!(parsed["steps"]["dev_image"]["status"], "pending");
         assert_eq!(parsed["steps"]["refresh"]["status"], "ok");
@@ -973,7 +1006,10 @@ mod tests {
             configure: StepStatus::Done,
             controller: StepStatus::Done,
         };
-        assert!(render_claws(&o).is_none(), "claws must return None (summary via report_summary)");
+        assert!(
+            render_claws(&o).is_none(),
+            "claws must return None (summary via report_summary)"
+        );
     }
 
     // ── render_implement ──────────────────────────────────────────────────────
@@ -1005,7 +1041,10 @@ mod tests {
             synthetic_prompt: None,
         };
         let s = render_implement(&o).expect("implement must produce output");
-        assert!(s.contains("1") || s.contains("exit"), "exit code info must appear: {s}");
+        assert!(
+            s.contains("1") || s.contains("exit"),
+            "exit code info must appear: {s}"
+        );
     }
 
     #[test]
@@ -1046,7 +1085,10 @@ mod tests {
             worktree_used: false,
         };
         let s = render_exec_workflow(&o).expect("exec_workflow must produce output");
-        assert!(s.contains("2") || s.contains("exit"), "exit code must appear: {s}");
+        assert!(
+            s.contains("2") || s.contains("exit"),
+            "exit code must appear: {s}"
+        );
     }
 
     // ── render_exec_prompt ────────────────────────────────────────────────────
@@ -1069,7 +1111,10 @@ mod tests {
             exit_code: Some(3),
         };
         let s = render_exec_prompt(&o).expect("nonzero exit must produce output");
-        assert!(s.contains("3") || s.contains("exit"), "exit code must appear: {s}");
+        assert!(
+            s.contains("3") || s.contains("exit"),
+            "exit code must appear: {s}"
+        );
     }
 
     // ── render_download ───────────────────────────────────────────────────────
@@ -1096,7 +1141,10 @@ mod tests {
             dest_path: None,
         };
         let s = render_download(&o).expect("download must produce output even without dest_path");
-        assert!(s.contains("dockerfile-claude"), "asset name must appear: {s}");
+        assert!(
+            s.contains("dockerfile-claude"),
+            "asset name must appear: {s}"
+        );
     }
 
     // ── render_headless ───────────────────────────────────────────────────────
@@ -1128,12 +1176,17 @@ mod tests {
         };
         let s = render_headless_start(&o);
         assert!(s.contains("foreground"), "must say foreground: {s}");
-        assert!(s.contains("api key refreshed"), "refreshed_key must be mentioned: {s}");
+        assert!(
+            s.contains("api key refreshed"),
+            "refreshed_key must be mentioned: {s}"
+        );
     }
 
     #[test]
     fn render_headless_kill_with_stopped_pid() {
-        let s = render_headless_kill(&HeadlessKillOutcome { stopped_pid: Some(5678) });
+        let s = render_headless_kill(&HeadlessKillOutcome {
+            stopped_pid: Some(5678),
+        });
         assert!(s.contains("5678"), "PID must appear: {s}");
         assert!(s.contains("stopped"), "must say stopped: {s}");
     }
@@ -1154,7 +1207,9 @@ mod tests {
 
     #[test]
     fn render_headless_logs_empty_path() {
-        let s = render_headless_logs(&HeadlessLogsOutcome { log_path: String::new() });
+        let s = render_headless_logs(&HeadlessLogsOutcome {
+            log_path: String::new(),
+        });
         assert!(s.contains("No headless server log"), "must say no log: {s}");
     }
 

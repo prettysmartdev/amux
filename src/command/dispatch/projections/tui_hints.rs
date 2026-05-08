@@ -141,11 +141,11 @@ mod tests {
             vec!["new", "spec"],
         ] {
             let hint = cat.tui_hint_for(path);
+            assert!(hint.is_some(), "tui_hint_for({path:?}) must return Some");
             assert!(
-                hint.is_some(),
-                "tui_hint_for({path:?}) must return Some"
+                !hint.unwrap().help.is_empty(),
+                "help must not be empty for {path:?}"
             );
-            assert!(!hint.unwrap().help.is_empty(), "help must not be empty for {path:?}");
         }
     }
 
@@ -180,9 +180,14 @@ mod tests {
         let cat = CommandCatalogue::get();
         // typing "chat " (with trailing space) should yield flags for chat
         let comps = cat.tui_completions("chat ");
-        let flag_completions: Vec<&str> =
-            comps.iter().map(|c| c.completion.as_str()).collect();
-        for expected_flag in &["--yolo", "--plan", "--non-interactive", "--auto", "--overlay"] {
+        let flag_completions: Vec<&str> = comps.iter().map(|c| c.completion.as_str()).collect();
+        for expected_flag in &[
+            "--yolo",
+            "--plan",
+            "--non-interactive",
+            "--auto",
+            "--overlay",
+        ] {
             assert!(
                 flag_completions.iter().any(|c| c == expected_flag),
                 "completion '{expected_flag}' missing from: {flag_completions:?}"
@@ -195,8 +200,7 @@ mod tests {
         let cat = CommandCatalogue::get();
         // headless start's CliOnly flags must not appear in TUI completions.
         let comps = cat.tui_completions("headless start ");
-        let flag_completions: Vec<&str> =
-            comps.iter().map(|c| c.completion.as_str()).collect();
+        let flag_completions: Vec<&str> = comps.iter().map(|c| c.completion.as_str()).collect();
         for cli_only_flag in &["--port", "--workdirs", "--background", "--refresh-key"] {
             assert!(
                 !flag_completions.contains(cli_only_flag),

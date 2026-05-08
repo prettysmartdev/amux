@@ -111,11 +111,7 @@ impl Command for StatusCommand {
         let mut tick: u32 = 0;
 
         loop {
-            let handles = match self
-                .engines
-                .runtime
-                .list_running_sync()
-            {
+            let handles = match self.engines.runtime.list_running_sync() {
                 Ok(h) => h,
                 Err(e) => {
                     let err = CommandError::from(e);
@@ -231,9 +227,18 @@ fn write_status_table(
     } else {
         for c in &agents {
             let indicator = if c.stuck { "Y" } else { "G" };
-            let cpu = c.cpu_percent.map(|v| format!("{v:.1}%")).unwrap_or_else(|| "-".into());
-            let mem = c.memory_mb.map(|v| format!("{v:.0}MB")).unwrap_or_else(|| "-".into());
-            let tab = c.tab_number.map(|t| format!(" [tab {t}]")).unwrap_or_default();
+            let cpu = c
+                .cpu_percent
+                .map(|v| format!("{v:.1}%"))
+                .unwrap_or_else(|| "-".into());
+            let mem = c
+                .memory_mb
+                .map(|v| format!("{v:.0}MB"))
+                .unwrap_or_else(|| "-".into());
+            let tab = c
+                .tab_number
+                .map(|t| format!(" [tab {t}]"))
+                .unwrap_or_default();
             frontend.write_message(UserMessage {
                 level: MessageLevel::Info,
                 text: format!(
@@ -260,8 +265,14 @@ fn write_status_table(
     } else {
         for c in &claws {
             let indicator = if c.stuck { "Y" } else { "G" };
-            let cpu = c.cpu_percent.map(|v| format!("{v:.1}%")).unwrap_or_else(|| "-".into());
-            let mem = c.memory_mb.map(|v| format!("{v:.0}MB")).unwrap_or_else(|| "-".into());
+            let cpu = c
+                .cpu_percent
+                .map(|v| format!("{v:.1}%"))
+                .unwrap_or_else(|| "-".into());
+            let mem = c
+                .memory_mb
+                .map(|v| format!("{v:.0}MB"))
+                .unwrap_or_else(|| "-".into());
             frontend.write_message(UserMessage {
                 level: MessageLevel::Info,
                 text: format!("  {indicator} {name}  {cpu}  {mem}", name = c.name),
@@ -274,7 +285,6 @@ fn write_status_table(
     });
     frontend.replay_queued();
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -306,14 +316,12 @@ mod tests {
     fn tui_context_enriches_row_with_matching_tab() {
         // Simulate the enrichment logic from run_with_frontend by building
         // a row and applying the TUI context logic directly.
-        let ctx = StatusCommandTuiContext::new(vec![
-            TuiTabSnapshot {
-                tab_number: 3,
-                container_name: Some("amux-mycontainer".into()),
-                is_stuck: true,
-                command_label: "implement 0042".into(),
-            },
-        ]);
+        let ctx = StatusCommandTuiContext::new(vec![TuiTabSnapshot {
+            tab_number: 3,
+            container_name: Some("amux-mycontainer".into()),
+            is_stuck: true,
+            command_label: "implement 0042".into(),
+        }]);
         let name = "amux-mycontainer".to_string();
         let mut row = StatusContainerRow {
             id: "deadbeef1234".into(),
@@ -323,10 +331,16 @@ mod tests {
             tab_number: None,
             stuck: false,
             kind: ContainerKind::Agent,
-            command_label: None, cpu_percent: None, memory_mb: None,
+            command_label: None,
+            cpu_percent: None,
+            memory_mb: None,
         };
         // Apply the same matching logic used in run_with_frontend.
-        if let Some(t) = ctx.tabs.iter().find(|t| t.container_name.as_deref() == Some(&row.name)) {
+        if let Some(t) = ctx
+            .tabs
+            .iter()
+            .find(|t| t.container_name.as_deref() == Some(&row.name))
+        {
             row.tab_number = Some(t.tab_number);
             row.stuck = t.is_stuck;
             row.command_label = Some(t.command_label.clone());
@@ -348,7 +362,9 @@ mod tests {
             kind: ContainerKind::Agent,
             tab_number: None,
             stuck: false,
-            command_label: None, cpu_percent: None, memory_mb: None,
+            command_label: None,
+            cpu_percent: None,
+            memory_mb: None,
         };
         assert_eq!(row.tab_number, None);
         assert!(!row.stuck);
@@ -357,14 +373,12 @@ mod tests {
 
     #[test]
     fn tui_context_no_match_leaves_row_unchanged() {
-        let ctx = StatusCommandTuiContext::new(vec![
-            TuiTabSnapshot {
-                tab_number: 1,
-                container_name: Some("amux-other".into()),
-                is_stuck: false,
-                command_label: "chat".into(),
-            },
-        ]);
+        let ctx = StatusCommandTuiContext::new(vec![TuiTabSnapshot {
+            tab_number: 1,
+            container_name: Some("amux-other".into()),
+            is_stuck: false,
+            command_label: "chat".into(),
+        }]);
         let mut row = StatusContainerRow {
             id: "abc".into(),
             name: "amux-mine".into(),
@@ -373,10 +387,16 @@ mod tests {
             kind: ContainerKind::Agent,
             tab_number: None,
             stuck: false,
-            command_label: None, cpu_percent: None, memory_mb: None,
+            command_label: None,
+            cpu_percent: None,
+            memory_mb: None,
         };
         // The name doesn't match → row stays unchanged.
-        if let Some(t) = ctx.tabs.iter().find(|t| t.container_name.as_deref() == Some(&row.name)) {
+        if let Some(t) = ctx
+            .tabs
+            .iter()
+            .find(|t| t.container_name.as_deref() == Some(&row.name))
+        {
             row.tab_number = Some(t.tab_number);
             row.stuck = t.is_stuck;
             row.command_label = Some(t.command_label.clone());
@@ -392,9 +412,21 @@ mod tests {
 
     #[test]
     fn classify_claws_containers() {
-        assert_eq!(classify_container("amux-claws-controller"), ContainerKind::Claws);
-        assert_eq!(classify_container("amux-claws-abc123"), ContainerKind::Claws);
-        assert_eq!(classify_container("nanoclaw-worker-1"), ContainerKind::Claws);
-        assert_eq!(classify_container("something-nanoclaw-x"), ContainerKind::Claws);
+        assert_eq!(
+            classify_container("amux-claws-controller"),
+            ContainerKind::Claws
+        );
+        assert_eq!(
+            classify_container("amux-claws-abc123"),
+            ContainerKind::Claws
+        );
+        assert_eq!(
+            classify_container("nanoclaw-worker-1"),
+            ContainerKind::Claws
+        );
+        assert_eq!(
+            classify_container("something-nanoclaw-x"),
+            ContainerKind::Claws
+        );
     }
 }

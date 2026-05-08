@@ -10,9 +10,9 @@ use serde::Serialize;
 use crate::command::commands::agent_auth::AgentAuthFrontend;
 use crate::command::commands::agent_setup::AgentSetupFrontend;
 use crate::command::commands::mount_scope::{MountScope, MountScopeFrontend};
-use crate::command::commands::{collect_all_overlay_specs, parse_overlay_spec};
 use crate::command::commands::worktree_lifecycle::{WorktreeLifecycle, WorktreeLifecycleFrontend};
 use crate::command::commands::Command;
+use crate::command::commands::{collect_all_overlay_specs, parse_overlay_spec};
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
 use crate::data::session::Session;
@@ -133,7 +133,10 @@ impl WorkflowFrontend for WorkflowProxy {
         state: &crate::data::workflow_state::WorkflowState,
         available: &AvailableActions,
     ) -> Result<NextAction, EngineError> {
-        self.0.lock().unwrap().user_choose_next_action(state, available)
+        self.0
+            .lock()
+            .unwrap()
+            .user_choose_next_action(state, available)
     }
 
     fn confirm_resume(&mut self, mismatch: &ResumeMismatch) -> Result<bool, EngineError> {
@@ -145,7 +148,10 @@ impl WorkflowFrontend for WorkflowProxy {
         step: &WorkflowStep,
         exit: &ContainerExitInfo,
     ) -> Result<StepFailureChoice, EngineError> {
-        self.0.lock().unwrap().user_choose_after_step_failure(step, exit)
+        self.0
+            .lock()
+            .unwrap()
+            .user_choose_after_step_failure(step, exit)
     }
 
     fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus) {
@@ -182,7 +188,10 @@ impl WorkflowFrontend for WorkflowProxy {
         agent: &str,
         model: Option<&str>,
     ) {
-        self.0.lock().unwrap().report_step_interactive_launch(step, agent, model);
+        self.0
+            .lock()
+            .unwrap()
+            .report_step_interactive_launch(step, agent, model);
     }
 }
 
@@ -228,17 +237,11 @@ impl ContainerFrontend for ContainerFrontendProxy {
         Ok(n)
     }
 
-    fn report_status(
-        &mut self,
-        status: crate::engine::container::frontend::ContainerStatus,
-    ) {
+    fn report_status(&mut self, status: crate::engine::container::frontend::ContainerStatus) {
         self.0.lock().unwrap().report_status(status);
     }
 
-    fn report_progress(
-        &mut self,
-        progress: crate::engine::container::frontend::ContainerProgress,
-    ) {
+    fn report_progress(&mut self, progress: crate::engine::container::frontend::ContainerProgress) {
         self.0.lock().unwrap().report_progress(progress);
     }
 
@@ -246,9 +249,7 @@ impl ContainerFrontend for ContainerFrontendProxy {
         self.0.lock().unwrap().resize_pty(cols, rows);
     }
 
-    fn take_container_io(
-        &mut self,
-    ) -> Option<crate::engine::container::frontend::ContainerIo> {
+    fn take_container_io(&mut self) -> Option<crate::engine::container::frontend::ContainerIo> {
         self.0.lock().unwrap().take_container_io()
     }
 }
@@ -288,10 +289,8 @@ impl ContainerExecutionFactory for CommandLayerFactory {
         runtime: &WorkflowRuntimeContext,
     ) -> Result<crate::engine::container::instance::ContainerExecution, EngineError> {
         // Substitute work item template tokens in the step prompt.
-        let substitution = substitute_prompt(
-            &step.prompt_template,
-            self.work_item_context.as_ref(),
-        );
+        let substitution =
+            substitute_prompt(&step.prompt_template, self.work_item_context.as_ref());
 
         let run_opts = AgentRunOptions {
             yolo: self.flags.yolo.then_some(YoloMode::Enabled),
@@ -307,10 +306,10 @@ impl ContainerExecutionFactory for CommandLayerFactory {
             env_passthrough: Some(session.effective_config().env_passthrough()),
             directory_overlays: self.directory_overlays.clone(),
         };
-        let mut options = self
-            .engines
-            .agent_engine
-            .build_options(session, &runtime.step_agent, &run_opts)?;
+        let mut options =
+            self.engines
+                .agent_engine
+                .build_options(session, &runtime.step_agent, &run_opts)?;
 
         // Override the image tag to use the original repo root, not a worktree path.
         let correct_tag = crate::data::image_tags::agent_image_tag(
@@ -318,7 +317,10 @@ impl ContainerExecutionFactory for CommandLayerFactory {
             runtime.step_agent.as_str(),
         );
         for opt in options.iter_mut() {
-            if matches!(opt, crate::engine::container::options::ContainerOption::Image(_)) {
+            if matches!(
+                opt,
+                crate::engine::container::options::ContainerOption::Image(_)
+            ) {
                 *opt = crate::engine::container::options::ContainerOption::Image(
                     crate::engine::container::options::ImageRef::new(correct_tag.clone()),
                 );
@@ -395,7 +397,10 @@ impl Command for ExecWorkflowCommand {
             };
             frontend.write_message(UserMessage {
                 level: MessageLevel::Error,
-                text: format!("exec workflow: workflow file not found: {}", self.flags.workflow.display()),
+                text: format!(
+                    "exec workflow: workflow file not found: {}",
+                    self.flags.workflow.display()
+                ),
             });
             return Err(err);
         }
@@ -412,8 +417,7 @@ impl Command for ExecWorkflowCommand {
         };
 
         // 2. Resolve mount scope — confirm with the user when cwd differs from git root.
-        let cwd = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let git_root_for_scope = self
             .engines
             .git_engine
@@ -471,11 +475,7 @@ impl Command for ExecWorkflowCommand {
         // rooted at the worktree checkout rather than the main repo.
         let mut worktree_path: Option<PathBuf> = None;
         let worktree_lifecycle = if self.flags.worktree {
-            let git_root = match self
-                .engines
-                .git_engine
-                .resolve_root(&cwd)
-            {
+            let git_root = match self.engines.git_engine.resolve_root(&cwd) {
                 Ok(r) => r,
                 Err(e) => {
                     let err = CommandError::from(e);
@@ -498,7 +498,9 @@ impl Command for ExecWorkflowCommand {
                     Err(e) => {
                         frontend.write_message(UserMessage {
                             level: MessageLevel::Error,
-                            text: format!("exec workflow: failed to create worktree for work item: {e}"),
+                            text: format!(
+                                "exec workflow: failed to create worktree for work item: {e}"
+                            ),
                         });
                         return Err(e);
                     }
@@ -520,7 +522,9 @@ impl Command for ExecWorkflowCommand {
                     Err(e) => {
                         frontend.write_message(UserMessage {
                             level: MessageLevel::Error,
-                            text: format!("exec workflow: failed to create worktree for workflow: {e}"),
+                            text: format!(
+                                "exec workflow: failed to create worktree for workflow: {e}"
+                            ),
                         });
                         return Err(e);
                     }
@@ -572,14 +576,12 @@ impl Command for ExecWorkflowCommand {
         //     activation so the dialog renders immediately, like the
         //     existing-worktree dialog does in the lifecycle step above.
         let session_root_for_state = worktree_path.as_deref().unwrap_or(&cwd).to_path_buf();
-        let git_root_for_state = match Arc::clone(&self.engines.git_engine)
-            .resolve_root(&session_root_for_state)
-        {
-            Ok(r) => r,
-            Err(_) => session_root_for_state.clone(),
-        };
-        let workflow_name_for_state =
-            crate::engine::workflow::workflow_name_for(&workflow);
+        let git_root_for_state =
+            match Arc::clone(&self.engines.git_engine).resolve_root(&session_root_for_state) {
+                Ok(r) => r,
+                Err(_) => session_root_for_state.clone(),
+            };
+        let workflow_name_for_state = crate::engine::workflow::workflow_name_for(&workflow);
         let work_item_number_for_state = work_item_context.as_ref().map(|c| c.number);
         {
             let store = crate::data::workflow_state_store::WorkflowStateStore::at_git_root(
@@ -1033,9 +1035,9 @@ prompt = "do something"
     fn make_engines() -> Engines {
         let runtime = Arc::new(crate::engine::container::ContainerRuntime::docker());
         let overlay = Arc::new(crate::engine::overlay::OverlayEngine::with_auth_resolver(
-            crate::data::fs::auth_paths::AuthPathResolver::at_home(
-                std::path::PathBuf::from("/tmp"),
-            ),
+            crate::data::fs::auth_paths::AuthPathResolver::at_home(std::path::PathBuf::from(
+                "/tmp",
+            )),
         ));
         let git_engine = Arc::new(crate::engine::git::GitEngine::new());
         let agent_engine = Arc::new(crate::engine::agent::AgentEngine::new(
@@ -1048,7 +1050,9 @@ prompt = "do something"
         ));
         let workflow_state_store = {
             let tmp = tempfile::tempdir().unwrap();
-            Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(tmp.path()))
+            Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(
+                tmp.path(),
+            ))
         };
         Engines {
             runtime,
@@ -1108,8 +1112,9 @@ prompt = "do something"
 
         let mut engines = make_engines();
         // Override workflow_state_store to use the temp git repo.
-        engines.workflow_state_store =
-            Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(tmp.path()));
+        engines.workflow_state_store = Arc::new(
+            crate::data::EngineWorkflowStateStore::at_git_root(tmp.path()),
+        );
 
         let flags = ExecWorkflowCommandFlags {
             workflow: wf_path,

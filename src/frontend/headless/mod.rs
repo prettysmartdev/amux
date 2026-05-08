@@ -7,25 +7,8 @@
 pub mod command_frontend;
 pub mod routes;
 
-use std::net::IpAddr;
-use std::path::PathBuf;
-
+use crate::command::commands::headless::HeadlessServeConfig;
 use crate::command::error::CommandError;
-use crate::engine::auth::TlsMaterial;
-
-/// Configuration handed in by the `headless start` command path.
-#[derive(Debug, Clone)]
-pub struct HeadlessServeConfig {
-    pub port: u16,
-    /// Address to bind the HTTP listener to. Mirrors the SAN baked into
-    /// the TLS cert.
-    pub bind_ip: IpAddr,
-    pub workdirs: Vec<PathBuf>,
-    pub dangerously_skip_auth: bool,
-    /// PEM-encoded cert+key for HTTPS. When `None`, plain HTTP is used —
-    /// matching old-amux's wire baseline.
-    pub tls_material: Option<TlsMaterial>,
-}
 
 /// Boot the headless HTTP server and block until shutdown signal.
 pub async fn serve(config: HeadlessServeConfig) -> Result<(), CommandError> {
@@ -33,15 +16,13 @@ pub async fn serve(config: HeadlessServeConfig) -> Result<(), CommandError> {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use crate::data::fs::headless_paths::HeadlessPaths;
     use crate::data::fs::headless_db::SqliteSessionStore;
+    use crate::data::fs::headless_paths::HeadlessPaths;
 
-    let headless_paths =
-        HeadlessPaths::from_process_env().map_err(CommandError::Data)?;
+    let headless_paths = HeadlessPaths::from_process_env().map_err(CommandError::Data)?;
     headless_paths.ensure_root().map_err(CommandError::Data)?;
 
-    let store = SqliteSessionStore::open(headless_paths.root())
-        .map_err(CommandError::Data)?;
+    let store = SqliteSessionStore::open(headless_paths.root()).map_err(CommandError::Data)?;
 
     // Startup cleanup: remove closed sessions older than 24 hours.
     if let Ok(deleted) = store.delete_closed_sessions_older_than(24) {
@@ -56,20 +37,17 @@ pub async fn serve(config: HeadlessServeConfig) -> Result<(), CommandError> {
 
     let auth_paths = crate::data::fs::auth_paths::AuthPathResolver::from_process_env()
         .map_err(CommandError::Data)?;
-    let auth_engine = crate::engine::auth::AuthEngine::with_paths(
-        auth_paths.clone(),
-        headless_paths.clone(),
-    );
+    let auth_engine =
+        crate::engine::auth::AuthEngine::with_paths(auth_paths.clone(), headless_paths.clone());
 
     let auth_mode = if config.dangerously_skip_auth {
         routes::AuthMode::Disabled
     } else {
-        let hash = auth_engine.read_api_key_hash()?
-            .ok_or_else(|| {
-                CommandError::Other(
-                    "No API key hash on disk. Run `amux auth --refresh-key` first.".into(),
-                )
-            })?;
+        let hash = auth_engine.read_api_key_hash()?.ok_or_else(|| {
+            CommandError::Other(
+                "No API key hash on disk. Run `amux auth --refresh-key` first.".into(),
+            )
+        })?;
         routes::AuthMode::Enabled {
             key_hash: hash.as_str().to_string(),
         }
@@ -78,19 +56,20 @@ pub async fn serve(config: HeadlessServeConfig) -> Result<(), CommandError> {
     // Construct Layer 1 engines for dispatch.
     let runtime = Arc::new(crate::engine::container::ContainerRuntime::docker());
     let git_engine = Arc::new(crate::engine::git::GitEngine::new());
-    let overlay_engine = Arc::new(
-        crate::engine::overlay::OverlayEngine::with_auth_resolver(auth_paths),
-    );
-    let agent_engine = Arc::new(
-        crate::engine::agent::AgentEngine::new(overlay_engine.clone(), runtime.clone()),
-    );
+    let overlay_engine = Arc::new(crate::engine::overlay::OverlayEngine::with_auth_resolver(
+        auth_paths,
+    ));
+    let agent_engine = Arc::new(crate::engine::agent::AgentEngine::new(
+        overlay_engine.clone(),
+        runtime.clone(),
+    ));
     let auth_engine_arc = Arc::new(auth_engine);
     // Use a temporary workflow state store path; each command opens its own
     // session-scoped store via the workdir, but Engines requires one at
     // construction time.
-    let workflow_state_store = Arc::new(
-        crate::data::EngineWorkflowStateStore::at_git_root(headless_paths.root()),
-    );
+    let workflow_state_store = Arc::new(crate::data::EngineWorkflowStateStore::at_git_root(
+        headless_paths.root(),
+    ));
 
     let engines = crate::command::dispatch::Engines {
         runtime,
@@ -115,10 +94,7 @@ pub async fn serve(config: HeadlessServeConfig) -> Result<(), CommandError> {
                 crate::data::session::SessionOpenOptions::default(),
             ) {
                 Ok(s) => {
-                    restored_sessions.insert(
-                        rec.id.clone(),
-                        Arc::new(tokio::sync::RwLock::new(s)),
-                    );
+                    restored_sessions.insert(rec.id.clone(), Arc::new(tokio::sync::RwLock::new(s)));
                     tracing::info!(session_id = %rec.id, workdir = %rec.workdir, "Restored session");
                 }
                 Err(e) => {
@@ -163,15 +139,14 @@ pub async fn serve(config: HeadlessServeConfig) -> Result<(), CommandError> {
         let ctrl_c = tokio::signal::ctrl_c();
         #[cfg(unix)]
         {
-            let mut sigterm = match tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("Failed to install SIGTERM handler: {e}");
-                    return;
-                }
-            };
+            let mut sigterm =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("Failed to install SIGTERM handler: {e}");
+                        return;
+                    }
+                };
             tokio::select! {
                 _ = ctrl_c => { tracing::info!("Received SIGINT, shutting down"); }
                 _ = sigterm.recv() => { tracing::info!("Received SIGTERM, shutting down"); }
@@ -213,7 +188,10 @@ pub async fn serve(config: HeadlessServeConfig) -> Result<(), CommandError> {
                 ));
             }
         }
-        if e.to_string().to_lowercase().contains("address already in use") {
+        if e.to_string()
+            .to_lowercase()
+            .contains("address already in use")
+        {
             return CommandError::Other(format!(
                 "Port {} is already in use. Use --port to choose a different port.",
                 config.port
@@ -233,8 +211,7 @@ pub async fn serve(config: HeadlessServeConfig) -> Result<(), CommandError> {
             grace_seconds = GRACE_SECS,
             "Waiting for running commands to finish"
         );
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(GRACE_SECS);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(GRACE_SECS);
         for handle in handles {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {

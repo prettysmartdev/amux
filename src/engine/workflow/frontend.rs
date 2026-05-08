@@ -8,8 +8,8 @@ use crate::engine::container::instance::ContainerExitInfo;
 use crate::engine::error::EngineError;
 use crate::engine::message::UserMessageSink;
 use crate::engine::workflow::actions::{
-    AvailableActions, NextAction, ResumeMismatch, StepFailureChoice, StepOutput,
-    WorkflowOutcome, WorkflowStepProgressInfo, WorkflowStepStatus, YoloTickOutcome,
+    AvailableActions, NextAction, ResumeMismatch, StepFailureChoice, StepOutput, WorkflowOutcome,
+    WorkflowStepProgressInfo, WorkflowStepStatus, YoloTickOutcome,
 };
 
 /// Per-workflow frontend the engine uses for every Q&A and status report.

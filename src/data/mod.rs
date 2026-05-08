@@ -13,9 +13,9 @@ pub mod fs;
 pub mod image_tags;
 pub mod network;
 pub mod repo_dockerfile_paths;
-pub mod templates;
 pub mod session;
 pub mod session_manager;
+pub mod templates;
 pub mod workflow_dag;
 pub mod workflow_definition;
 pub mod workflow_prompt_template;
@@ -36,6 +36,4 @@ pub use workflow_dag::{detect_cycle, validate_references, WorkflowDag};
 pub use workflow_definition::{detect_format, Workflow, WorkflowFormat, WorkflowStep};
 pub use workflow_state::{StepState, WorkflowState, WORKFLOW_STATE_SCHEMA_VERSION};
 pub use workflow_state_store::WorkflowStateStore as EngineWorkflowStateStore;
-pub use worktree_paths::{
-    worktree_branch_name, worktree_branch_name_for_workflow, WorktreePaths,
-};
+pub use worktree_paths::{worktree_branch_name, worktree_branch_name_for_workflow, WorktreePaths};

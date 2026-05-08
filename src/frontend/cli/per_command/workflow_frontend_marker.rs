@@ -1,7 +1,7 @@
 //! `WorkflowFrontend` impl for the CLI.
 //!
-//! Per WI 0069 §1, the CLI prompts on stdin (when it is a TTY) and falls
-//! back to the safe non-interactive defaults from §7u otherwise. The
+//! The CLI prompts on stdin (when it is a TTY) and falls back to the safe
+//! non-interactive defaults otherwise. The
 //! prompt presents only the actions in `AvailableActions` whose `can_*`
 //! flags are true; excluded actions are skipped (with their
 //! `*_unavailable_reason` printed as a parenthetical note).

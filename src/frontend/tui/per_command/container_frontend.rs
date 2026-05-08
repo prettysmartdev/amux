@@ -82,7 +82,11 @@ pub struct TuiContainerProxy {
 impl TuiContainerProxy {
     /// Construct a status-log-only proxy (no PTY bridging).
     pub fn new(log: SharedStatusLog) -> Self {
-        Self { log, container_io: None, container_name_shared: None }
+        Self {
+            log,
+            container_io: None,
+            container_name_shared: None,
+        }
     }
 
     /// Construct a proxy that also carries the byte-stream I/O channels for
@@ -93,7 +97,11 @@ impl TuiContainerProxy {
         io: crate::engine::container::frontend::ContainerIo,
         container_name_shared: crate::frontend::tui::tabs::SharedContainerName,
     ) -> Self {
-        Self { log, container_io: Some(io), container_name_shared: Some(container_name_shared) }
+        Self {
+            log,
+            container_io: Some(io),
+            container_name_shared: Some(container_name_shared),
+        }
     }
 }
 
