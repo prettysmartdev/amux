@@ -90,13 +90,10 @@ pub fn render_workflow_strip(
                 .as_ref()
                 .map(|c| c == &step.name)
                 .unwrap_or(false);
-            let auto_disabled = state.auto_disabled.contains(&step.name);
             let (label, style) = step_box_label_and_style(
                 &step.name,
                 &step.status,
                 is_current,
-                auto_disabled,
-                step.stuck,
                 box_w,
             );
 
@@ -214,14 +211,9 @@ fn step_box_label_and_style(
     name: &str,
     status: &str,
     is_current: bool,
-    auto_disabled: bool,
-    stuck: bool,
     box_width: u16,
 ) -> (String, Style) {
-    let prefix_chars = if auto_disabled { 2 } else { 0 } + if stuck { 3 } else { 0 };
-    // Available chars inside the box: width − 2 (borders) − 4 (' X ' around
-    // glyph + name + trailing space) − optional auto-disabled/stuck prefix.
-    let max_name_chars = (box_width as usize).saturating_sub(6 + prefix_chars).max(1);
+    let max_name_chars = (box_width as usize).saturating_sub(6).max(1);
     let truncated_name = if name.chars().count() > max_name_chars {
         let trunc: String = name
             .chars()
@@ -248,17 +240,10 @@ fn step_box_label_and_style(
         "cancelled" | "skipped" => ("\u{2298}", Style::default().fg(Color::DarkGray)),
         _ => ("\u{25cb}", Style::default().fg(Color::DarkGray)),
     };
-    if stuck {
-        style = Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
-    }
     if is_current {
         style = style.add_modifier(Modifier::BOLD);
     }
-    let lock = if auto_disabled { "\u{1f512}" } else { "" };
-    let stuck_prefix = if stuck { "\u{26a0}\u{fe0f} " } else { "" };
-    let label = format!(" {lock}{stuck_prefix}{glyph} {truncated_name} ");
+    let label = format!(" {glyph} {truncated_name} ");
     (label, style)
 }
 
@@ -273,7 +258,6 @@ mod tests {
             agent: None,
             model: None,
             depends_on: deps.into_iter().map(|s| s.into()).collect(),
-            stuck: false,
         }
     }
 
@@ -281,7 +265,6 @@ mod tests {
         WorkflowViewState {
             steps,
             current_step: None,
-            auto_disabled: Default::default(),
         }
     }
 
@@ -361,7 +344,7 @@ mod tests {
 
     #[test]
     fn step_box_label_pending_uses_circle_glyph_and_dark_gray() {
-        let (label, style) = step_box_label_and_style("foo", "pending", false, false, false, 20);
+        let (label, style) = step_box_label_and_style("foo", "pending", false, 20);
         assert!(label.contains('\u{25cb}'));
         assert!(label.contains("foo"));
         assert_eq!(style.fg, Some(Color::DarkGray));
@@ -369,7 +352,7 @@ mod tests {
 
     #[test]
     fn step_box_label_running_uses_filled_circle_blue_bold() {
-        let (label, style) = step_box_label_and_style("foo", "running", false, false, false, 20);
+        let (label, style) = step_box_label_and_style("foo", "running", false, 20);
         assert!(label.contains('\u{25cf}'));
         assert_eq!(style.fg, Some(Color::Blue));
         assert!(style.add_modifier.contains(Modifier::BOLD));
@@ -377,14 +360,14 @@ mod tests {
 
     #[test]
     fn step_box_label_done_uses_check_glyph_green() {
-        let (label, style) = step_box_label_and_style("foo", "done", false, false, false, 20);
+        let (label, style) = step_box_label_and_style("foo", "done", false, 20);
         assert!(label.contains('\u{2713}'));
         assert_eq!(style.fg, Some(Color::Green));
     }
 
     #[test]
     fn step_box_label_error_uses_cross_glyph_red_bold() {
-        let (label, style) = step_box_label_and_style("foo", "error", false, false, false, 20);
+        let (label, style) = step_box_label_and_style("foo", "error", false, 20);
         assert!(label.contains('\u{2717}'));
         assert_eq!(style.fg, Some(Color::Red));
         assert!(style.add_modifier.contains(Modifier::BOLD));
@@ -392,39 +375,15 @@ mod tests {
 
     #[test]
     fn step_box_label_current_step_adds_bold_on_top_of_status() {
-        let (_, style) = step_box_label_and_style("foo", "done", true, false, false, 20);
+        let (_, style) = step_box_label_and_style("foo", "done", true, 20);
         // Done is not bold by default, but is_current adds BOLD.
         assert!(style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
-    fn step_box_label_auto_disabled_adds_lock_prefix() {
-        let (label, _) = step_box_label_and_style("foo", "pending", false, true, false, 20);
-        assert!(label.contains('\u{1f512}'));
-    }
-
-    #[test]
     fn step_box_label_truncates_long_name() {
         let (label, _) =
-            step_box_label_and_style("very-long-step-name", "pending", false, false, false, 12);
-        // box_w=12 → max chars = 12 - 6 = 6; truncated to 5 chars + …
+            step_box_label_and_style("very-long-step-name", "pending", false, 12);
         assert!(label.contains('\u{2026}'));
-    }
-
-    #[test]
-    fn strip_renders_warning_glyph_for_stuck_step() {
-        let (label, style) = step_box_label_and_style("build", "running", false, false, true, 20);
-        // Stuck step gets ⚠️ prefix in the label.
-        assert!(
-            label.contains("\u{26a0}"),
-            "stuck step label must contain ⚠ (U+26A0), got: {:?}",
-            label
-        );
-        // Style should be Yellow (overrides normal status color).
-        assert_eq!(
-            style.fg,
-            Some(ratatui::prelude::Color::Yellow),
-            "stuck step must use Yellow style"
-        );
     }
 }

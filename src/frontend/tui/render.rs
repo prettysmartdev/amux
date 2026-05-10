@@ -1107,7 +1107,7 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
             lines.push(Line::from(""));
             if state.can_dismiss {
                 lines.push(Line::from(Span::styled(
-                    "  [d] Disable auto-advance   [a] Abort   [p] Pause",
+                    "  [a] Abort   [p] Pause",
                     dimmed_style,
                 )));
                 lines.push(Line::from(Span::styled(
@@ -1116,7 +1116,7 @@ fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Frame) {
                 )));
             } else {
                 lines.push(Line::from(Span::styled(
-                    "  [d] Disable auto-advance   [a] Abort   [Esc] Pause",
+                    "  [a] Abort   [Esc] Pause",
                     dimmed_style,
                 )));
             }

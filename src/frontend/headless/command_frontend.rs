@@ -481,7 +481,7 @@ impl AgentAuthFrontend for HeadlessDispatchFrontend {
 // ─── WorkflowFrontend ───────────────────────────────────────────────────────
 
 impl WorkflowFrontend for HeadlessDispatchFrontend {
-    fn user_choose_next_action(
+    fn show_workflow_control_board(
         &mut self,
         _state: &crate::data::workflow_state::WorkflowState,
         available: &AvailableActions,
@@ -493,6 +493,21 @@ impl WorkflowFrontend for HeadlessDispatchFrontend {
         }
     }
 
+    fn yolo_countdown_tick(
+        &mut self,
+        _step_name: &str,
+        _remaining: Duration,
+        _total: Duration,
+    ) -> Result<YoloTickOutcome, EngineError> {
+        Ok(YoloTickOutcome::AdvanceNow)
+    }
+
+    fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus) {
+        self.write_to_log(&format!("[INFO] Step '{}': {:?}", step.name, status));
+    }
+
+    fn report_step_output(&mut self, _step: &WorkflowStep, _output: StepOutput) {}
+
     fn confirm_resume(&mut self, _mismatch: &ResumeMismatch) -> Result<bool, EngineError> {
         Ok(true)
     }
@@ -503,27 +518,6 @@ impl WorkflowFrontend for HeadlessDispatchFrontend {
         _exit: &ContainerExitInfo,
     ) -> Result<StepFailureChoice, EngineError> {
         Ok(StepFailureChoice::Abort)
-    }
-
-    fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus) {
-        self.write_to_log(&format!("[INFO] Step '{}': {:?}", step.name, status));
-    }
-
-    fn report_step_output(&mut self, _step: &WorkflowStep, _output: StepOutput) {}
-
-    fn report_step_stuck(&mut self, step: &WorkflowStep) {
-        self.write_to_log(&format!("[WARN] Step '{}' appears stuck", step.name));
-    }
-
-    fn report_step_unstuck(&mut self, step: &WorkflowStep) {
-        self.write_to_log(&format!("[INFO] Step '{}' no longer stuck", step.name));
-    }
-
-    fn yolo_countdown_tick(
-        &mut self,
-        _remaining: Duration,
-    ) -> Result<YoloTickOutcome, EngineError> {
-        Ok(YoloTickOutcome::Continue)
     }
 
     fn report_workflow_completed(&mut self, outcome: &WorkflowOutcome) {

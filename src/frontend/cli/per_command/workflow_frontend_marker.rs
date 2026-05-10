@@ -22,7 +22,7 @@ use crate::frontend::cli::command_frontend::CliFrontend;
 use crate::frontend::cli::output::stdin_is_tty;
 
 impl WorkflowFrontend for CliFrontend {
-    fn user_choose_next_action(
+    fn show_workflow_control_board(
         &mut self,
         _state: &WorkflowState,
         available: &AvailableActions,
@@ -78,6 +78,72 @@ impl WorkflowFrontend for CliFrontend {
         })
     }
 
+    fn yolo_countdown_tick(
+        &mut self,
+        _step_name: &str,
+        remaining: Duration,
+        _total: Duration,
+    ) -> Result<YoloTickOutcome, EngineError> {
+        use std::io::Write as _;
+
+        if remaining.is_zero() {
+            eprintln!("\r\x1b[2K  yolo: auto-advancing to next step...");
+            return Ok(YoloTickOutcome::Continue);
+        }
+
+        let secs = remaining.as_secs();
+        eprint!(
+            "\r\x1b[2K  yolo: auto-advancing in {:2}s  [n] now  [a] abort  [p] pause",
+            secs
+        );
+        let _ = std::io::stderr().flush();
+
+        if !stdin_is_tty() {
+            return Ok(YoloTickOutcome::Continue);
+        }
+
+        if self.yolo_stdin_rx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<String>();
+            std::thread::spawn(move || {
+                use std::io::BufRead as _;
+                let stdin = std::io::stdin();
+                for line in stdin.lock().lines() {
+                    match line {
+                        Ok(l) => {
+                            if tx.send(l).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            self.yolo_stdin_rx = Some(std::sync::Mutex::new(rx));
+        }
+
+        if let Some(m) = &self.yolo_stdin_rx {
+            if let Ok(rx) = m.try_lock() {
+                match rx.try_recv() {
+                    Ok(line) => {
+                        return Ok(match line.trim() {
+                            "n" | "N" => YoloTickOutcome::AdvanceNow,
+                            "a" | "A" | "p" | "P" => YoloTickOutcome::Cancel,
+                            _ => YoloTickOutcome::Continue,
+                        });
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+                }
+            }
+        }
+
+        Ok(YoloTickOutcome::Continue)
+    }
+
+    fn report_step_status(&mut self, _step: &WorkflowStep, _status: WorkflowStepStatus) {}
+
+    fn report_step_output(&mut self, _step: &WorkflowStep, _output: StepOutput) {}
+
     fn confirm_resume(&mut self, _mismatch: &ResumeMismatch) -> Result<bool, EngineError> {
         if !stdin_is_tty() {
             return Ok(false);
@@ -117,76 +183,6 @@ impl WorkflowFrontend for CliFrontend {
         })
     }
 
-    fn report_step_status(&mut self, _step: &WorkflowStep, _status: WorkflowStepStatus) {}
-
-    fn report_step_output(&mut self, _step: &WorkflowStep, _output: StepOutput) {}
-
-    fn report_step_stuck(&mut self, _step: &WorkflowStep) {}
-
-    fn report_step_unstuck(&mut self, _step: &WorkflowStep) {}
-
-    fn yolo_countdown_tick(&mut self, remaining: Duration) -> Result<YoloTickOutcome, EngineError> {
-        use std::io::Write as _;
-
-        if remaining.is_zero() {
-            // Erase the countdown line then print the final message on a clean line.
-            eprintln!("\r\x1b[2K  yolo: auto-advancing to next step...");
-            return Ok(YoloTickOutcome::Continue);
-        }
-
-        let secs = remaining.as_secs();
-        eprint!(
-            "\r\x1b[2K  yolo: auto-advancing in {:2}s  [n] now  [a] abort  [p] pause",
-            secs
-        );
-        let _ = std::io::stderr().flush();
-
-        if !stdin_is_tty() {
-            return Ok(YoloTickOutcome::Continue);
-        }
-
-        // Lazily spawn a background thread that reads stdin lines. The thread
-        // runs for the lifetime of the countdown; when the Receiver is dropped
-        // the next send will fail and the thread exits.
-        if self.yolo_stdin_rx.is_none() {
-            let (tx, rx) = std::sync::mpsc::channel::<String>();
-            std::thread::spawn(move || {
-                use std::io::BufRead as _;
-                let stdin = std::io::stdin();
-                for line in stdin.lock().lines() {
-                    match line {
-                        Ok(l) => {
-                            if tx.send(l).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-            self.yolo_stdin_rx = Some(std::sync::Mutex::new(rx));
-        }
-
-        // Non-blocking check for a line the user already typed.
-        if let Some(m) = &self.yolo_stdin_rx {
-            if let Ok(rx) = m.try_lock() {
-                match rx.try_recv() {
-                    Ok(line) => {
-                        return Ok(match line.trim() {
-                            "n" | "N" => YoloTickOutcome::AdvanceNow,
-                            "a" | "A" | "p" | "P" => YoloTickOutcome::Cancel,
-                            _ => YoloTickOutcome::Continue,
-                        });
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
-                }
-            }
-        }
-
-        Ok(YoloTickOutcome::Continue)
-    }
-
     fn report_workflow_completed(&mut self, outcome: &WorkflowOutcome) {
         let msg = match outcome {
             WorkflowOutcome::Completed => "workflow completed successfully.",
@@ -210,7 +206,6 @@ impl WorkflowFrontend for CliFrontend {
         if steps.is_empty() {
             return;
         }
-        // Column widths.
         let name_w = steps.iter().map(|s| s.name.len()).max().unwrap_or(4).max(4);
         let agent_w = steps
             .iter()

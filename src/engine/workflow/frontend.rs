@@ -1,4 +1,8 @@
 //! `WorkflowFrontend` trait — defined by Layer 1, implemented by Layer 3.
+//!
+//! Engine-driven: the engine calls these methods to command the frontend.
+//! The frontend is a pure I/O layer — it renders what the engine tells it
+//! and collects user input when the engine asks for it.
 
 use std::time::Duration;
 
@@ -11,63 +15,57 @@ use crate::engine::workflow::actions::{
     AvailableActions, NextAction, ResumeMismatch, StepFailureChoice, StepOutput, WorkflowOutcome,
     WorkflowStepProgressInfo, WorkflowStepStatus, YoloTickOutcome,
 };
+use crate::engine::workflow::EngineRequest;
 
 /// Per-workflow frontend the engine uses for every Q&A and status report.
 ///
 /// The engine treats CLI, TUI, and headless implementations identically; the
 /// engine never knows which is on the other side.
 pub trait WorkflowFrontend: UserMessageSink + Send {
-    fn user_choose_next_action(
+    // === Engine-driven display commands (blocking) ===
+
+    /// Engine tells frontend to show the Workflow Control Board with these
+    /// actions. Frontend collects user input and returns the chosen action.
+    /// This is a BLOCKING call — the engine waits for the user's choice.
+    fn show_workflow_control_board(
         &mut self,
         state: &WorkflowState,
         available: &AvailableActions,
     ) -> Result<NextAction, EngineError>;
 
-    fn confirm_resume(&mut self, mismatch: &ResumeMismatch) -> Result<bool, EngineError>;
-
-    /// Called after a step transitions to `Failed`. Default behaviors:
-    ///   - Retry → engine reverts the step to Pending and re-runs.
-    ///   - Pause → engine persists state and returns from `step_once`.
-    ///   - Abort → engine marks remaining steps Cancelled and returns.
-    fn user_choose_after_step_failure(
+    /// Engine tells frontend to update the yolo countdown display.
+    /// Called repeatedly (every ~100ms) with the remaining time.
+    /// Frontend returns whether to Continue, Cancel, or AdvanceNow.
+    fn yolo_countdown_tick(
         &mut self,
-        step: &WorkflowStep,
-        exit: &ContainerExitInfo,
-    ) -> Result<StepFailureChoice, EngineError>;
+        step_name: &str,
+        remaining: Duration,
+        total: Duration,
+    ) -> Result<YoloTickOutcome, EngineError>;
+
+    /// Engine tells frontend: yolo countdown just started for this step.
+    /// Frontend should show the countdown dialog (active tab) or flash
+    /// the tab header yellow/purple (background tab).
+    fn yolo_countdown_started(&mut self, _step_name: &str) {}
+
+    /// Engine tells frontend: yolo countdown finished (expired, cancelled,
+    /// or step recovered). Frontend dismisses dialog / resets tab style.
+    fn yolo_countdown_finished(&mut self, _step_name: &str) {}
+
+    // === Status reporting (fire-and-forget) ===
 
     fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus);
 
-    fn report_step_output(&mut self, step: &WorkflowStep, output: StepOutput);
-
-    /// Called once when stuck-detection fires for the current step. The engine
-    /// continues running the step; the frontend SHOULD render a stuck indicator.
-    fn report_step_stuck(&mut self, step: &WorkflowStep);
-
-    /// Called once when stuck-detection clears.
-    fn report_step_unstuck(&mut self, step: &WorkflowStep);
-
-    /// Called repeatedly while a yolo countdown is ticking down.
-    fn yolo_countdown_tick(&mut self, remaining: Duration) -> Result<YoloTickOutcome, EngineError>;
-
-    /// Reset the yolo-initialized flag so a new countdown starts fresh.
-    /// Called at the beginning of each mid-step yolo countdown.
-    fn reset_yolo_initialized(&mut self) {}
-
-    /// Clear the shared yolo state after a countdown finishes (advanced,
-    /// cancelled, or step completed). Prevents stale state from being
-    /// rendered.
-    fn clear_yolo_state(&mut self) {}
+    fn report_step_output(&mut self, _step: &WorkflowStep, _output: StepOutput) {}
 
     fn report_workflow_completed(&mut self, outcome: &WorkflowOutcome);
 
-    /// Called by the engine before each step runs and before any yolo countdown
-    /// or user-input prompt. The engine controls the call ordering; the frontend
-    /// renders the table. Default implementation is a no-op (e.g. for tests).
+    /// Called by the engine before each step and before any user-input prompt.
+    /// The engine controls call ordering; the frontend renders the table.
     fn report_workflow_progress(&mut self, _steps: &[WorkflowStepProgressInfo]) {}
 
     /// Called by the engine after resolving the step's agent/model but before
-    /// the container launches. When stdin is a TTY the CLI frontend prints the
-    /// interactive-mode ASCII banner. Default implementation is a no-op.
+    /// the container launches.
     fn report_step_interactive_launch(
         &mut self,
         _step: &WorkflowStep,
@@ -76,19 +74,25 @@ pub trait WorkflowFrontend: UserMessageSink + Send {
     ) {
     }
 
-    /// Whether the given step should auto-advance (yolo countdown). Returns
-    /// `true` by default so CLI/headless frontends always auto-advance. The
-    /// TUI overrides this to respect the per-step `[d]` toggle.
-    fn should_auto_advance(&self, _step_name: &str) -> bool {
-        true
-    }
+    // === User decisions (blocking) ===
 
-    /// Called by the engine after creating the control-board channel. The
-    /// frontend stores the sender so the TUI event loop can open the WCB
-    /// mid-step. Default is a no-op (CLI/headless don't need this).
-    fn set_control_board_sender(
+    fn confirm_resume(&mut self, mismatch: &ResumeMismatch) -> Result<bool, EngineError>;
+
+    /// Called after a step transitions to Failed.
+    fn user_choose_after_step_failure(
         &mut self,
-        _tx: tokio::sync::mpsc::UnboundedSender<crate::engine::workflow::ControlBoardRequest>,
+        step: &WorkflowStep,
+        exit: &ContainerExitInfo,
+    ) -> Result<StepFailureChoice, EngineError>;
+
+    // === Channel setup ===
+
+    /// Called by the engine after creating its EngineRequest channel.
+    /// The frontend stores the sender so the TUI event loop can route
+    /// Ctrl-W and stuck notifications to this specific engine instance.
+    fn set_engine_sender(
+        &mut self,
+        _tx: tokio::sync::mpsc::UnboundedSender<EngineRequest>,
     ) {
     }
 }

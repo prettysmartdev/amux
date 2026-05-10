@@ -521,18 +521,6 @@ Ctrl+W works:
 
 ---
 
-## Disabling auto-advance for a step
-
-In the full workflow control board, press **[d]** to disable auto-advance for the current step. A lock icon (🔒) appears in the workflow strip next to the step name.
-
-When auto-advance is disabled for a step:
-- The yolo countdown timer does not fire — you must manually advance
-- The stuck-detection dialog still appears if the step goes silent
-- You can still use Ctrl+W to open the control board at any time
-- The toggle takes effect the next time the engine evaluates that step
-
-In yolo mode, disabling auto-advance for a step is a useful escape valve: the step will wait for your decision instead of advancing automatically after 10 seconds of silence.
-
 ### Next step: same container
 
 The **↓** action reuses the already-running container — the next step's prompt is written directly to its PTY stdin. Useful when the container has already installed dependencies or built artifacts that the next step needs. If the PTY session has closed, amux falls back to a new container and shows a status message.
@@ -547,10 +535,7 @@ In command mode, the "same container" prompt is skipped entirely and the explana
 
 ### Manual vs. automatic opening
 
-Ctrl+W requires:
-- A workflow active in the current tab
-- A step currently running
-- No other dialog open
+Ctrl+W works at any time when a workflow is active in the current tab — there are no other preconditions. It works mid-step, between steps, during a yolo countdown, or while another dialog is open (the existing dialog is dismissed first).
 
 ---
 
@@ -566,18 +551,18 @@ Running: plan     ┃  ● implement    ✓ review    ⚠️ docs
 |--------|---------|
 | **●** (Blue, bold) | Step is currently running |
 | **✓** (Green) | Step completed successfully |
-| **⚠️** (Yellow, bold) | Step is stuck (no output for >10 seconds) |
+| **⚠️** (Yellow, bold) | Step is stuck (no output for >30 seconds) |
 | **●** (Gray, dim) | Step is pending |
 | **✗** (Red, bold) | Step encountered an error |
 
 ### Stuck steps
 
-When a step produces no output for more than 10 seconds, it is marked as stuck in the strip. Stuck steps show a warning indicator (⚠️) both in the strip box and in the tab label.
+When a step produces no output for more than 30 seconds, it is marked as stuck in the strip. Stuck steps show a warning indicator (⚠️) both in the strip box and in the tab label.
 
-Stuck steps trigger automatic behavior:
-- If the stuck tab is active, the workflow control board opens automatically
-- If the stuck tab is in the background (yolo mode), a countdown timer appears in the tab bar
-- The stuck timer respects the auto-advance toggle — if you've disabled auto-advance for that step via **[d]**, it won't auto-open even if stuck
+Stuck steps trigger automatic behavior depending on the mode:
+- In **yolo mode**: the engine starts a 60-second countdown. When it expires, the step is auto-advanced. If the user cancels (Esc) and the step re-stucks, the countdown restarts from 60 seconds with no backoff.
+- In **non-yolo mode**: the workflow control board opens automatically so you can decide what to do.
+- In either mode, new PTY output immediately clears the stuck state and cancels any active countdown.
 
 You can always open the control board manually via **Ctrl+W** regardless of stuck status.
 
@@ -593,19 +578,14 @@ When a step completes, amux shows the lightweight confirmation dialog. To see al
 
 ## Auto-advance when stuck (yolo mode)
 
-If a running workflow step produces no output for **10 seconds**, yolo mode automatically opens the workflow control board so you can decide what to do without having to notice the yellow indicator yourself.
+When a running workflow step produces no output for **30 seconds**, the engine is notified that the step is stuck:
 
-The auto-open fires only when:
-- The stuck tab is the currently active tab (background tabs are deferred until you switch to them)
-- No other dialog is already open
-- Auto-advance is enabled for this step (not toggled with **[d]**)
-- The user has also been idle for 10 seconds on the active tab (see below)
+- In **yolo mode**: the engine starts a 60-second countdown. If the countdown expires, the step is automatically advanced. Pressing Esc cancels the countdown; if the step re-stucks, the countdown restarts from 60 seconds with no backoff.
+- In **non-yolo mode**: the workflow control board opens automatically so you can decide what to do.
 
-**Active-tab suppression:** If you are actively pressing keys or scrolling on the currently active tab, the stuck timer is held back even if the container is silent. The control board will not open while you are engaged with the output. The timer starts only once both the container and the user have been idle for 10 seconds. Background tabs are always checked using output time alone.
+Stuck detection fires independently per tab — background tabs detect and report stuck state to their own engine. In yolo mode, background tabs show a live countdown in the tab bar. See [Yolo Mode — Background yolo countdown](05-yolo-mode.md#background-yolo-countdown).
 
-After you dismiss with **Esc**, the stuck timer resets. If the container stays silent for another 10 seconds, the dialog re-opens. The auto-open works even when the container window is maximized — the dialog appears over the full-screen terminal view.
-
-In **yolo mode**, the behavior differs for background tabs: instead of deferring the control board until you switch, a live countdown runs directly in the tab bar. See [Yolo Mode — Background yolo countdown](05-yolo-mode.md#background-yolo-countdown).
+**Active-tab suppression:** If you are actively pressing keys or scrolling on the currently active tab, the stuck timer is held back even if the container is silent. The timer starts only once both the container and the user have been idle for 30 seconds. Background tabs are always checked using output time alone.
 
 ---
 

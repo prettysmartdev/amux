@@ -346,7 +346,7 @@ Tab names are truncated at 14 characters with `…`. The tab bar distributes wid
 | Green | Running with active container |
 | Purple / Magenta | Running a claws (nanoclaw) session, **or** permanently bound to a remote headless session |
 | Red | Exited with error |
-| Yellow | Container silent for >10 seconds (stuck warning) |
+| Yellow | Container silent for >30 seconds (stuck warning) |
 | Alternating Yellow / Purple | Background yolo countdown in progress: tab label alternates between `⚠️ yolo in Ns` and `🤘 yolo in Ns` every 2 seconds (see [Yolo Mode](05-yolo-mode.md#background-yolo-countdown)) |
 
 ### Remote-bound tabs
@@ -361,13 +361,13 @@ For full details on creating remote-bound tabs, the create-session sub-modal, an
 
 ### Stuck detection
 
-If a running container produces no output for more than 10 seconds, the tab turns yellow and the subcommand label gains a `⚠️` prefix (e.g. `⚠️ implement 0001`). The warning clears automatically when you:
+If a running container produces no output for more than 30 seconds, the tab turns yellow and the subcommand label gains a `⚠️` prefix (e.g. `⚠️ implement 0001`). The warning clears automatically when you:
 
 - Switch to the yellow tab
 - Press any key while the tab is active
 - Scroll with the mouse wheel
 
-**Active-tab suppression:** On the currently active tab, any keypress or mouse scroll also resets the stuck timer directly. If you are actively reading or scrolling through output, the tab will not turn yellow or show any stuck indicator — the timer only starts when both the container and the user have been idle for 10 seconds. Background tabs are not affected by this; they use output time alone to determine stuck state.
+**Active-tab suppression:** On the currently active tab, any keypress or mouse scroll also resets the stuck timer directly. If you are actively reading or scrolling through output, the tab will not turn yellow or show any stuck indicator — the timer only starts when both the container and the user have been idle for 30 seconds. Background tabs are not affected by this; they use output time alone to determine stuck state.
 
 For workflow tabs, amux goes further: the [workflow control board](04-workflows.md#workflow-control-board) opens automatically so you can act without having to notice the yellow indicator. In yolo mode, background tabs show a live countdown directly in the tab bar instead of a dialog. See [Workflows](04-workflows.md) and [Yolo Mode](05-yolo-mode.md) for details.
 

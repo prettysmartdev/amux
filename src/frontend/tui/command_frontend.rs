@@ -17,8 +17,8 @@ use crate::engine::container::frontend::ContainerIo;
 use crate::engine::message::{UserMessage, UserMessageSink};
 use crate::frontend::tui::dialogs::{DialogRequest, DialogResponse};
 use crate::frontend::tui::tabs::{
-    SharedActiveWorktreePath, SharedContainerName, SharedControlBoardTx, SharedPtyResetFlag,
-    SharedResizeTx, SharedStdinTx, SharedWorkflowViewState, SharedYoloState,
+    SharedActiveWorktreePath, SharedContainerName, SharedEngineTx, SharedPtyResetFlag,
+    SharedResizeTx, SharedStdinTx, SharedWorkflowViewState, SharedYoloCancelFlag, SharedYoloState,
 };
 use crate::frontend::tui::user_message::{SharedStatusLog, TuiUserMessageSink};
 
@@ -43,10 +43,7 @@ pub struct TuiCommandFrontend {
     pub(crate) status_log: SharedStatusLog,
     pub(crate) workflow_view: SharedWorkflowViewState,
     pub(crate) yolo_state: SharedYoloState,
-    /// Tracks whether yolo_countdown_tick has been called at least once for the
-    /// current countdown, so it can distinguish "not yet started" from "user
-    /// cancelled via Esc".
-    pub(crate) yolo_initialized: bool,
+    pub(crate) yolo_cancel_flag: SharedYoloCancelFlag,
     pub(crate) pty_reset_flag: SharedPtyResetFlag,
     pub(crate) container_name_shared: SharedContainerName,
     /// Persistent stdout sender — kept alive across workflow steps so each
@@ -61,10 +58,10 @@ pub struct TuiCommandFrontend {
     #[allow(clippy::type_complexity)]
     pub(crate) resize_tx_shared:
         std::sync::Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u16, u16)>>>>,
-    /// Shared slot for the control board sender. The engine publishes the
-    /// sender here via `set_control_board_sender`; the TUI event loop reads
-    /// it to send mid-step WCB requests.
-    pub(crate) control_board_tx_shared: SharedControlBoardTx,
+    /// Shared slot for the engine sender. The engine publishes the
+    /// sender here via `set_engine_sender`; the TUI event loop reads
+    /// it to send Ctrl-W, StepStuck, and StepUnstuck requests.
+    pub(crate) engine_tx_shared: SharedEngineTx,
     /// Shared active-worktree path. The worktree-lifecycle frontend sets
     /// this when a worktree is created/resumed and clears it on cleanup;
     /// the renderer reads it for the bottom-bar context line.
@@ -81,11 +78,12 @@ impl TuiCommandFrontend {
         container_io: ContainerIo,
         workflow_view: SharedWorkflowViewState,
         yolo_state: SharedYoloState,
+        yolo_cancel_flag: SharedYoloCancelFlag,
         pty_reset_flag: SharedPtyResetFlag,
         container_name_shared: SharedContainerName,
         stdin_tx_shared: SharedStdinTx,
         resize_tx_shared: SharedResizeTx,
-        control_board_tx_shared: SharedControlBoardTx,
+        engine_tx_shared: SharedEngineTx,
         active_worktree_path: SharedActiveWorktreePath,
     ) -> Self {
         let stdout_tx = container_io.stdout.clone();
@@ -99,13 +97,13 @@ impl TuiCommandFrontend {
             status_log,
             workflow_view,
             yolo_state,
-            yolo_initialized: false,
+            yolo_cancel_flag,
             pty_reset_flag,
             container_name_shared,
             stdout_tx,
             stdin_tx_shared,
             resize_tx_shared,
-            control_board_tx_shared,
+            engine_tx_shared,
             active_worktree_path,
         }
     }

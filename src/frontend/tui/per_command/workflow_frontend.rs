@@ -9,22 +9,21 @@ use crate::engine::error::EngineError;
 use crate::engine::message::UserMessageSink;
 use crate::engine::workflow::actions::{
     AvailableActions, NextAction, ResumeMismatch, StepFailureChoice, StepOutput, WorkflowOutcome,
-    WorkflowStepStatus, YoloTickOutcome,
+    WorkflowStepProgressInfo, WorkflowStepStatus, YoloTickOutcome,
 };
 use crate::engine::workflow::frontend::WorkflowFrontend;
+use crate::engine::workflow::EngineRequest;
 use crate::frontend::tui::command_frontend::TuiCommandFrontend;
 use crate::frontend::tui::dialogs::{
     DialogRequest, DialogResponse, WorkflowControlBoardState, WorkflowStepErrorState,
 };
 
 impl WorkflowFrontend for TuiCommandFrontend {
-    fn user_choose_next_action(
+    fn show_workflow_control_board(
         &mut self,
         state: &WorkflowState,
         available: &AvailableActions,
     ) -> Result<NextAction, EngineError> {
-        // Use the engine-reported current step (or the first ready next step
-        // if nothing is currently running).
         let step_name = state
             .step_states
             .iter()
@@ -32,14 +31,12 @@ impl WorkflowFrontend for TuiCommandFrontend {
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "current step".to_string());
 
-        // H: Lightweight step confirm for the simple "advance to next step?" case.
-        // Show it when there's exactly one next step, no failures, and launch_next is available.
+        // Lightweight step confirm for the simple "advance to next step?" case.
         let has_failures = state
             .step_states
             .values()
             .any(|s| matches!(s, crate::data::workflow_state::StepState::Failed { .. }));
         if available.can_launch_next && !has_failures && !available.can_dismiss {
-            // Only show lightweight dialog when exactly one step is pending.
             let mut pending = state
                 .step_states
                 .iter()
@@ -58,8 +55,6 @@ impl WorkflowFrontend for TuiCommandFrontend {
                 return Ok(match response {
                     DialogResponse::Char('>') => NextAction::LaunchNext,
                     DialogResponse::Char('W') => {
-                        // User pressed Ctrl+W to escalate to full WCB — fall through below.
-                        // We can't easily fall through in Rust, so re-ask via WCB.
                         let response2 = self
                             .ask_dialog(DialogRequest::WorkflowControlBoard(
                                 WorkflowControlBoardState {
@@ -83,21 +78,7 @@ impl WorkflowFrontend for TuiCommandFrontend {
                                 },
                             ))
                             .map_err(|e| EngineError::Other(e.to_string()))?;
-                        match response2 {
-                            DialogResponse::Char('>') => NextAction::LaunchNext,
-                            DialogResponse::Char('v') => {
-                                let prompt = available.continue_prompt.clone().unwrap_or_default();
-                                NextAction::ContinueInCurrentContainer { prompt }
-                            }
-                            DialogResponse::Char('^') => NextAction::RestartCurrentStep,
-                            DialogResponse::Char('<') => NextAction::CancelToPreviousStep,
-                            DialogResponse::Char('f') if available.can_finish_workflow => {
-                                NextAction::FinishWorkflow
-                            }
-                            DialogResponse::Char('a') => NextAction::Abort,
-                            DialogResponse::Dismissed => NextAction::Pause,
-                            _ => NextAction::Pause,
-                        }
+                        wcb_response_to_action(response2, available)
                     }
                     DialogResponse::Dismissed => NextAction::Pause,
                     _ => NextAction::Pause,
@@ -125,23 +106,135 @@ impl WorkflowFrontend for TuiCommandFrontend {
                 },
             ))
             .map_err(|e| EngineError::Other(e.to_string()))?;
-        Ok(match response {
-            DialogResponse::Char('>') => NextAction::LaunchNext,
-            DialogResponse::Char('v') => {
-                let prompt = available.continue_prompt.clone().unwrap_or_default();
-                NextAction::ContinueInCurrentContainer { prompt }
+        Ok(wcb_response_to_action(response, available))
+    }
+
+    fn yolo_countdown_tick(
+        &mut self,
+        step_name: &str,
+        remaining: Duration,
+        _total: Duration,
+    ) -> Result<YoloTickOutcome, EngineError> {
+        if self
+            .yolo_cancel_flag
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Ok(mut guard) = self.yolo_state.lock() {
+                *guard = None;
             }
-            DialogResponse::Char('^') => NextAction::RestartCurrentStep,
-            DialogResponse::Char('<') => NextAction::CancelToPreviousStep,
-            DialogResponse::Char('f') if available.can_finish_workflow => {
-                NextAction::FinishWorkflow
+            return Ok(YoloTickOutcome::Cancel);
+        }
+        if let Ok(mut guard) = self.yolo_state.lock() {
+            *guard = Some(crate::frontend::tui::tabs::YoloState {
+                step_name: step_name.to_string(),
+                remaining_secs: remaining.as_secs(),
+            });
+        }
+        Ok(YoloTickOutcome::Continue)
+    }
+
+    fn yolo_countdown_started(&mut self, _step_name: &str) {
+        // State is set by yolo_countdown_tick; nothing extra needed.
+    }
+
+    fn yolo_countdown_finished(&mut self, _step_name: &str) {
+        if let Ok(mut guard) = self.yolo_state.lock() {
+            *guard = None;
+        }
+    }
+
+    fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus) {
+        self.messages
+            .info(format!("workflow step '{}': {:?}", step.name, status));
+        if let Ok(mut guard) = self.workflow_view.lock() {
+            if let Some(view) = guard.as_mut() {
+                let status_str = workflow_status_str(&status);
+                if let Some(s) = view.steps.iter_mut().find(|s| s.name == step.name) {
+                    s.status = status_str.to_string();
+                }
+                view.current_step = if matches!(status, WorkflowStepStatus::Running) {
+                    Some(step.name.clone())
+                } else if view
+                    .current_step
+                    .as_deref()
+                    .map(|cur| cur == step.name.as_str())
+                    .unwrap_or(false)
+                {
+                    None
+                } else {
+                    view.current_step.clone()
+                };
             }
-            DialogResponse::Char('a') => NextAction::Abort,
-            DialogResponse::Char('p') if available.can_dismiss => NextAction::Pause,
-            DialogResponse::Dismissed if available.can_dismiss => NextAction::Dismiss,
-            DialogResponse::Dismissed => NextAction::Pause,
-            _ => NextAction::Pause,
-        })
+        }
+    }
+
+    fn report_step_output(&mut self, _step: &WorkflowStep, _output: StepOutput) {}
+
+    fn report_workflow_completed(&mut self, outcome: &WorkflowOutcome) {
+        if let Ok(mut g) = self.yolo_state.lock() {
+            *g = None;
+        }
+        match outcome {
+            WorkflowOutcome::Completed => self.messages.success("Workflow completed successfully"),
+            WorkflowOutcome::Paused => self.messages.info("Workflow paused"),
+            WorkflowOutcome::Aborted => self.messages.warning("Workflow aborted"),
+            WorkflowOutcome::Failed {
+                last_step,
+                exit_code,
+            } => {
+                self.messages.error_msg(format!(
+                    "Workflow failed at step '{}' (exit {})",
+                    last_step, exit_code
+                ));
+            }
+        }
+    }
+
+    fn report_workflow_progress(
+        &mut self,
+        steps: &[WorkflowStepProgressInfo],
+    ) {
+        if let Ok(mut guard) = self.workflow_view.lock() {
+            let view =
+                guard.get_or_insert_with(crate::frontend::tui::tabs::WorkflowViewState::default);
+            view.steps = steps
+                .iter()
+                .map(|s| crate::frontend::tui::tabs::WorkflowStepView {
+                    name: s.name.clone(),
+                    status: workflow_status_str(&s.status).to_string(),
+                    agent: Some(s.agent.clone()),
+                    model: s.model.clone(),
+                    depends_on: s.depends_on.clone(),
+                })
+                .collect();
+            view.current_step = steps
+                .iter()
+                .find(|s| matches!(s.status, WorkflowStepStatus::Running))
+                .map(|s| s.name.clone());
+        }
+    }
+
+    fn report_step_interactive_launch(
+        &mut self,
+        _step: &WorkflowStep,
+        agent: &str,
+        _model: Option<&str>,
+    ) {
+        self.pty_reset_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        if let Ok(mut guard) = self.yolo_state.lock() {
+            *guard = None;
+        }
+
+        self.recreate_container_io();
+
+        if let Ok(mut name) = self.container_name_shared.lock() {
+            *name = None;
+        }
+
+        self.messages
+            .info(format!("Launching agent '{}' in new container...", agent));
     }
 
     fn confirm_resume(&mut self, mismatch: &ResumeMismatch) -> Result<bool, EngineError> {
@@ -165,9 +258,6 @@ impl WorkflowFrontend for TuiCommandFrontend {
         step: &WorkflowStep,
         exit: &ContainerExitInfo,
     ) -> Result<StepFailureChoice, EngineError> {
-        // Build a few helpful lines from the actual exit info instead of the
-        // old stub "Step failed" string. Old amux only had `exit_code`; the
-        // new info also carries `signal` and timing.
         let mut error_lines = Vec::new();
         if let Some(sig) = exit.signal {
             error_lines.push(format!("Container exited from signal {}", sig));
@@ -193,193 +283,32 @@ impl WorkflowFrontend for TuiCommandFrontend {
         })
     }
 
-    fn report_step_interactive_launch(
+    fn set_engine_sender(
         &mut self,
-        _step: &WorkflowStep,
-        agent: &str,
-        _model: Option<&str>,
+        tx: tokio::sync::mpsc::UnboundedSender<EngineRequest>,
     ) {
-        self.yolo_initialized = false;
-        self.pty_reset_flag
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
-        // Clear yolo state so the countdown dialog disappears immediately
-        // when the next step launches (fixes TUI-8: dialog lingering at 0s).
-        if let Ok(mut guard) = self.yolo_state.lock() {
-            *guard = None;
-        }
-
-        // Recreate container I/O channels so the new step's container gets
-        // fresh stdin/resize channels (stdout reuses the same TUI receiver).
-        // The new senders are published via shared slots so the TUI event loop
-        // picks them up on the next tick.
-        self.recreate_container_io();
-
-        // Clear the container name so the TUI picks up the new container's
-        // name when the engine reports it.
-        if let Ok(mut name) = self.container_name_shared.lock() {
-            *name = None;
-        }
-
-        self.messages
-            .info(format!("Launching agent '{}' in new container...", agent));
-    }
-
-    fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus) {
-        self.messages
-            .info(format!("workflow step '{}': {:?}", step.name, status));
-        // Update the shared workflow_view so the strip reflects the new status.
-        if let Ok(mut guard) = self.workflow_view.lock() {
-            if let Some(view) = guard.as_mut() {
-                let status_str = workflow_status_str(&status);
-                if let Some(s) = view.steps.iter_mut().find(|s| s.name == step.name) {
-                    s.status = status_str.to_string();
-                }
-                view.current_step = if matches!(status, WorkflowStepStatus::Running) {
-                    Some(step.name.clone())
-                } else if view
-                    .current_step
-                    .as_deref()
-                    .map(|cur| cur == step.name.as_str())
-                    .unwrap_or(false)
-                {
-                    // Step finished — clear current_step so the strip
-                    // doesn't keep highlighting a now-Done step.
-                    None
-                } else {
-                    view.current_step.clone()
-                };
-            }
-        }
-    }
-
-    fn report_step_output(&mut self, _step: &WorkflowStep, _output: StepOutput) {
-        // Output goes through ContainerFrontend, not here.
-    }
-
-    fn report_step_stuck(&mut self, step: &WorkflowStep) {
-        self.messages.warning(format!(
-            "Step '{}' appears stuck (no output for 30s)",
-            step.name
-        ));
-        if let Ok(mut guard) = self.workflow_view.lock() {
-            if let Some(view) = guard.as_mut() {
-                if let Some(s) = view.steps.iter_mut().find(|s| s.name == step.name) {
-                    s.stuck = true;
-                }
-            }
-        }
-    }
-
-    fn report_step_unstuck(&mut self, step: &WorkflowStep) {
-        self.messages
-            .info(format!("Step '{}' resumed producing output", step.name));
-        if let Ok(mut guard) = self.workflow_view.lock() {
-            if let Some(view) = guard.as_mut() {
-                if let Some(s) = view.steps.iter_mut().find(|s| s.name == step.name) {
-                    s.stuck = false;
-                }
-            }
-        }
-    }
-
-    fn reset_yolo_initialized(&mut self) {
-        self.yolo_initialized = false;
-    }
-
-    fn clear_yolo_state(&mut self) {
-        if let Ok(mut guard) = self.yolo_state.lock() {
-            *guard = None;
-        }
-        self.yolo_initialized = false;
-    }
-
-    fn yolo_countdown_tick(&mut self, remaining: Duration) -> Result<YoloTickOutcome, EngineError> {
-        let step_name = self
-            .workflow_view
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().and_then(|v| v.current_step.clone()))
-            .unwrap_or_else(|| "current step".to_string());
-        if let Ok(mut guard) = self.yolo_state.lock() {
-            if guard.is_none() && self.yolo_initialized {
-                return Ok(YoloTickOutcome::Cancel);
-            }
-            *guard = Some(crate::frontend::tui::tabs::YoloState {
-                step_name,
-                remaining_secs: remaining.as_secs(),
-            });
-        }
-        self.yolo_initialized = true;
-        Ok(YoloTickOutcome::Continue)
-    }
-
-    fn report_workflow_completed(&mut self, outcome: &WorkflowOutcome) {
-        if let Ok(mut g) = self.yolo_state.lock() {
-            *g = None;
-        }
-        self.yolo_initialized = false;
-        match outcome {
-            WorkflowOutcome::Completed => self.messages.success("Workflow completed successfully"),
-            WorkflowOutcome::Paused => self.messages.info("Workflow paused"),
-            WorkflowOutcome::Aborted => self.messages.warning("Workflow aborted"),
-            WorkflowOutcome::Failed {
-                last_step,
-                exit_code,
-            } => {
-                self.messages.error_msg(format!(
-                    "Workflow failed at step '{}' (exit {})",
-                    last_step, exit_code
-                ));
-            }
-        }
-    }
-
-    fn should_auto_advance(&self, step_name: &str) -> bool {
-        let ws = self.workflow_view.lock().unwrap_or_else(|e| e.into_inner());
-        ws.as_ref()
-            .map(|v| !v.auto_disabled.contains(step_name))
-            .unwrap_or(true)
-    }
-
-    fn set_control_board_sender(
-        &mut self,
-        tx: tokio::sync::mpsc::UnboundedSender<crate::engine::workflow::ControlBoardRequest>,
-    ) {
-        if let Ok(mut guard) = self.control_board_tx_shared.lock() {
+        if let Ok(mut guard) = self.engine_tx_shared.lock() {
             *guard = Some(tx);
         }
     }
+}
 
-    fn report_workflow_progress(
-        &mut self,
-        steps: &[crate::engine::workflow::actions::WorkflowStepProgressInfo],
-    ) {
-        // First snapshot of the workflow → seed workflow_view. Subsequent
-        // calls overwrite step statuses (engine sends progress whenever the
-        // shape of the workflow changes / before each step).
-        if let Ok(mut guard) = self.workflow_view.lock() {
-            let view =
-                guard.get_or_insert_with(crate::frontend::tui::tabs::WorkflowViewState::default);
-            // Re-build the step list from scratch so renames/reorders apply.
-            let prev_disabled = view.auto_disabled.clone();
-            view.steps = steps
-                .iter()
-                .map(|s| crate::frontend::tui::tabs::WorkflowStepView {
-                    name: s.name.clone(),
-                    status: workflow_status_str(&s.status).to_string(),
-                    agent: Some(s.agent.clone()),
-                    model: s.model.clone(),
-                    depends_on: s.depends_on.clone(),
-                    stuck: false,
-                })
-                .collect();
-            view.current_step = steps
-                .iter()
-                .find(|s| matches!(s.status, WorkflowStepStatus::Running))
-                .map(|s| s.name.clone());
-            view.auto_disabled = prev_disabled;
+/// Map a WCB dialog response to a `NextAction`.
+fn wcb_response_to_action(response: DialogResponse, available: &AvailableActions) -> NextAction {
+    match response {
+        DialogResponse::Char('>') => NextAction::LaunchNext,
+        DialogResponse::Char('v') => {
+            let prompt = available.continue_prompt.clone().unwrap_or_default();
+            NextAction::ContinueInCurrentContainer { prompt }
         }
+        DialogResponse::Char('^') => NextAction::RestartCurrentStep,
+        DialogResponse::Char('<') => NextAction::CancelToPreviousStep,
+        DialogResponse::Char('f') if available.can_finish_workflow => NextAction::FinishWorkflow,
+        DialogResponse::Char('a') => NextAction::Abort,
+        DialogResponse::Char('p') if available.can_dismiss => NextAction::Pause,
+        DialogResponse::Dismissed if available.can_dismiss => NextAction::Dismiss,
+        DialogResponse::Dismissed => NextAction::Pause,
+        _ => NextAction::Pause,
     }
 }
 
@@ -398,6 +327,8 @@ fn workflow_status_str(status: &WorkflowStepStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crate::engine::container::instance::ContainerExitInfo;
     use crate::engine::workflow::actions::StepFailureChoice;
     use crate::engine::workflow::frontend::WorkflowFrontend;
@@ -429,10 +360,11 @@ mod tests {
         };
         let workflow_view = std::sync::Arc::new(std::sync::Mutex::new(None));
         let yolo_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let yolo_cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pty_reset_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stdin_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
         let resize_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let control_board_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let engine_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
         let frontend = TuiCommandFrontend::new(
             parsed,
             status_log,
@@ -441,11 +373,12 @@ mod tests {
             container_io,
             workflow_view,
             yolo_state,
+            yolo_cancel_flag,
             pty_reset_flag,
             std::sync::Arc::new(std::sync::Mutex::new(None)),
             stdin_tx_shared,
             resize_tx_shared,
-            control_board_tx_shared,
+            engine_tx_shared,
             std::sync::Arc::new(std::sync::Mutex::new(None)),
         );
         (frontend, req_rx, resp_tx)
@@ -572,62 +505,6 @@ mod tests {
         assert!(!result);
     }
 
-    // ─── Auto-advance disabled ────────────────────────────────────────────────
-
-    #[test]
-    fn should_auto_advance_returns_false_for_disabled_step() {
-        use crate::engine::workflow::frontend::WorkflowFrontend;
-        let (frontend, _req_rx, _resp_tx) = make_frontend();
-        // Add a step name to the auto_disabled set.
-        {
-            let mut guard = frontend.workflow_view.lock().unwrap();
-            let view =
-                guard.get_or_insert_with(crate::frontend::tui::tabs::WorkflowViewState::default);
-            view.auto_disabled.insert("build".to_string());
-        }
-        assert!(
-            !frontend.should_auto_advance("build"),
-            "should_auto_advance must return false for a disabled step"
-        );
-        assert!(
-            frontend.should_auto_advance("test"),
-            "should_auto_advance must return true for a step not in auto_disabled"
-        );
-    }
-
-    // ─── Stuck flag propagation ───────────────────────────────────────────────
-
-    #[test]
-    fn report_step_stuck_sets_stuck_flag_on_view() {
-        use crate::engine::workflow::frontend::WorkflowFrontend;
-        let (mut frontend, _req_rx, _resp_tx) = make_frontend();
-        let step = dummy_step(); // name = "test-step"
-                                 // Seed the view with a step matching dummy_step's name.
-        {
-            let mut guard = frontend.workflow_view.lock().unwrap();
-            *guard = Some(crate::frontend::tui::tabs::WorkflowViewState {
-                steps: vec![crate::frontend::tui::tabs::WorkflowStepView {
-                    name: step.name.clone(),
-                    status: "running".into(),
-                    agent: None,
-                    model: None,
-                    depends_on: vec![],
-                    stuck: false,
-                }],
-                current_step: Some(step.name.clone()),
-                auto_disabled: Default::default(),
-            });
-        }
-        frontend.report_step_stuck(&step);
-        let guard = frontend.workflow_view.lock().unwrap();
-        let view = guard.as_ref().unwrap();
-        let step_view = view.steps.iter().find(|s| s.name == step.name).unwrap();
-        assert!(
-            step_view.stuck,
-            "report_step_stuck must set stuck=true on the matching WorkflowStepView"
-        );
-    }
-
     // ─── Simple advance / parallel fan-out dialog routing ────────────────────
 
     fn make_workflow_state_one_pending() -> crate::data::workflow_state::WorkflowState {
@@ -702,7 +579,6 @@ mod tests {
         let (mut frontend, req_rx, resp_tx) = make_frontend();
 
         let mut state = make_workflow_state_one_pending();
-        // Mark "build" as Succeeded so only "test" is Pending.
         state.set_status("build", StepState::Succeeded);
         let available = make_available_launch_next();
 
@@ -720,7 +596,7 @@ mod tests {
         });
 
         let result = frontend
-            .user_choose_next_action(&state, &available)
+            .show_workflow_control_board(&state, &available)
             .unwrap();
         handle.join().unwrap();
         assert_eq!(
@@ -737,7 +613,6 @@ mod tests {
         let (mut frontend, req_rx, resp_tx) = make_frontend();
 
         let mut state = make_workflow_state_two_pending();
-        // Mark "build" as Succeeded; test-a and test-b remain Pending.
         state.set_status("build", StepState::Succeeded);
         let available = make_available_launch_next();
 
@@ -755,12 +630,120 @@ mod tests {
         });
 
         let result = frontend
-            .user_choose_next_action(&state, &available)
+            .show_workflow_control_board(&state, &available)
             .unwrap();
         handle.join().unwrap();
         assert_eq!(
             result,
             crate::engine::workflow::actions::NextAction::LaunchNext,
         );
+    }
+
+    // ─── Yolo countdown tick tests ──────────────────────────────────────────
+
+    #[test]
+    fn yolo_countdown_tick_returns_continue_by_default() {
+        use crate::engine::workflow::actions::YoloTickOutcome;
+        use crate::engine::workflow::frontend::WorkflowFrontend;
+
+        let (mut frontend, _req_rx, _resp_tx) = make_frontend();
+        let result = frontend
+            .yolo_countdown_tick("build", Duration::from_secs(30), Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(result, YoloTickOutcome::Continue);
+    }
+
+    #[test]
+    fn yolo_countdown_tick_returns_cancel_when_flag_set() {
+        use crate::engine::workflow::actions::YoloTickOutcome;
+        use crate::engine::workflow::frontend::WorkflowFrontend;
+
+        let (mut frontend, _req_rx, _resp_tx) = make_frontend();
+        frontend
+            .yolo_cancel_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let result = frontend
+            .yolo_countdown_tick("build", Duration::from_secs(30), Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(result, YoloTickOutcome::Cancel);
+    }
+
+    #[test]
+    fn yolo_cancel_flag_resets_after_consumption() {
+        use crate::engine::workflow::actions::YoloTickOutcome;
+        use crate::engine::workflow::frontend::WorkflowFrontend;
+
+        let (mut frontend, _req_rx, _resp_tx) = make_frontend();
+        frontend
+            .yolo_cancel_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = frontend
+            .yolo_countdown_tick("build", Duration::from_secs(30), Duration::from_secs(60))
+            .unwrap();
+        let result = frontend
+            .yolo_countdown_tick("build", Duration::from_secs(29), Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(result, YoloTickOutcome::Continue);
+    }
+
+    #[test]
+    fn yolo_countdown_tick_updates_shared_state() {
+        use crate::engine::workflow::frontend::WorkflowFrontend;
+
+        let (mut frontend, _req_rx, _resp_tx) = make_frontend();
+        let _ = frontend
+            .yolo_countdown_tick("build", Duration::from_secs(42), Duration::from_secs(60))
+            .unwrap();
+        let guard = frontend.yolo_state.lock().unwrap();
+        let state = guard.as_ref().expect("yolo_state must be Some");
+        assert_eq!(state.step_name, "build");
+        assert_eq!(state.remaining_secs, 42);
+    }
+
+    #[test]
+    fn yolo_countdown_cancel_clears_shared_state() {
+        use crate::engine::workflow::frontend::WorkflowFrontend;
+
+        let (mut frontend, _req_rx, _resp_tx) = make_frontend();
+        // First set some state
+        let _ = frontend
+            .yolo_countdown_tick("build", Duration::from_secs(30), Duration::from_secs(60))
+            .unwrap();
+        assert!(frontend.yolo_state.lock().unwrap().is_some());
+
+        // Cancel clears state
+        frontend
+            .yolo_cancel_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = frontend
+            .yolo_countdown_tick("build", Duration::from_secs(29), Duration::from_secs(60))
+            .unwrap();
+        assert!(frontend.yolo_state.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn yolo_countdown_finished_clears_shared_state() {
+        use crate::engine::workflow::frontend::WorkflowFrontend;
+
+        let (mut frontend, _req_rx, _resp_tx) = make_frontend();
+        let _ = frontend
+            .yolo_countdown_tick("build", Duration::from_secs(10), Duration::from_secs(60))
+            .unwrap();
+        assert!(frontend.yolo_state.lock().unwrap().is_some());
+        frontend.yolo_countdown_finished("build");
+        assert!(frontend.yolo_state.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn set_engine_sender_stores_tx() {
+        use crate::engine::workflow::frontend::WorkflowFrontend;
+        use crate::engine::workflow::EngineRequest;
+
+        let (mut frontend, _req_rx, _resp_tx) = make_frontend();
+        assert!(frontend.engine_tx_shared.lock().unwrap().is_none());
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<EngineRequest>();
+        frontend.set_engine_sender(tx);
+        assert!(frontend.engine_tx_shared.lock().unwrap().is_some());
     }
 }

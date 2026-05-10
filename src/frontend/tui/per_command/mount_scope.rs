@@ -55,6 +55,7 @@ mod tests {
         };
         let workflow_view = std::sync::Arc::new(std::sync::Mutex::new(None));
         let yolo_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let yolo_cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pty_reset_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let frontend = TuiCommandFrontend::new(
             parsed,
@@ -64,6 +65,7 @@ mod tests {
             container_io,
             workflow_view,
             yolo_state,
+            yolo_cancel_flag,
             pty_reset_flag,
             std::sync::Arc::new(std::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::Mutex::new(None)),

@@ -206,7 +206,7 @@ impl App {
         tab.container_name_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
         tab.stdin_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
         tab.resize_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
-        tab.control_board_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
+        tab.engine_tx_shared = std::sync::Arc::new(std::sync::Mutex::new(None));
         let frontend = TuiCommandFrontend::new(
             parsed.clone(),
             tab.status_log.clone(),
@@ -215,11 +215,12 @@ impl App {
             container_io,
             tab.workflow_state.clone(),
             tab.yolo_state.clone(),
+            tab.yolo_cancel_flag.clone(),
             tab.pty_reset_flag.clone(),
             tab.container_name_shared.clone(),
             tab.stdin_tx_shared.clone(),
             tab.resize_tx_shared.clone(),
-            tab.control_board_tx_shared.clone(),
+            tab.engine_tx_shared.clone(),
             tab.active_worktree_path.clone(),
         );
 
@@ -337,14 +338,14 @@ impl App {
     /// poll for stats results, and recompute the per-tab stuck flag.
     pub fn tick_all_tabs(&mut self) {
         let active = self.active_tab;
+        let mut stuck_transitions: Vec<(usize, bool, bool)> = Vec::new();
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             tab.drain_container_output();
             tab.poll_command_completion();
+            let was_stuck = tab.stuck;
             tab.recompute_stuck(i == active);
-            // TUI-1: When the container recovers from stuck, reset the dismiss
-            // backoff so a subsequent stuck event can re-trigger the yolo countdown.
-            if !tab.stuck {
-                tab.yolo_dismissed_at = None;
+            if tab.stuck != was_stuck {
+                stuck_transitions.push((i, was_stuck, tab.stuck));
             }
 
             // TUI-4: Sync the vt100 parser size with the actual rendered
@@ -464,16 +465,11 @@ impl App {
             }
         }
 
-        // ENG-1: Stuck-container → notify the engine (ALL tabs).
+        // ENG-1: Stuck-container → notify the engine.
         //
-        // The TUI detects stuck (no PTY output for STUCK_TIMEOUT) and sends
-        // `ControlBoardRequest::StepStuck` to the engine. The ENGINE decides
-        // what to do: yolo mode → run a yolo countdown via
-        // `yolo_countdown_tick`; non-yolo → open the WCB via
-        // `user_choose_next_action`. The TUI only renders; it never drives
-        // yolo countdowns.
-        let active = self.active_tab;
-        for tab_idx in 0..self.tabs.len() {
+        // Transitions were captured in the first loop above. Send StepStuck
+        // when a tab becomes stuck; StepUnstuck when it recovers.
+        for (tab_idx, was_stuck, is_stuck) in stuck_transitions {
             let tab = &self.tabs[tab_idx];
             let has_workflow_step = tab
                 .workflow_state
@@ -481,51 +477,34 @@ impl App {
                 .ok()
                 .and_then(|g| g.as_ref().and_then(|ws| ws.current_step.clone()))
                 .is_some();
-            let engine_yolo_active = tab
-                .yolo_state
-                .lock()
-                .ok()
-                .map(|g| g.is_some())
-                .unwrap_or(false);
-            let backoff_active = tab
-                .yolo_dismissed_at
-                .map(|t| t.elapsed() < crate::engine::workflow::timing::STUCK_DIALOG_BACKOFF)
-                .unwrap_or(false);
-            let is_active = tab_idx == active;
+            if !has_workflow_step {
+                continue;
+            }
 
-            if tab.stuck
-                && has_workflow_step
-                && !engine_yolo_active
-                && !backoff_active
-                && (!is_active || !self.command_dialog_active)
-            {
-                if let Ok(guard) = tab.control_board_tx_shared.lock() {
+            if is_stuck && !was_stuck {
+                if let Ok(guard) = tab.engine_tx_shared.lock() {
                     if let Some(tx) = guard.as_ref() {
-                        let _ = tx.send(crate::engine::workflow::ControlBoardRequest::StepStuck);
+                        let _ = tx.send(crate::engine::workflow::EngineRequest::StepStuck);
                     }
                 }
-            } else if is_active && !tab.stuck && !has_workflow_step {
-                if matches!(self.active_dialog, Some(Dialog::WorkflowYoloCountdown(_)))
-                    && !engine_yolo_active
-                {
-                    self.active_dialog = None;
+            } else if !is_stuck && was_stuck {
+                if let Ok(guard) = tab.engine_tx_shared.lock() {
+                    if let Some(tx) = guard.as_ref() {
+                        let _ = tx.send(crate::engine::workflow::EngineRequest::StepUnstuck);
+                    }
                 }
             }
         }
 
+        // Engine-driven yolo countdown: the engine sets yolo_state via the
+        // frontend trait; the TUI renders it as a non-modal overlay dialog.
         let yolo_snapshot = self.tabs[active]
             .yolo_state
             .lock()
             .ok()
             .and_then(|g| g.clone());
         if let Some(state) = yolo_snapshot {
-            // Respect the backoff: if the user recently dismissed the yolo
-            // dialog, don't re-show it until the stuck backoff expires.
-            let backoff_active = self.tabs[active]
-                .yolo_dismissed_at
-                .map(|t| t.elapsed() < crate::engine::workflow::timing::STUCK_DIALOG_BACKOFF)
-                .unwrap_or(false);
-            if !self.command_dialog_active && !backoff_active {
+            if !self.command_dialog_active {
                 self.active_dialog = Some(Dialog::WorkflowYoloCountdown(
                     crate::frontend::tui::dialogs::WorkflowYoloCountdownState {
                         step_name: state.step_name.clone(),
@@ -533,9 +512,7 @@ impl App {
                     },
                 ));
             }
-        } else if matches!(self.active_dialog, Some(Dialog::WorkflowYoloCountdown(_)))
-            && self.tabs[active].yolo_countdown.is_none()
-        {
+        } else if matches!(self.active_dialog, Some(Dialog::WorkflowYoloCountdown(_))) {
             self.active_dialog = None;
         }
     }

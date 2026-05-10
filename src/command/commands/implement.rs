@@ -31,11 +31,11 @@ use crate::engine::error::EngineError;
 use crate::engine::message::{MessageLevel, UserMessage, UserMessageSink};
 use crate::engine::workflow::actions::{
     AvailableActions, NextAction, ResumeMismatch, StepFailureChoice, StepOutput, WorkflowOutcome,
-    WorkflowStepStatus, YoloTickOutcome,
+    WorkflowStepProgressInfo, WorkflowStepStatus, YoloTickOutcome,
 };
 use crate::engine::workflow::factory::{ContainerExecutionFactory, WorkflowRuntimeContext};
 use crate::engine::workflow::frontend::WorkflowFrontend;
-use crate::engine::workflow::WorkflowEngine;
+use crate::engine::workflow::{EngineRequest, WorkflowEngine};
 
 #[derive(Debug, Clone)]
 pub struct ImplementCommandFlags {
@@ -111,7 +111,7 @@ impl UserMessageSink for ImplementWorkflowProxy {
 }
 
 impl WorkflowFrontend for ImplementWorkflowProxy {
-    fn user_choose_next_action(
+    fn show_workflow_control_board(
         &mut self,
         state: &crate::data::workflow_state::WorkflowState,
         available: &AvailableActions,
@@ -119,7 +119,47 @@ impl WorkflowFrontend for ImplementWorkflowProxy {
         self.0
             .lock()
             .unwrap()
-            .user_choose_next_action(state, available)
+            .show_workflow_control_board(state, available)
+    }
+    fn yolo_countdown_tick(
+        &mut self,
+        step_name: &str,
+        remaining: Duration,
+        total: Duration,
+    ) -> Result<YoloTickOutcome, EngineError> {
+        self.0
+            .lock()
+            .unwrap()
+            .yolo_countdown_tick(step_name, remaining, total)
+    }
+    fn yolo_countdown_started(&mut self, step_name: &str) {
+        self.0.lock().unwrap().yolo_countdown_started(step_name);
+    }
+    fn yolo_countdown_finished(&mut self, step_name: &str) {
+        self.0.lock().unwrap().yolo_countdown_finished(step_name);
+    }
+    fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus) {
+        self.0.lock().unwrap().report_step_status(step, status);
+    }
+    fn report_step_output(&mut self, step: &WorkflowStep, output: StepOutput) {
+        self.0.lock().unwrap().report_step_output(step, output);
+    }
+    fn report_workflow_completed(&mut self, outcome: &WorkflowOutcome) {
+        self.0.lock().unwrap().report_workflow_completed(outcome);
+    }
+    fn report_workflow_progress(&mut self, steps: &[WorkflowStepProgressInfo]) {
+        self.0.lock().unwrap().report_workflow_progress(steps);
+    }
+    fn report_step_interactive_launch(
+        &mut self,
+        step: &WorkflowStep,
+        agent: &str,
+        model: Option<&str>,
+    ) {
+        self.0
+            .lock()
+            .unwrap()
+            .report_step_interactive_launch(step, agent, model);
     }
     fn confirm_resume(&mut self, mismatch: &ResumeMismatch) -> Result<bool, EngineError> {
         self.0.lock().unwrap().confirm_resume(mismatch)
@@ -134,29 +174,11 @@ impl WorkflowFrontend for ImplementWorkflowProxy {
             .unwrap()
             .user_choose_after_step_failure(step, exit)
     }
-    fn report_step_status(&mut self, step: &WorkflowStep, status: WorkflowStepStatus) {
-        self.0.lock().unwrap().report_step_status(step, status);
-    }
-    fn report_step_output(&mut self, step: &WorkflowStep, output: StepOutput) {
-        self.0.lock().unwrap().report_step_output(step, output);
-    }
-    fn report_step_stuck(&mut self, step: &WorkflowStep) {
-        self.0.lock().unwrap().report_step_stuck(step);
-    }
-    fn report_step_unstuck(&mut self, step: &WorkflowStep) {
-        self.0.lock().unwrap().report_step_unstuck(step);
-    }
-    fn yolo_countdown_tick(&mut self, remaining: Duration) -> Result<YoloTickOutcome, EngineError> {
-        self.0.lock().unwrap().yolo_countdown_tick(remaining)
-    }
-    fn reset_yolo_initialized(&mut self) {
-        self.0.lock().unwrap().reset_yolo_initialized();
-    }
-    fn clear_yolo_state(&mut self) {
-        self.0.lock().unwrap().clear_yolo_state();
-    }
-    fn report_workflow_completed(&mut self, outcome: &WorkflowOutcome) {
-        self.0.lock().unwrap().report_workflow_completed(outcome);
+    fn set_engine_sender(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<EngineRequest>,
+    ) {
+        self.0.lock().unwrap().set_engine_sender(tx);
     }
 }
 

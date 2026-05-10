@@ -353,47 +353,23 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
             }
         }
         Action::WorkflowControl => {
-            // Guard: act when a workflow is active (has steps) OR a yolo
-            // countdown is running (current_step may be None between steps).
-            let workflow_active = app
+            let engine_tx = app
                 .active_tab()
-                .workflow_state
+                .engine_tx_shared
                 .lock()
                 .ok()
-                .and_then(|g| g.as_ref().map(|v| !v.steps.is_empty()))
-                .unwrap_or(false);
-            let yolo_active = app
-                .active_tab()
-                .yolo_state
-                .lock()
-                .ok()
-                .and_then(|g| g.is_some().then_some(true))
-                .unwrap_or(false);
-            if !workflow_active && !yolo_active {
-                app.status_bar.text = "no workflow running".to_string();
-            } else if matches!(app.active_dialog, Some(Dialog::WorkflowControlBoard(_))) {
-                // Toggle: WCB already open → dismiss it.
-                dismiss_dialog(app);
-            } else if matches!(app.active_dialog, Some(Dialog::WorkflowStepConfirm(_))) {
-                // Escalate from lightweight step confirm to full WCB.
-                app.send_dialog_response(DialogResponse::Char('W'));
-                app.active_dialog = None;
-                app.command_dialog_active = false;
-            } else {
-                // Dismiss any blocking dialog to unblock the engine, then
-                // send OpenControlBoard. The engine handles the rest: it
-                // cancels any in-progress yolo countdown, computes available
-                // actions, and triggers the WCB dialog.
-                if app.command_dialog_active {
+                .and_then(|g| g.clone());
+            if let Some(tx) = engine_tx {
+                if matches!(app.active_dialog, Some(Dialog::WorkflowStepConfirm(_))) {
+                    app.send_dialog_response(DialogResponse::Char('W'));
+                    app.active_dialog = None;
+                    app.command_dialog_active = false;
+                } else if app.command_dialog_active {
                     dismiss_dialog(app);
                 }
-                if let Ok(guard) = app.active_tab().control_board_tx_shared.lock() {
-                    if let Some(tx) = guard.as_ref() {
-                        let _ = tx.send(
-                            crate::engine::workflow::ControlBoardRequest::OpenControlBoard,
-                        );
-                    }
-                }
+                let _ = tx.send(
+                    crate::engine::workflow::EngineRequest::OpenControlBoard,
+                );
             }
         }
         Action::OpenConfigShow => {
@@ -486,11 +462,9 @@ fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
                 }
             }
             if matches!(app.active_dialog, Some(Dialog::WorkflowYoloCountdown(_))) {
-                if let Ok(mut guard) = app.active_tab().yolo_state.lock() {
-                    *guard = None;
-                }
-                let tab = app.active_tab_mut();
-                tab.yolo_dismissed_at = Some(std::time::Instant::now());
+                app.active_tab()
+                    .yolo_cancel_flag
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 app.active_dialog = None;
                 return;
             }
@@ -957,24 +931,6 @@ fn handle_command_submit(app: &mut App) {
 fn handle_workflow_control_board_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    // `[d]` toggles auto-advance for the current step. The dialog stays open
-    // — old amux UX. We mutate the shared workflow_view's auto_disabled set
-    // and the engine consults it on its next yolo countdown.
-    if matches!(key.code, KeyCode::Char('d')) && !ctrl {
-        if let Some(Dialog::WorkflowControlBoard(state)) = &app.active_dialog {
-            let step = state.step_name.clone();
-            if let Ok(mut g) = app.active_tab().workflow_state.lock() {
-                if let Some(view) = g.as_mut() {
-                    if !view.auto_disabled.insert(step.clone()) {
-                        // Already disabled → toggle off.
-                        view.auto_disabled.remove(&step);
-                    }
-                }
-            }
-        }
-        return true;
-    }
-
     let can_finish = matches!(
         &app.active_dialog,
         Some(Dialog::WorkflowControlBoard(state)) if state.can_finish
@@ -989,9 +945,6 @@ fn handle_workflow_control_board_key(app: &mut App, key: crossterm::event::KeyEv
         KeyCode::Enter if ctrl => return false,
         _ => return false,
     };
-    // TUI-1: Clear the dismiss backoff so yolo can re-trigger after the user
-    // picks an action from the WCB (the step may still be running and stuck).
-    app.active_tab_mut().yolo_dismissed_at = None;
     app.send_dialog_response(response);
     app.active_dialog = None;
     app.command_dialog_active = false;
@@ -1002,11 +955,6 @@ fn handle_workflow_control_board_key(app: &mut App, key: crossterm::event::KeyEv
 
 /// Dismiss the active dialog, sending Dismissed to the command thread if needed.
 fn dismiss_dialog(app: &mut App) {
-    // TUI-1: When the WCB is dismissed via Esc, reset the yolo backoff so
-    // a subsequent stuck detection can re-trigger the yolo countdown.
-    if matches!(app.active_dialog, Some(Dialog::WorkflowControlBoard(_))) {
-        app.active_tab_mut().yolo_dismissed_at = None;
-    }
     if app.command_dialog_active {
         app.send_dialog_response(DialogResponse::Dismissed);
     }
@@ -1201,11 +1149,7 @@ fn handle_dialog_char(app: &mut App, c: char) {
         }
         Some(Dialog::WorkflowCancelConfirm) => match c {
             'y' | 'Y' => {
-                // Tell the engine to abort: the workflow_frontend's
-                // user_choose_next_action will see this as Abort. We send
-                // Char('a') because that's the dialog protocol the workflow
-                // dialog handlers use — the engine's frontend impl maps it
-                // to NextAction::Abort.
+                // Tell the engine to abort via the dialog response channel.
                 app.send_dialog_response(DialogResponse::Char('a'));
                 app.active_dialog = None;
                 app.command_dialog_active = false;
@@ -2261,13 +2205,13 @@ mod tests {
     // ─── Ctrl+W workflow control ──────────────────────────────────────────────
 
     #[test]
-    fn ctrl_w_with_no_workflow_pushes_status_bar_message() {
+    fn ctrl_w_with_no_workflow_is_silent_noop() {
         let mut app = make_app();
-        // No workflow state set — workflow_state is None by default.
+        // No engine_tx set — Ctrl-W is a silent no-op per spec.
         press_key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
         assert_eq!(
-            app.status_bar.text, "no workflow running",
-            "Ctrl+W with no active workflow must update the status bar"
+            app.status_bar.text, "",
+            "Ctrl+W with no engine_tx must be a silent no-op"
         );
         assert!(
             app.active_dialog.is_none(),
@@ -2276,11 +2220,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_w_during_running_step_sends_control_board_request() {
-        use crate::engine::workflow::ControlBoardRequest;
+    fn ctrl_w_during_running_step_sends_engine_request() {
+        use crate::engine::workflow::EngineRequest;
         use crate::frontend::tui::tabs::WorkflowStepView;
         use crate::frontend::tui::tabs::WorkflowViewState;
-        use std::collections::HashSet;
 
         let mut app = make_app();
 
@@ -2292,49 +2235,36 @@ mod tests {
                 agent: None,
                 model: None,
                 depends_on: vec![],
-                stuck: false,
             }],
             current_step: Some("build".into()),
-            auto_disabled: HashSet::new(),
         };
         *app.active_tab_mut().workflow_state.lock().unwrap() = Some(view);
 
-        // Wire up a control board channel so we can observe what's sent.
-        let (cb_tx, mut cb_rx) = tokio::sync::mpsc::unbounded_channel::<ControlBoardRequest>();
-        *app.active_tab_mut().control_board_tx_shared.lock().unwrap() = Some(cb_tx);
+        // Wire up an engine channel so we can observe what's sent.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineRequest>();
+        *app.active_tab_mut().engine_tx_shared.lock().unwrap() = Some(tx);
 
         press_key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
 
-        let msg = cb_rx
+        let msg = rx
             .try_recv()
-            .expect("control board tx must receive a message");
+            .expect("engine tx must receive a message");
         assert!(
-            matches!(msg, ControlBoardRequest::OpenControlBoard),
+            matches!(msg, EngineRequest::OpenControlBoard),
             "Ctrl+W during a running step must send OpenControlBoard"
         );
     }
 
     #[test]
     fn ctrl_w_in_step_confirm_escalates_to_wcb() {
-        use crate::frontend::tui::tabs::{WorkflowStepView, WorkflowViewState};
-        use std::collections::HashSet;
+        use crate::engine::workflow::EngineRequest;
 
         let mut app = make_app();
 
-        // A workflow must be active for Ctrl+W to do anything.
-        let view = WorkflowViewState {
-            steps: vec![WorkflowStepView {
-                name: "build".into(),
-                status: "done".into(),
-                agent: None,
-                model: None,
-                depends_on: vec![],
-                stuck: false,
-            }],
-            current_step: None,
-            auto_disabled: HashSet::new(),
-        };
-        *app.active_tab_mut().workflow_state.lock().unwrap() = Some(view);
+        // Wire up an engine channel so Ctrl-W handler fires.
+        let (engine_tx, _engine_rx) =
+            tokio::sync::mpsc::unbounded_channel::<EngineRequest>();
+        *app.active_tab_mut().engine_tx_shared.lock().unwrap() = Some(engine_tx);
 
         // Open a StepConfirm dialog with a response channel.
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2471,7 +2401,6 @@ mod tests {
         use crate::frontend::tui::tabs::{WorkflowStepView, WorkflowViewState};
         use crossterm::event::{MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
-        use std::collections::HashSet;
 
         let mut app = make_app();
 
@@ -2484,11 +2413,9 @@ mod tests {
                     agent: None,
                     model: None,
                     depends_on: vec![],
-                    stuck: false,
-                })
+                    })
                 .collect(),
             current_step: None,
-            auto_disabled: HashSet::new(),
         };
         *app.active_tab_mut().workflow_state.lock().unwrap() = Some(view);
 
@@ -2520,7 +2447,6 @@ mod tests {
         use crate::frontend::tui::tabs::{WorkflowStepView, WorkflowViewState};
         use crossterm::event::{MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
-        use std::collections::HashSet;
 
         let mut app = make_app();
         let view = WorkflowViewState {
@@ -2530,10 +2456,8 @@ mod tests {
                 agent: None,
                 model: None,
                 depends_on: vec![],
-                stuck: false,
             }],
             current_step: None,
-            auto_disabled: HashSet::new(),
         };
         *app.active_tab_mut().workflow_state.lock().unwrap() = Some(view);
 

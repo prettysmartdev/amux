@@ -86,9 +86,7 @@ When `--yolo` is used **without** `--workflow`, `--worktree` is **not** implied.
 
 ### 4. Auto-advances stuck workflow steps
 
-When a workflow step goes silent for 10 seconds, amux begins a **yolo countdown** instead of opening the manual [workflow control board](04-workflows.md#workflow-control-board). The countdown timer automatically advances to the next step when it expires. How the countdown is presented depends on whether the tab is active or in the background.
-
-**Auto-advance disabled per-step:** In the [workflow control board](04-workflows.md#disabling-auto-advance-for-a-step), you can press **[d]** to toggle auto-advance off for a specific step. When disabled, the yolo countdown does not fire — the step waits for your manual decision via the workflow control board.
+When a workflow step goes silent for 30 seconds, amux begins a **yolo countdown** instead of opening the manual [workflow control board](04-workflows.md#workflow-control-board). The countdown timer automatically advances to the next step when it expires. How the countdown is presented depends on whether the tab is active or in the background.
 
 **Active tab — yolo countdown dialog:**
 
@@ -105,7 +103,7 @@ When the stuck tab is currently active, the countdown dialog opens:
 ╰──────────────────────────────────────────╯
 ```
 
-**Active-tab suppression:** If you are actively pressing keys or scrolling on the tab, the stuck timer is held back and the dialog will not open. Both the container and the user must be idle for 10 seconds before the countdown starts. Similarly, if a step has auto-advance disabled via the **[d]** toggle, the countdown does not fire even if silent.
+**Active-tab suppression:** If you are actively pressing keys or scrolling on the tab, the stuck timer is held back and the dialog will not open. Both the container and the user must be idle for 30 seconds before the countdown starts.
 
 **Background tab — tab bar countdown:**
 
@@ -133,7 +131,7 @@ The countdown runs for **60 seconds**. When it expires:
 
 **Cancellation:**
 - Any PTY output during the countdown immediately dismisses the countdown — the agent is no longer stuck
-- Press **Esc** to dismiss the active-tab dialog manually; the same 10-second backoff applies before the dialog re-opens (the countdown timer continues running during the backoff, so auto-advance will typically fire before the dialog reopens)
+- Press **Esc** to dismiss the active-tab dialog manually; if the container goes silent again, a fresh 60-second countdown begins (there is no backoff between cancellation and the next countdown)
 
 ---
 

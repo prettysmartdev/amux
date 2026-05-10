@@ -1,6 +1,6 @@
 //! Per-tab state.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -51,9 +51,6 @@ impl ContainerWindowState {
 pub struct WorkflowViewState {
     pub steps: Vec<WorkflowStepView>,
     pub current_step: Option<String>,
-    /// Set of step names with auto-advance disabled (the user pressed `[d]`
-    /// in the WorkflowControlBoard while this step was current).
-    pub auto_disabled: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,9 +65,6 @@ pub struct WorkflowStepView {
     /// renderer (steps with the same sorted `depends_on` set sit in the
     /// same topological column).
     pub depends_on: Vec<String>,
-    /// True when this step has been flagged as stuck by the engine's
-    /// `report_step_stuck` callback.
-    pub stuck: bool,
 }
 
 /// Cross-thread shared workflow view state.
@@ -83,6 +77,11 @@ pub type SharedWorkflowViewState = Arc<Mutex<Option<WorkflowViewState>>>;
 /// while a yolo countdown is active; the renderer reads it to display the
 /// "Auto-advancing in Ns" non-modal overlay.
 pub type SharedYoloState = Arc<Mutex<Option<YoloState>>>;
+
+/// Shared flag: TUI event loop sets this to `true` when the user presses
+/// Esc during a yolo countdown. `yolo_countdown_tick` checks it and
+/// returns `Cancel` when set, then resets the flag.
+pub type SharedYoloCancelFlag = Arc<AtomicBool>;
 
 /// Shared flag set by the workflow frontend to signal the TUI event loop
 /// to reset the vt100 parser before the next step's PTY output arrives.
@@ -109,11 +108,11 @@ pub type SharedStdinTx = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec
 /// Shared resize sender slot, same pattern as `SharedStdinTx`.
 pub type SharedResizeTx = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u16, u16)>>>>;
 
-/// Shared control board sender. The engine creates the channel and publishes
-/// the sender via `set_control_board_sender`; the TUI event loop reads it
-/// to send mid-step WCB requests.
-pub type SharedControlBoardTx = Arc<
-    Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::engine::workflow::ControlBoardRequest>>>,
+/// Shared engine sender. The engine creates the channel and publishes
+/// the sender via `set_engine_sender`; the TUI event loop reads it
+/// to send Ctrl-W, StepStuck, and StepUnstuck requests.
+pub type SharedEngineTx = Arc<
+    Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::engine::workflow::EngineRequest>>>,
 >;
 
 #[derive(Debug, Clone)]
@@ -191,6 +190,9 @@ pub struct Tab {
     /// engine side; rendered as a non-modal overlay (avoids the dialog-spam
     /// that a per-tick `ask_dialog` would cause).
     pub yolo_state: SharedYoloState,
+    /// Shared cancel flag for yolo countdown. TUI event loop sets this on
+    /// Esc; `yolo_countdown_tick` reads + clears it.
+    pub yolo_cancel_flag: SharedYoloCancelFlag,
     pub status_log: SharedStatusLog,
     pub status_log_collapsed: bool,
     pub scroll_offset: usize,
@@ -198,17 +200,11 @@ pub struct Tab {
     pub last_strip_rect: Option<Rect>,
     pub mouse_selection: Option<TextSelection>,
     pub workflow_agent_fallbacks: HashMap<String, String>,
-    pub auto_workflow_disabled_steps: HashSet<String>,
     pub is_remote: bool,
     pub is_claws: bool,
     pub output_lines: Vec<String>,
     pub stuck: bool,
     pub yolo_mode: bool,
-    pub yolo_countdown: Option<u64>,
-    /// When the user dismissed the yolo countdown (Esc or Ctrl-W), records the
-    /// instant so `tick_all_tabs` won't re-open the overlay until the stuck
-    /// backoff expires.
-    pub yolo_dismissed_at: Option<Instant>,
     pub last_output_time: Option<Instant>,
     /// Last time the user touched this tab (key press, mouse). Used together
     /// with `last_output_time` to suppress stuck detection while the user is
@@ -239,7 +235,7 @@ pub struct Tab {
     /// Shared resize sender slot for workflow step transitions.
     pub resize_tx_shared: SharedResizeTx,
     /// Shared control board sender for mid-step WCB requests.
-    pub control_board_tx_shared: SharedControlBoardTx,
+    pub engine_tx_shared: SharedEngineTx,
     /// Shared active worktree path: set by the worktree-lifecycle frontend
     /// after a worktree is created/resumed, cleared after the workflow
     /// finalize step. Drives the "Using worktree: <path>" bottom-bar line.
@@ -260,6 +256,7 @@ impl Tab {
             container_inner_area: None,
             workflow_state: Arc::new(Mutex::new(None)),
             yolo_state: Arc::new(Mutex::new(None)),
+            yolo_cancel_flag: Arc::new(AtomicBool::new(false)),
             status_log: Arc::new(Mutex::new(Vec::new())),
             status_log_collapsed: false,
             scroll_offset: 0,
@@ -267,14 +264,11 @@ impl Tab {
             last_strip_rect: None,
             mouse_selection: None,
             workflow_agent_fallbacks: HashMap::new(),
-            auto_workflow_disabled_steps: HashSet::new(),
             is_remote: false,
             is_claws: false,
             output_lines: Vec::new(),
             stuck: false,
             yolo_mode: false,
-            yolo_countdown: None,
-            yolo_dismissed_at: None,
             last_output_time: None,
             last_user_activity_time: None,
             container_stdout_rx: None,
@@ -287,7 +281,7 @@ impl Tab {
             container_name_shared: Arc::new(Mutex::new(None)),
             stdin_tx_shared: Arc::new(Mutex::new(None)),
             resize_tx_shared: Arc::new(Mutex::new(None)),
-            control_board_tx_shared: Arc::new(Mutex::new(None)),
+            engine_tx_shared: Arc::new(Mutex::new(None)),
             active_worktree_path: Arc::new(Mutex::new(None)),
         }
     }
